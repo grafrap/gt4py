@@ -171,7 +171,7 @@ def apply_common_transforms(
     assert isinstance(ir, itir.Program)
 
     offset_provider_type = common.offset_provider_to_type(offset_provider)
-    print_ir = True
+    print_ir = False
     if print_ir:
         print("\n" + "=" * 60)
         print("=== FINAL GTIR HANDED TO GTFN BACKEND ===")
@@ -410,16 +410,16 @@ def apply_fieldview_transforms(
         print("=" * 60)
         print(ir)
         print("=" * 60 + "\n")
-    print(f"Unrolling reduce: {unroll_reduce}")
-    if unroll_reduce:
-        ir = _apply_unroll_reduce_pipeline(
-            ir,
-            offset_provider_type=offset_provider_type,
-            uids=uids,
-            use_offset_literal_index=False,  # Fieldview does not support non-literal offsets
-        )
+    # print(f"Unrolling reduce: {unroll_reduce}")
+    # if unroll_reduce:
+    #     ir = _apply_unroll_reduce_pipeline(
+    #         ir,
+    #         offset_provider_type=offset_provider_type,
+    #         uids=uids,
+    #         use_offset_literal_index=False,  # Fieldview does not support non-literal offsets
+    #     )
 
-    ir = infer_domain.infer_program(ir, offset_provider=offset_provider)
+    # ir = infer_domain.infer_program(ir, offset_provider=offset_provider)
 
     print_ir = True
     if print_ir:

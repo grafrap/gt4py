@@ -22,6 +22,7 @@ from atlas4py import (
 
 from gt4py import next as gtx
 from gt4py.next.iterator import atlas_utils
+from typing import Optional
 
 
 Vertex = gtx.Dimension("Vertex")
@@ -67,8 +68,178 @@ class nabla_setup:
         self.fs_nodes = fs_nodes
         self.edges_per_node = edges_per_node
 
+        # Optional injected data (used by from_connectivity)
+        self._edges2node_connectivity = None
+        self._nodes2edge_connectivity = None
+        self._sign_field = None
+        self._S_fields = None
+        self._vol_field = None
+        self._input_field = None
+        self._nodes_size = None
+        self._edges_size = None
+
+    @staticmethod
+    def _build_v2e_from_e2v(e2v: np.ndarray, nodes_size: int, edges_per_node: Optional[int] = None):
+        deg = np.zeros((nodes_size,), dtype=np.int32)
+        for e in range(e2v.shape[0]):
+            v0, v1 = int(e2v[e, 0]), int(e2v[e, 1])
+            deg[v0] += 1
+            deg[v1] += 1
+        max_deg = int(deg.max()) if edges_per_node is None else int(edges_per_node)
+
+        v2e = np.full((nodes_size, max_deg), -1, dtype=np.int32)
+        fill = np.zeros((nodes_size,), dtype=np.int32)
+        for e in range(e2v.shape[0]):
+            for v in (int(e2v[e, 0]), int(e2v[e, 1])):
+                k = fill[v]
+                if k >= max_deg:
+                    raise ValueError("edges_per_node too small for provided connectivity.")
+                v2e[v, k] = e
+                fill[v] += 1
+        return v2e, max_deg
+
+    @classmethod
+    def from_connectivity(
+        cls,
+        *,
+        allocator,
+        e2v: np.ndarray,
+        nodes_size: Optional[int] = None,
+        v2e: Optional[np.ndarray] = None,
+        edges_per_node: Optional[int] = None,
+        lonlat_deg: Optional[np.ndarray] = None,       # (n_vertex,2), optional
+        dual_normals: Optional[np.ndarray] = None,     # (n_edge,2), optional
+        dual_volumes: Optional[np.ndarray] = None,     # (n_vertex,), optional
+        input_values: Optional[np.ndarray] = None,     # (n_vertex,), optional
+    ):
+        """
+        Build a setup object directly from connectivity (+ optional geometry/fields).
+
+        If dual_normals / dual_volumes / lonlat are missing, synthetic fields are used.
+        """
+        obj = cls.__new__(cls)
+        obj.allocator = allocator
+        obj.mesh = None
+        obj.fs_edges = None
+        obj.fs_nodes = None
+
+        e2v = np.asarray(e2v, dtype=np.int32)
+        if e2v.ndim != 2 or e2v.shape[1] != 2:
+            raise ValueError("e2v must have shape (n_edge, 2).")
+
+        n_edge = int(e2v.shape[0])
+        n_vertex = int(nodes_size if nodes_size is not None else (e2v.max() + 1))
+
+        if v2e is None:
+            v2e, max_deg = cls._build_v2e_from_e2v(e2v, n_vertex, edges_per_node)
+        else:
+            v2e = np.asarray(v2e, dtype=np.int32)
+            if v2e.ndim != 2:
+                raise ValueError("v2e must have shape (n_vertex, max_deg).")
+            max_deg = int(v2e.shape[1])
+
+        obj.edges_per_node = max_deg
+        obj._nodes_size = n_vertex
+        obj._edges_size = n_edge
+
+        obj._edges2node_connectivity = gtx.as_connectivity(
+            domain={Edge: n_edge, E2VDim: 2},
+            codomain=Vertex,
+            data=e2v,
+            allocator=allocator,
+        )
+        obj._nodes2edge_connectivity = gtx.as_connectivity(
+            domain={Vertex: n_vertex, V2EDim: max_deg},
+            codomain=Edge,
+            data=v2e,
+            allocator=allocator,
+        )
+
+        # sign from e2v/v2e: +1 at first endpoint, -1 at second endpoint
+        sign = np.zeros((n_vertex, max_deg), dtype=np.float64)
+        for v in range(n_vertex):
+            for j in range(max_deg):
+                e = int(v2e[v, j])
+                if e < 0:
+                    continue
+                sign[v, j] = 1.0 #if int(e2v[e, 0]) == v else -1.0
+        obj._sign_field = gtx.as_field([Vertex, V2EDim], sign, allocator=allocator)
+
+        # S fields
+        if dual_normals is not None:
+            S = np.asarray(dual_normals, dtype=np.float64)
+            if S.shape != (n_edge, 2):
+                raise ValueError("dual_normals must have shape (n_edge, 2).")
+            rpi = 2.0 * math.asin(1.0)
+            radius = 6371.22e03
+            deg2rad = 2.0 * rpi / 360.0
+            S_MXX = S[:, 0] * radius * deg2rad
+            S_MYY = S[:, 1] * radius * deg2rad
+        else:
+            # synthetic fallback (for plumbing tests only)
+            S_MXX = np.ones((n_edge,), dtype=np.float64)
+            S_MYY = np.ones((n_edge,), dtype=np.float64)
+
+        obj._S_fields = (
+            gtx.as_field([Edge], S_MXX, allocator=allocator),
+            gtx.as_field([Edge], S_MYY, allocator=allocator),
+        )
+
+        # vol field
+        if dual_volumes is not None:
+            vol_atlas = np.asarray(dual_volumes, dtype=np.float64)
+            if vol_atlas.shape != (n_vertex,):
+                raise ValueError("dual_volumes must have shape (n_vertex,).")
+            rpi = 2.0 * math.asin(1.0)
+            radius = 6371.22e03
+            deg2rad = 2.0 * rpi / 360.0
+            vol = vol_atlas * (deg2rad**2) * (radius**2)
+        else:
+            vol = np.ones((n_vertex,), dtype=np.float64)
+
+        obj._vol_field = gtx.as_field([Vertex], vol, allocator=allocator)
+
+        # input field
+        if input_values is not None:
+            inp = np.asarray(input_values, dtype=np.float64)
+            if inp.shape != (n_vertex,):
+                raise ValueError("input_values must have shape (n_vertex,).")
+        elif lonlat_deg is not None:
+            # same analytic formula as original setup, but without Atlas functionspace fields
+            lonlat = np.asarray(lonlat_deg, dtype=np.float64)
+            if lonlat.shape != (n_vertex, 2):
+                raise ValueError("lonlat_deg must have shape (n_vertex, 2).")
+
+            rpi = 2.0 * math.asin(1.0)
+            radius = 6371.22e03
+            deg2rad = 2.0 * rpi / 360.0
+            zh0 = 2000.0
+            zrad = 3.0 * rpi / 4.0 * radius
+            zeta = rpi / 16.0 * radius
+            zlatc = 0.0
+            zlonc = 3.0 * rpi / 2.0
+
+            lon = lonlat[:, 0] * deg2rad
+            lat = lonlat[:, 1] * deg2rad
+            rcosa = np.cos(lat)
+            rsina = np.sin(lat)
+
+            inp = np.zeros((n_vertex,), dtype=np.float64)
+            for v in range(n_vertex):
+                zdist = math.sin(zlatc) * rsina[v] + math.cos(zlatc) * rcosa[v] * math.cos(lon[v] - zlonc)
+                zdist = radius * math.acos(zdist)
+                if zdist < zrad:
+                    inp[v] = 0.5 * zh0 * (1.0 + math.cos(rpi * zdist / zrad)) * (math.cos(rpi * zdist / zeta) ** 2)
+        else:
+            inp = np.zeros((n_vertex,), dtype=np.float64)
+
+        obj._input_field = gtx.as_field([Vertex], inp, allocator=allocator)
+        return obj
+
     @property
     def edges2node_connectivity(self) -> gtx.Connectivity:
+        if self._edges2node_connectivity is not None:
+            return self._edges2node_connectivity
         return gtx.as_connectivity(
             domain={Edge: self.edges_size, E2VDim: 2},
             codomain=Vertex,
@@ -78,6 +249,8 @@ class nabla_setup:
 
     @property
     def nodes2edge_connectivity(self) -> gtx.Connectivity:
+        if self._nodes2edge_connectivity is not None:
+            return self._nodes2edge_connectivity
         return gtx.as_connectivity(
             domain={Vertex: self.nodes_size, V2EDim: self.edges_per_node},
             codomain=Edge,
@@ -87,11 +260,12 @@ class nabla_setup:
 
     @property
     def nodes_size(self):
-        return self.fs_nodes.size
+        return self._nodes_size if self._nodes_size is not None else self.fs_nodes.size
 
     @property
     def edges_size(self):
-        return self.fs_edges.size
+        return self._edges_size if self._edges_size is not None else self.fs_edges.size
+
 
     @staticmethod
     def _is_pole_edge(e, edge_flags):
@@ -108,6 +282,8 @@ class nabla_setup:
 
     @property
     def sign_field(self) -> gtx.Field:
+        if self._sign_field is not None:
+            return self._sign_field
         node2edge_sign = np.zeros((self.nodes_size, self.edges_per_node))
         edge_flags = np.array(self.mesh.edges.flags())
 
@@ -127,6 +303,8 @@ class nabla_setup:
 
     @property
     def S_fields(self) -> tuple[gtx.Field, gtx.Field]:
+        if self._S_fields is not None:
+            return self._S_fields
         S = np.array(self.mesh.edges.field("dual_normals"), copy=False)
         S_MXX = np.zeros((self.edges_size))
         S_MYY = np.zeros((self.edges_size))
@@ -153,6 +331,8 @@ class nabla_setup:
 
     @property
     def vol_field(self) -> gtx.Field:
+        if self._vol_field is not None:
+            return self._vol_field
         rpi = 2.0 * math.asin(1.0)
         radius = 6371.22e03
         deg2rad = 2.0 * rpi / 360.0
@@ -171,6 +351,8 @@ class nabla_setup:
 
     @property
     def input_field(self) -> gtx.Field:
+        if self._input_field is not None:
+            return self._input_field
         klevel = 0
         MXX = 0
         MYY = 1

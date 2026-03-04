@@ -175,7 +175,8 @@ max_j = np.int32(nx + 1)
 max_i = np.int32(ny + 1)
 # raw_edges = np.linspace(0, nx*(ny+1) + (nx+1)*ny + nx*ny - 1, nx*(ny+1) + (nx+1)*ny + nx*ny, dtype=np.float64)
 raw_edges = np.ones((nx * (ny + 1) + (nx + 1) * ny + nx * ny,), dtype=np.float64)
-raw_vertices = np.linspace(0, (nx + 1) * (ny + 1) - 1, (nx + 1) * (ny + 1), dtype=np.float64)
+# raw_vertices = np.linspace(0, (nx + 1) * (ny + 1) - 1, (nx + 1) * (ny + 1), dtype=np.float64)
+raw_vertices = np.ones(((nx + 1) * (ny + 1),), dtype=np.float64)
 # Calculate start/end indices for each block
 # 1. East Edges: nx * (ny + 1)
 count_east = nx * (ny + 1)
@@ -228,7 +229,7 @@ pp = gtx.as_field([IDim, JDim, Kolor], pp_2d)
 S_M = gtx.as_field([IDim, JDim, Kolor], S_M_field)
 out = gtx.as_field([IDim, JDim, Kolor], np.zeros_like(S_M_field))
 print("pp: ", pp.asnumpy()[:, :, 0])
-print("S_M: ", S_M[:, :, 2].asnumpy())
+print("S_M: ", S_M[:, :, :].asnumpy())
 print("Output before computation: ", out)
 
 from gt4py.next.program_processors.runners.dace import run_dace_cpu
@@ -310,7 +311,10 @@ print("Output of pnabla_cartesian:\n", pnabla_out.asnumpy()[:, :, 0])
 # print(pass_manager.apply_common_transforms(ir, offset_provider={}))
 
 # TODO:
-# - write Hannes, gtfn /ohne concat_where
-# - look at unit test unroll_reduce what skip value does and 1d or 2d
-# - see where max/min get introduced and look at test
-# - test direct Color dimension addressing in icon4py (see e.g. nabla4) do Kolor[1] or similar
+# - let the stencil run now with unstructured and structured and check if both produce same result
+# - for this we need trafo on mesh and field
+# - End: write in either chekcs or boolean flag showing if can run with structured or not 
+# - look at what shape inference does and why we have [0, 5[ instead of [0, 3[ (maybe ask Hannes)
+# solution to this: these are only intermediate results. If I get an out of bounds error, then the issue could be here. However, if i get the correct result, it is only a performance issue,
+# to solve that issue, set two things in fuse_as_fieldop.py: 1) line 192: set opcount_preserving=False, 2) directly return True after or cpm.is_call_to(node, "if_"): return True (line ~213)
+# - continue with comparison by simple example from hand.

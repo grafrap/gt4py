@@ -1,0 +1,400 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.0.2, pluggy-1.6.0 -- /home/raphael/Documents/Studium/Msc_thesis/gt4py/.venv/bin/python
+cachedir: .pytest_cache
+hypothesis profile 'default'
+rootdir: /home/raphael/Documents/Studium/Msc_thesis/gt4py-cop
+configfile: pyproject.toml
+plugins: Faker-40.4.0, devtools-0.12.2, hypothesis-6.151.9
+collecting ... collected 10 items / 3 deselected / 7 selected
+
+tests/next_tests/integration_tests/multi_feature_tests/ffront_tests/test_fvm_nabla_comparison.py::test_structured_bridge_matches_unstructured[roundtrip.default] FAILED [ 14%]
+
+=================================== FAILURES ===================================
+________ test_structured_bridge_matches_unstructured[roundtrip.default] ________
+
+exec_alloc_descriptor = Backend(name='roundtrip', executor=Roundtrip(debug=None, use_embedded=True, dispatch_backend=None, transforms=functool...s(inner=(<function past_to_gtir at 0x7a40b89e0220>,))), hash_function=<function fingerprint_stage at 0x7a40c57de7a0>)))
+
+    @pytest.mark.requires_atlas
+    def test_structured_bridge_matches_unstructured(exec_alloc_descriptor):
+        mesh_nc = os.environ.get("GT4PY_TRANSLATOR_MESH") or "/home/raphael/Documents/Studium/Msc_thesis/grid-generator/parallelogram_grid.nc"
+        # print(f"Testing structured/unstructured pnabla comparison with mesh_nc={mesh_nc}")
+        if mesh_nc:
+            xr = pytest.importorskip("xarray")
+            with xr.open_dataset(mesh_nc) as ds:
+                # print(ds)
+                # print(ds.data_vars)
+                # print(ds.attrs)
+                # print(ds.variables)
+                e2v = _read_e2v(ds)
+                # print(f"Read e2v with shape {e2v.shape} from dataset")
+                v2e = _read_v2e(ds)
+                # print(f"Read v2e with shape {v2e.shape if v2e is not None else None} from dataset")
+                lonlat = _get_lonlat(ds)
+                # print(f"Read lonlat with shape {lonlat.shape if lonlat is not None else None} from dataset")
+                # print(f"Lonlat: {lonlat}")
+                dual_volumes = _first_present(
+                    ds,
+                    ["dual_volumes", "dual_area", "node_volume", "vertex_area"],
+                    required=False,
+                )
+                dual_normals = _get_dual_normals(ds)
+    
+                # try regular parallelogram mapping first, fallback to ragged
+                try:
+                    m = build_index_map_from_ds_regular(ds, e2v)
+                except ValueError:
+                    m = build_index_map_for_ragged_lonlat_e2v(lonlat, e2v)
+        else:
+            setup = nabla_setup(allocator=exec_alloc_descriptor.allocator)
+    
+            e2v = atlas_utils.AtlasTable(
+                setup.mesh.edges.node_connectivity
+            ).asnumpy()
+            v2e = atlas_utils.AtlasTable(
+                setup.mesh.nodes.edge_connectivity
+            ).asnumpy()
+            lonlat = None
+            dual_volumes = None
+            dual_normals = None
+    
+        setup = nabla_setup.from_connectivity(
+            allocator=exec_alloc_descriptor.allocator,
+            e2v=e2v,
+            v2e=v2e,
+            lonlat_deg=lonlat,
+            dual_normals=dual_normals,
+            dual_volumes=dual_volumes,
+        )
+        # Fill all fields with ones for debugging
+        setup.input_field.asnumpy()[:] = 1.0
+        for S in setup.S_fields:
+            S.asnumpy()[:] = 1.0
+        setup.sign_field.asnumpy()[:] = 1.0
+        setup.vol_field.asnumpy()[:] = 1.0
+    
+        # Build map
+        if setup.mesh is not None:
+            # atlas‑generated mesh case
+            m = build_index_map_from_atlas_setup(setup)
+        else:
+            # file‑based mesh: use the lon/lat+e2v arrays we already have
+            if lonlat is None:
+                raise RuntimeError("need lonlat info to build structured index map")
+            m = build_index_map_from_lonlat_e2v(lonlat, e2v)
+    
+        # Unstructured reference
+        ref0 = gtx.zeros({setup.input_field.domain.dims[0]: setup.nodes_size}, allocator=exec_alloc_descriptor.allocator)
+        ref1 = gtx.zeros({setup.input_field.domain.dims[0]: setup.nodes_size}, allocator=exec_alloc_descriptor.allocator)
+        # print(f"backend: ", exec_alloc_descriptor)
+        print(f"input field: ", setup.input_field)
+        pnabla.with_backend(None if exec_alloc_descriptor.executor is None else exec_alloc_descriptor)(
+            setup.input_field,
+            setup.S_fields,
+            setup.sign_field,
+            setup.vol_field,
+            out=(ref0, ref1),
+            offset_provider={"E2V": setup.edges2node_connectivity, "V2E": setup.nodes2edge_connectivity},
+        )
+    
+        # 3) Build structured sign from unstructured sign + V2E
+        sign_np = setup.sign_field.asnumpy()
+        if setup.mesh is not None:
+            v2e_np = atlas_utils.AtlasTable(setup.mesh.nodes.edge_connectivity).asnumpy()
+        else:
+            v2e_np = setup.nodes2edge_connectivity.asnumpy()
+        sign_struct = build_structured_sign_from_unstructured(sign_np, v2e_np, m)
+    
+        print("input field:", setup.input_field.asnumpy())
+        # 4) Run structured kernel through translator
+        out0_u, out1_u = run_structured_pnabla_from_unstructured(
+            pp_vertex=setup.input_field.asnumpy(),
+            S_M_edges_3=(setup.S_fields[0].asnumpy(), setup.S_fields[1].asnumpy()),
+            sign_struct=sign_struct,
+            vol_vertex=setup.vol_field.asnumpy(),
+            m=m,
+            backend=None if exec_alloc_descriptor.executor is None else exec_alloc_descriptor,
+        )
+        for v in range(setup.nodes_size):
+    
+            # --- Unstructured approach ---
+            # Get the edges connected to vertex v via V2E
+            v2e = setup.nodes2edge_connectivity.asnumpy()  # shape: (n_vertex, max_deg)
+            connected_edges = v2e[v]
+            # Filter out invalid entries (usually -1)
+            connected_edges = connected_edges[connected_edges >= 0]
+            print(f"Unstructured: Vertex {v} is connected to edges {connected_edges}")
+    
+            # For each connected edge, print its endpoints and value
+            e2v = setup.edges2node_connectivity.asnumpy()  # shape: (n_edge, 2)
+            for e in connected_edges:
+                verts = e2v[e]
+                print(f"  Edge {e}: connects vertices {verts}, value = {setup.S_fields[0].asnumpy()[e]}")
+    
+            # --- Structured approach ---
+            # Get (i, j) for this vertex
+            print_structured_vertex_edges(v, m, setup.S_fields[0].asnumpy())
+            # i, j = m.vertex_to_ij[v]
+            # print(f"Structured: Vertex {v} maps to (i={i}, j={j})")
+    
+            # # For each Kolor (edge orientation), print the corresponding edge index and value
+            # for k in range(3):  # assuming 3 edge orientations
+            #     edge_idx = m.ijk_to_edge[i, j, k]
+            #     if edge_idx >= 0:
+            #         print(f"  Kolor {k}: edge_idx={edge_idx}, value={setup.S_fields[0].asnumpy()[edge_idx]}")
+            #     else:
+            #         print(f"  Kolor {k}: no edge (padding or boundary)")
+    
+        print("Structured output:", out0_u, out1_u)
+        print("Unstructured reference:", ref0.asnumpy(), ref1.asnumpy())
+>       np.testing.assert_allclose(out0_u, ref0.asnumpy(), rtol=1e-10, atol=1e-10)
+
+tests/next_tests/integration_tests/multi_feature_tests/ffront_tests/test_fvm_nabla_comparison.py:276: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+args = (<function assert_allclose.<locals>.compare at 0x7a40b49e3e20>, array([2., 3., 1., 3., 4., 2., 1., 2., 0.]), array([2., 4., 3., 4., 6., 4., 3., 4., 2.]))
+kwds = {'equal_nan': True, 'err_msg': '', 'header': 'Not equal to tolerance rtol=1e-10, atol=1e-10', 'verbose': True}
+
+    @wraps(func)
+    def inner(*args, **kwds):
+        with self._recreate_cm():
+>           return func(*args, **kwds)
+                   ^^^^^^^^^^^^^^^^^^^
+E           AssertionError: 
+E           Not equal to tolerance rtol=1e-10, atol=1e-10
+E           
+E           Mismatched elements: 8 / 9 (88.9%)
+E           Max absolute difference: 2.
+E           Max relative difference: 1.
+E            x: array([2., 3., 1., 3., 4., 2., 1., 2., 0.])
+E            y: array([2., 4., 3., 4., 6., 4., 3., 4., 2.])
+
+/usr/lib/python3.12/contextlib.py:81: AssertionError
+----------------------------- Captured stdout call -----------------------------
+Edge 0: vertices 0-1 -> (i0,j0)=(0,0), (i1,j1)=(0,1)
+ijk_to_edge:  0  at (i,j,k)= (0, 0, 0)
+Edge 1: vertices 1-2 -> (i0,j0)=(0,1), (i1,j1)=(0,2)
+ijk_to_edge:  1  at (i,j,k)= (0, 1, 0)
+Edge 2: vertices 3-4 -> (i0,j0)=(1,0), (i1,j1)=(1,1)
+ijk_to_edge:  2  at (i,j,k)= (1, 0, 0)
+Edge 3: vertices 4-5 -> (i0,j0)=(1,1), (i1,j1)=(1,2)
+ijk_to_edge:  3  at (i,j,k)= (1, 1, 0)
+Edge 4: vertices 6-7 -> (i0,j0)=(2,0), (i1,j1)=(2,1)
+ijk_to_edge:  4  at (i,j,k)= (2, 0, 0)
+Edge 5: vertices 7-8 -> (i0,j0)=(2,1), (i1,j1)=(2,2)
+ijk_to_edge:  5  at (i,j,k)= (2, 1, 0)
+Edge 6: vertices 0-3 -> (i0,j0)=(0,0), (i1,j1)=(1,0)
+ijk_to_edge:  6  at (i,j,k)= (0, 0, 1)
+Edge 7: vertices 1-4 -> (i0,j0)=(0,1), (i1,j1)=(1,1)
+ijk_to_edge:  7  at (i,j,k)= (0, 1, 1)
+Edge 8: vertices 2-5 -> (i0,j0)=(0,2), (i1,j1)=(1,2)
+ijk_to_edge:  8  at (i,j,k)= (0, 2, 1)
+Edge 9: vertices 3-6 -> (i0,j0)=(1,0), (i1,j1)=(2,0)
+ijk_to_edge:  9  at (i,j,k)= (1, 0, 1)
+Edge 10: vertices 4-7 -> (i0,j0)=(1,1), (i1,j1)=(2,1)
+ijk_to_edge:  10  at (i,j,k)= (1, 1, 1)
+Edge 11: vertices 5-8 -> (i0,j0)=(1,2), (i1,j1)=(2,2)
+ijk_to_edge:  11  at (i,j,k)= (1, 2, 1)
+Edge 12: vertices 1-3 -> (i0,j0)=(0,1), (i1,j1)=(1,0)
+ijk_to_edge:  12  at (i,j,k)= (0, 0, 2)
+Edge 13: vertices 2-4 -> (i0,j0)=(0,2), (i1,j1)=(1,1)
+ijk_to_edge:  13  at (i,j,k)= (0, 1, 2)
+Edge 14: vertices 4-6 -> (i0,j0)=(1,1), (i1,j1)=(2,0)
+ijk_to_edge:  14  at (i,j,k)= (1, 0, 2)
+Edge 15: vertices 5-7 -> (i0,j0)=(1,2), (i1,j1)=(2,1)
+ijk_to_edge:  15  at (i,j,k)= (1, 1, 2)
+Edge 0: vertices 0-1 -> (i0,j0)=(0,0), (i1,j1)=(0,1)
+ijk_to_edge:  0  at (i,j,k)= (0, 0, 0)
+Edge 1: vertices 1-2 -> (i0,j0)=(0,1), (i1,j1)=(0,2)
+ijk_to_edge:  1  at (i,j,k)= (0, 1, 0)
+Edge 2: vertices 3-4 -> (i0,j0)=(1,0), (i1,j1)=(1,1)
+ijk_to_edge:  2  at (i,j,k)= (1, 0, 0)
+Edge 3: vertices 4-5 -> (i0,j0)=(1,1), (i1,j1)=(1,2)
+ijk_to_edge:  3  at (i,j,k)= (1, 1, 0)
+Edge 4: vertices 6-7 -> (i0,j0)=(2,0), (i1,j1)=(2,1)
+ijk_to_edge:  4  at (i,j,k)= (2, 0, 0)
+Edge 5: vertices 7-8 -> (i0,j0)=(2,1), (i1,j1)=(2,2)
+ijk_to_edge:  5  at (i,j,k)= (2, 1, 0)
+Edge 6: vertices 0-3 -> (i0,j0)=(0,0), (i1,j1)=(1,0)
+ijk_to_edge:  6  at (i,j,k)= (0, 0, 1)
+Edge 7: vertices 1-4 -> (i0,j0)=(0,1), (i1,j1)=(1,1)
+ijk_to_edge:  7  at (i,j,k)= (0, 1, 1)
+Edge 8: vertices 2-5 -> (i0,j0)=(0,2), (i1,j1)=(1,2)
+ijk_to_edge:  8  at (i,j,k)= (0, 2, 1)
+Edge 9: vertices 3-6 -> (i0,j0)=(1,0), (i1,j1)=(2,0)
+ijk_to_edge:  9  at (i,j,k)= (1, 0, 1)
+Edge 10: vertices 4-7 -> (i0,j0)=(1,1), (i1,j1)=(2,1)
+ijk_to_edge:  10  at (i,j,k)= (1, 1, 1)
+Edge 11: vertices 5-8 -> (i0,j0)=(1,2), (i1,j1)=(2,2)
+ijk_to_edge:  11  at (i,j,k)= (1, 2, 1)
+Edge 12: vertices 1-3 -> (i0,j0)=(0,1), (i1,j1)=(1,0)
+ijk_to_edge:  12  at (i,j,k)= (0, 0, 2)
+Edge 13: vertices 2-4 -> (i0,j0)=(0,2), (i1,j1)=(1,1)
+ijk_to_edge:  13  at (i,j,k)= (0, 1, 2)
+Edge 14: vertices 4-6 -> (i0,j0)=(1,1), (i1,j1)=(2,0)
+ijk_to_edge:  14  at (i,j,k)= (1, 0, 2)
+Edge 15: vertices 5-7 -> (i0,j0)=(1,2), (i1,j1)=(2,1)
+ijk_to_edge:  15  at (i,j,k)= (1, 1, 2)
+input field:  ⟨Domain(Vertex[horizontal]=(0:9)) → DType(scalar_type=<class 'numpy.float64'>, tensor_shape=())⟩
+input field: [1. 1. 1. 1. 1. 1. 1. 1. 1.]
+m.ijk_to_edge:  [[[ 0  6 12]
+  [ 1  7 13]
+  [-1  8 -1]]
+
+ [[ 2  9 14]
+  [ 3 10 15]
+  [-1 11 -1]]
+
+ [[ 4 -1 -1]
+  [ 5 -1 -1]
+  [-1 -1 -1]]]
+m.ijk_to_edge:  [[[ 0  6 12]
+  [ 1  7 13]
+  [-1  8 -1]]
+
+ [[ 2  9 14]
+  [ 3 10 15]
+  [-1 11 -1]]
+
+ [[ 4 -1 -1]
+  [ 5 -1 -1]
+  [-1 -1 -1]]]
+Structured pp: [[1. 1. 1.]
+ [1. 1. 1.]
+ [1. 1. 1.]]
+Structured S_M0: [[[1. 1. 1.]
+  [1. 1. 1.]
+  [0. 1. 0.]]
+
+ [[1. 1. 1.]
+  [1. 1. 1.]
+  [0. 1. 0.]]
+
+ [[1. 0. 0.]
+  [1. 0. 0.]
+  [0. 0. 0.]]]
+Structured S_M1: [[[1. 1. 1.]
+  [1. 1. 1.]
+  [0. 1. 0.]]
+
+ [[1. 1. 1.]
+  [1. 1. 1.]
+  [0. 1. 0.]]
+
+ [[1. 0. 0.]
+  [1. 0. 0.]
+  [0. 0. 0.]]]
+Structured sign: [[[1. 1. 0.]
+  [1. 1. 0.]
+  [0. 1. 0.]]
+
+ [[1. 1. 0.]
+  [1. 1. 0.]
+  [0. 1. 0.]]
+
+ [[1. 0. 0.]
+  [1. 0. 0.]
+  [0. 0. 0.]]]
+Structured vol: [[1. 1. 1.]
+ [1. 1. 1.]
+ [1. 1. 1.]]
+Unstructured output: [2. 3. 1. 3. 4. 2. 1. 2. 0.] [2. 3. 1. 3. 4. 2. 1. 2. 0.]
+Unstructured: Vertex 0 is connected to edges [6 0]
+  Edge 6: connects vertices [0 3], value = 1.0
+  Edge 0: connects vertices [0 1], value = 1.0
+Structured: Vertex 0 maps to (i=0, j=0)
+  Kolor 0 (east): edge_idx=0, value=1.0, connects (0,0) <-> (0,1)
+  Kolor 1 (NE): edge_idx=6, value=1.0, connects (0,0) <-> (1,0)
+Unstructured: Vertex 1 is connected to edges [ 7  0  1 12]
+  Edge 7: connects vertices [1 4], value = 1.0
+  Edge 0: connects vertices [0 1], value = 1.0
+  Edge 1: connects vertices [1 2], value = 1.0
+  Edge 12: connects vertices [1 3], value = 1.0
+Structured: Vertex 1 maps to (i=0, j=1)
+  Kolor 0 (east): edge_idx=1, value=1.0, connects (0,1) <-> (0,2)
+  Kolor 0 (west): edge_idx=0, value=1.0, connects (0,0) <-> (0,1)
+  Kolor 1 (NE): edge_idx=7, value=1.0, connects (0,1) <-> (1,1)
+  Kolor 2 (NW): edge_idx=12, value=1.0, connects (0,1) <-> (1,0)
+Unstructured: Vertex 2 is connected to edges [ 8  1 13]
+  Edge 8: connects vertices [2 5], value = 1.0
+  Edge 1: connects vertices [1 2], value = 1.0
+  Edge 13: connects vertices [2 4], value = 1.0
+Structured: Vertex 2 maps to (i=0, j=2)
+  Kolor 0 (west): edge_idx=1, value=1.0, connects (0,1) <-> (0,2)
+  Kolor 1 (NE): edge_idx=8, value=1.0, connects (0,2) <-> (1,2)
+  Kolor 2 (NW): edge_idx=13, value=1.0, connects (0,2) <-> (1,1)
+Unstructured: Vertex 3 is connected to edges [ 6  9  2 12]
+  Edge 6: connects vertices [0 3], value = 1.0
+  Edge 9: connects vertices [3 6], value = 1.0
+  Edge 2: connects vertices [3 4], value = 1.0
+  Edge 12: connects vertices [1 3], value = 1.0
+Structured: Vertex 3 maps to (i=1, j=0)
+  Kolor 0 (east): edge_idx=2, value=1.0, connects (1,0) <-> (1,1)
+  Kolor 1 (NE): edge_idx=9, value=1.0, connects (1,0) <-> (2,0)
+  Kolor 1 (SW): edge_idx=6, value=1.0, connects (0,0) <-> (1,0)
+  Kolor 2 (SE): edge_idx=12, value=1.0, connects (0,1) <-> (1,0)
+Unstructured: Vertex 4 is connected to edges [ 7 10  2  3 14 13]
+  Edge 7: connects vertices [1 4], value = 1.0
+  Edge 10: connects vertices [4 7], value = 1.0
+  Edge 2: connects vertices [3 4], value = 1.0
+  Edge 3: connects vertices [4 5], value = 1.0
+  Edge 14: connects vertices [4 6], value = 1.0
+  Edge 13: connects vertices [2 4], value = 1.0
+Structured: Vertex 4 maps to (i=1, j=1)
+  Kolor 0 (east): edge_idx=3, value=1.0, connects (1,1) <-> (1,2)
+  Kolor 0 (west): edge_idx=2, value=1.0, connects (1,0) <-> (1,1)
+  Kolor 1 (NE): edge_idx=10, value=1.0, connects (1,1) <-> (2,1)
+  Kolor 1 (SW): edge_idx=7, value=1.0, connects (0,1) <-> (1,1)
+  Kolor 2 (NW): edge_idx=14, value=1.0, connects (1,1) <-> (2,0)
+  Kolor 2 (SE): edge_idx=13, value=1.0, connects (0,2) <-> (1,1)
+Unstructured: Vertex 5 is connected to edges [ 8 11  3 15]
+  Edge 8: connects vertices [2 5], value = 1.0
+  Edge 11: connects vertices [5 8], value = 1.0
+  Edge 3: connects vertices [4 5], value = 1.0
+  Edge 15: connects vertices [5 7], value = 1.0
+Structured: Vertex 5 maps to (i=1, j=2)
+  Kolor 0 (west): edge_idx=3, value=1.0, connects (1,1) <-> (1,2)
+  Kolor 1 (NE): edge_idx=11, value=1.0, connects (1,2) <-> (2,2)
+  Kolor 1 (SW): edge_idx=8, value=1.0, connects (0,2) <-> (1,2)
+  Kolor 2 (NW): edge_idx=15, value=1.0, connects (1,2) <-> (2,1)
+Unstructured: Vertex 6 is connected to edges [ 9  4 14]
+  Edge 9: connects vertices [3 6], value = 1.0
+  Edge 4: connects vertices [6 7], value = 1.0
+  Edge 14: connects vertices [4 6], value = 1.0
+Structured: Vertex 6 maps to (i=2, j=0)
+  Kolor 0 (east): edge_idx=4, value=1.0, connects (2,0) <-> (2,1)
+  Kolor 1 (SW): edge_idx=9, value=1.0, connects (1,0) <-> (2,0)
+  Kolor 2 (SE): edge_idx=14, value=1.0, connects (1,1) <-> (2,0)
+Unstructured: Vertex 7 is connected to edges [10  4  5 15]
+  Edge 10: connects vertices [4 7], value = 1.0
+  Edge 4: connects vertices [6 7], value = 1.0
+  Edge 5: connects vertices [7 8], value = 1.0
+  Edge 15: connects vertices [5 7], value = 1.0
+Structured: Vertex 7 maps to (i=2, j=1)
+  Kolor 0 (east): edge_idx=5, value=1.0, connects (2,1) <-> (2,2)
+  Kolor 0 (west): edge_idx=4, value=1.0, connects (2,0) <-> (2,1)
+  Kolor 1 (SW): edge_idx=10, value=1.0, connects (1,1) <-> (2,1)
+  Kolor 2 (SE): edge_idx=15, value=1.0, connects (1,2) <-> (2,1)
+Unstructured: Vertex 8 is connected to edges [11  5]
+  Edge 11: connects vertices [5 8], value = 1.0
+  Edge 5: connects vertices [7 8], value = 1.0
+Structured: Vertex 8 maps to (i=2, j=2)
+  Kolor 0 (west): edge_idx=5, value=1.0, connects (2,1) <-> (2,2)
+  Kolor 1 (SW): edge_idx=11, value=1.0, connects (1,2) <-> (2,2)
+Structured output: [2. 3. 1. 3. 4. 2. 1. 2. 0.] [2. 3. 1. 3. 4. 2. 1. 2. 0.]
+Unstructured reference: [2. 4. 3. 4. 6. 4. 3. 4. 2.] [2. 4. 3. 4. 6. 4. 3. 4. 2.]
+=============================== warnings summary ===============================
+tests/next_tests/integration_tests/multi_feature_tests/ffront_tests/test_fvm_nabla_comparison.py::test_structured_bridge_matches_unstructured[roundtrip.default]
+  <frozen importlib._bootstrap>:488: RuntimeWarning: numpy.ndarray size changed, may indicate binary incompatibility. Expected 16 from C header, got 96 from PyObject
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/next_tests/integration_tests/multi_feature_tests/ffront_tests/test_fvm_nabla_comparison.py::test_structured_bridge_matches_unstructured[roundtrip.default] - AssertionError: 
+Not equal to tolerance rtol=1e-10, atol=1e-10
+
+Mismatched elements: 8 / 9 (88.9%)
+Max absolute difference: 2.
+Max relative difference: 1.
+ x: array([2., 3., 1., 3., 4., 2., 1., 2., 0.])
+ y: array([2., 4., 3., 4., 6., 4., 3., 4., 2.])
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!
+================= 1 failed, 3 deselected, 1 warning in 55.27s ==================
