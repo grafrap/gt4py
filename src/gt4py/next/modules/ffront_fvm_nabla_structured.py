@@ -169,3 +169,16 @@ def pnabla_cartesian(
         out=out,
         domain={IDim: (0, domain_max_i), JDim: (0, domain_max_j), Kolor: (0, domain_max_kolor)},
     )
+
+
+# Observations from this structured stencil vs the unstructured version of pnabla and zavgS:
+# - If i need E2V, i need to use concat_where to handle all three edge types. Easiest is to just split it 
+#   into three different field operators, one for each edge type.
+# - i need forward and back shifts for V2E accesses, so that i can compute the contribution of a vertex field 
+#   (has only Kolor 0) to all edge types.
+# - When a field is [Globaldim, Localdim], e.g. [Vertex, V2EDim], i need to use two separate fields to 
+#   represent this field, because all edges contribute from two edges to the same vertex, i.e. 6 contributions 
+#   for in total, while Kolor is only 3.
+# - E2V accesses must be written out explicitly with IDim and JDim, but produce the same result in the end.
+# - neighbor_sum goes over six edges for each vertex, hence 2 per Kolor, that's why we add every edge in the same
+#   Kolor contribution together before doing the neighbor_sum, which then just goes over the three Kolors.
