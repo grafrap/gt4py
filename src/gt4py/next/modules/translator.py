@@ -130,7 +130,7 @@ def pack_edge_field_to_structured(edge_values: np.ndarray, m: IndexMap) -> np.nd
                 e = m.ijk_to_edge[i, j, k]
                 if e >= 0:
                     out[i, j, k] = edge_values[e]
-    print("m.ijk_to_edge: ", m.ijk_to_edge)
+    # print("m.ijk_to_edge: ", m.ijk_to_edge)
     return out
 
 def unpack_vertex_field_to_unstructured(struct_values: np.ndarray, m: IndexMap) -> np.ndarray:
@@ -143,10 +143,10 @@ def unpack_vertex_field_to_unstructured(struct_values: np.ndarray, m: IndexMap) 
 
 
 def run_structured_pnabla_from_unstructured(
-    pp_vertex: np.ndarray,         # (n_vertex,)
-    S_M_edges_3: tuple[np.ndarray, np.ndarray],  # each (n_edge,)
-    sign_struct: np.ndarray,       # (ni, nj, 3)
-    vol_vertex: np.ndarray,        # (n_vertex,)
+    pp_vertex: np.ndarray,
+    S_M_edges_3: tuple[np.ndarray, np.ndarray],
+    sign_struct: tuple[np.ndarray, np.ndarray], # Now a tuple of two arrays
+    vol_vertex: np.ndarray,
     m: IndexMap,
     backend,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -154,17 +154,20 @@ def run_structured_pnabla_from_unstructured(
     sm0_s = pack_edge_field_to_structured(S_M_edges_3[0], m)
     sm1_s = pack_edge_field_to_structured(S_M_edges_3[1], m)
     vol_s = pack_vertex_field_to_structured(vol_vertex, m)
+    
 
-    print("Structured pp:", pp_s[...,0])
-    print("Structured S_M0:", sm0_s)
-    print("Structured S_M1:", sm1_s)
-    print("Structured sign:", sign_struct)
-    print("Structured vol:", vol_s[...,0])
+    # print("Structured pp:", pp_s[...,0])
+    # print("Structured S_M0:", sm0_s)
+    # print("Structured S_M1:", sm1_s)
+    # print("Structured sign:", sign_struct)
+    # print("Structured vol:", vol_s[...,0])
+    sign_fwd_struct, sign_bwd_struct = sign_struct
 
     pp_f = gtx.as_field([IDim, JDim, Kolor], pp_s)
     sm0_f = gtx.as_field([IDim, JDim, Kolor], sm0_s)
     sm1_f = gtx.as_field([IDim, JDim, Kolor], sm1_s)
-    sign_f = gtx.as_field([IDim, JDim, Kolor], sign_struct)
+    sign_fwd_f = gtx.as_field([IDim, JDim, Kolor], sign_fwd_struct)
+    sign_bwd_f = gtx.as_field([IDim, JDim, Kolor], sign_bwd_struct)
     vol_f = gtx.as_field([IDim, JDim, Kolor], vol_s)
 
     out0 = gtx.as_field([IDim, JDim, Kolor], np.zeros_like(pp_s))
@@ -182,12 +185,11 @@ def run_structured_pnabla_from_unstructured(
         },
     )
 
-    prog(pp=pp_f, S_M=sm0_f, sign=sign_f, vol=vol_f, out=out0, offset_provider={})
-    prog(pp=pp_f, S_M=sm1_f, sign=sign_f, vol=vol_f, out=out1, offset_provider={})
+    prog(pp=pp_f, S_M=sm0_f, sign_fwd=sign_fwd_f, sign_bwd=sign_bwd_f, vol=vol_f, out=out0, offset_provider={})
+    prog(pp=pp_f, S_M=sm1_f, sign_fwd=sign_fwd_f, sign_bwd=sign_bwd_f, vol=vol_f, out=out1, offset_provider={})
 
     u0 = unpack_vertex_field_to_unstructured(out0.asnumpy(), m)
     u1 = unpack_vertex_field_to_unstructured(out1.asnumpy(), m)
-    print("Unstructured output:", u0, u1)
     return u0, u1
 
 from typing import Any
@@ -279,7 +281,7 @@ def build_index_map_from_lonlat_e2v(
         v0, v1 = int(e2v_np[e, 0]), int(e2v_np[e, 1])
         i0, j0 = int(vertex_to_ij[v0, 0]), int(vertex_to_ij[v0, 1])
         i1, j1 = int(vertex_to_ij[v1, 0]), int(vertex_to_ij[v1, 1])
-        print(f"Edge {e}: vertices {v0}-{v1} -> (i0,j0)=({i0},{j0}), (i1,j1)=({i1},{j1})")
+        # print(f"Edge {e}: vertices {v0}-{v1} -> (i0,j0)=({i0},{j0}), (i1,j1)=({i1},{j1})")
         if i0 < 0 or i1 < 0:
             continue
         di = abs(i1 - i0)
@@ -303,7 +305,7 @@ def build_index_map_from_lonlat_e2v(
         edge_to_ijk[e] = (i, j, k)
         if ijk_to_edge[i, j, k] == -1:
             ijk_to_edge[i, j, k] = e
-        print(f"ijk_to_edge: ", ijk_to_edge[i, j, k], " at (i,j,k)=", (i, j, k))
+        # print(f"ijk_to_edge: ", ijk_to_edge[i, j, k], " at (i,j,k)=", (i, j, k))
 
     return IndexMap(
         vertex_to_ij=vertex_to_ij,
@@ -360,15 +362,18 @@ def build_index_map_from_atlas_setup(setup: Any, decimals: int = 10) -> IndexMap
 
 
 def build_structured_sign_from_unstructured(
-    sign_vertex_v2e: np.ndarray,  # [n_vertex, edges_per_vertex]
-    nodes2edge: np.ndarray,        # [n_vertex, edges_per_vertex], -1 padded
+    sign_vertex_v2e: np.ndarray,
+    nodes2edge: np.ndarray,
     m: IndexMap,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     ni, nj = m.ij_to_vertex.shape
-    out = np.zeros((ni, nj, 3), dtype=sign_vertex_v2e.dtype)
+    sign_fwd = np.zeros((ni, nj, 3), dtype=sign_vertex_v2e.dtype)
+    sign_bwd = np.zeros((ni, nj, 3), dtype=sign_vertex_v2e.dtype)
 
     for v in range(m.vertex_to_ij.shape[0]):
         i, j = m.vertex_to_ij[v]
+        if i < 0 or j < 0:
+            continue
         for l in range(nodes2edge.shape[1]):
             e = int(nodes2edge[v, l])
             if e < 0:
@@ -376,8 +381,24 @@ def build_structured_sign_from_unstructured(
             ie, je, ke = m.edge_to_ijk[e]
             if ke < 0:
                 continue
-            # assign sign for the edge anchored at this node
-            if ie == i and je == j:
-                out[i, j, ke] = sign_vertex_v2e[v, l]
+            
+            sign_val = sign_vertex_v2e[v, l]
+            
+            # Map based on whether it is an outgoing (fwd) or incoming (bwd) edge
+            if ke == 0:
+                if ie == i and je == j:
+                    sign_fwd[i, j, 0] = sign_val
+                elif ie == i and je == j - 1:
+                    sign_bwd[i, j, 0] = sign_val
+            elif ke == 1:
+                if ie == i and je == j:
+                    sign_fwd[i, j, 1] = sign_val
+                elif ie == i - 1 and je == j:
+                    sign_bwd[i, j, 1] = sign_val
+            elif ke == 2:
+                if ie == i and je == j - 1:
+                    sign_fwd[i, j, 2] = sign_val
+                elif ie == i - 1 and je == j:
+                    sign_bwd[i, j, 2] = sign_val
 
-    return out
+    return sign_fwd, sign_bwd

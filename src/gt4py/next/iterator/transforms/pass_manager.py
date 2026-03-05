@@ -171,7 +171,7 @@ def apply_common_transforms(
     assert isinstance(ir, itir.Program)
 
     offset_provider_type = common.offset_provider_to_type(offset_provider)
-    print_ir = False
+    print_ir = True
     if print_ir:
         print("\n" + "=" * 60)
         print("=== FINAL GTIR HANDED TO GTFN BACKEND ===")

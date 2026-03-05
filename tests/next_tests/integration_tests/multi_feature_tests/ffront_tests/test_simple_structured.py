@@ -115,27 +115,45 @@ def zavg(
 def compute_pnabla_cartesian(
     pp: gtx.Field[[IDim, JDim, Kolor], float],
     S_M: gtx.Field[[IDim, JDim, Kolor], float],
-    sign: gtx.Field[[IDim, JDim, Kolor], float],
+    sign_fwd: gtx.Field[[IDim, JDim, Kolor], float],
+    sign_bwd: gtx.Field[[IDim, JDim, Kolor], float],
     vol: gtx.Field[[IDim, JDim, Kolor], float],
     domain_max_i: gtx.int32,
     domain_max_j: gtx.int32,
 ) -> gtx.Field[[IDim, JDim, Kolor], float]:
     zavgS = compute_zavgS_cartesian(pp, S_M, domain_max_i, domain_max_j)
 
-    pnabla_M = concat_where(
-        Kolor == 0,
-        concat_where(JDim == 0, zavgS, zavgS + zavgS(JDim - 1)),
+    # Kolor 0: Forward edge is (i, j, 0) [East], Backward is (i, j-1, 0) [West]
+    term0 = concat_where(
+        JDim == 0,
+        zavgS * sign_fwd,
+        zavgS * sign_fwd + zavgS(JDim - 1) * sign_bwd
+    )
+
+    # Kolor 1: Forward edge is (i, j, 1) [NE], Backward is (i-1, j, 1) [SW]
+    term1 = concat_where(
+        IDim == 0,
+        zavgS * sign_fwd,
+        zavgS * sign_fwd + zavgS(IDim - 1) * sign_bwd
+    )
+
+    # Kolor 2: Forward edge is (i, j-1, 2) [NW], Backward is (i-1, j, 2) [SE]
+    term2 = concat_where(
+        IDim == 0,
+        concat_where(JDim == 0, 0.0, zavgS(JDim - 1) * sign_fwd),
         concat_where(
-            Kolor == 1,
-            concat_where(IDim == 0, zavgS, zavgS + zavgS(IDim - 1)),
-            concat_where(
-                IDim == 0,
-                concat_where(JDim == 0, zavgS - zavgS, zavgS(JDim - 1)),
-                concat_where(JDim == 0, zavgS(IDim - 1), zavgS(IDim - 1) + zavgS(JDim - 1)),
-            ),
+            JDim == 0,
+            zavgS(IDim - 1) * sign_bwd,
+            zavgS(JDim - 1) * sign_fwd + zavgS(IDim - 1) * sign_bwd
         ),
     )
-    pnabla_M = pnabla_M * sign
+
+    pnabla_M = concat_where(
+        Kolor == 0,
+        term0,
+        concat_where(Kolor == 1, term1, term2),
+    )
+    
     return neighbor_sum(pnabla_M, axis=Kolor) / vol
 
 
@@ -143,7 +161,8 @@ def compute_pnabla_cartesian(
 def pnabla_cartesian(
     pp: gtx.Field[[IDim, JDim, Kolor], float],
     S_M: gtx.Field[[IDim, JDim, Kolor], float],
-    sign: gtx.Field[[IDim, JDim, Kolor], float],
+    sign_fwd: gtx.Field[[IDim, JDim, Kolor], float],
+    sign_bwd: gtx.Field[[IDim, JDim, Kolor], float],
     vol: gtx.Field[[IDim, JDim, Kolor], float],
     out: gtx.Field[[IDim, JDim, Kolor], float],
     domain_max_i: gtx.int32,
@@ -153,7 +172,8 @@ def pnabla_cartesian(
     compute_pnabla_cartesian(
         pp,
         S_M,
-        sign,
+        sign_fwd,
+        sign_bwd,
         vol,
         domain_max_i,
         domain_max_j,
@@ -276,6 +296,7 @@ vol = np.ones((max_i, max_j, 1))
 sign = np.ones((max_i, max_j, 3))
 vol_field = gtx.as_field([IDim, JDim, Kolor], vol)
 sign_field = gtx.as_field([IDim, JDim, Kolor], sign)
+print("sign: ", sign_field[:, :, :].asnumpy())
 
 pnabla_out = gtx.as_field([IDim, JDim, Kolor], np.zeros((max_i, max_j, 1)))
 
@@ -293,7 +314,8 @@ pnabla_cartesian_dace = setup_program(
 pnabla_cartesian_dace(
     pp=pp,
     S_M=S_M,
-    sign=sign_field,
+    sign_fwd=sign_field,
+    sign_bwd=sign_field,
     vol=vol_field,
     out=pnabla_out,
     # domain_max_i=gtx.int32(max_i),

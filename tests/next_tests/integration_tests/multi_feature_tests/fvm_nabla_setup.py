@@ -138,7 +138,7 @@ class nabla_setup:
                 raise ValueError("v2e must have shape (n_vertex, max_deg).")
             max_deg = int(v2e.shape[1])
 
-        obj.edges_per_node = max_deg
+        obj.edges_per_node = max_deg # should be 6
         obj._nodes_size = n_vertex
         obj._edges_size = n_edge
 
@@ -161,9 +161,13 @@ class nabla_setup:
             for j in range(max_deg):
                 e = int(v2e[v, j])
                 if e < 0:
+                    # print(f"Warning: vertex {v} has no edge at position {j} (v2e[v,j]={e}).")
                     continue
-                sign[v, j] = 1.0 #if int(e2v[e, 0]) == v else -1.0
+                sign[v, j] = 1.0 if int(e2v[e, 0]) == v else -1.0
+                # print(f"v={v}, j={j}, e={e}, sign={sign[v,j]}")
+        # print("raw sign: ", sign)
         obj._sign_field = gtx.as_field([Vertex, V2EDim], sign, allocator=allocator)
+        # print("sign: ", obj._sign_field[:, :].asnumpy())
 
         # S fields
         if dual_normals is not None:

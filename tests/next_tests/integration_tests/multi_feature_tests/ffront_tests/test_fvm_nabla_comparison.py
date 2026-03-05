@@ -144,21 +144,12 @@ def print_structured_vertex_edges(v, m, S_field):
 @pytest.mark.requires_atlas
 def test_structured_bridge_matches_unstructured(exec_alloc_descriptor):
     mesh_nc = os.environ.get("GT4PY_TRANSLATOR_MESH") or "/home/raphael/Documents/Studium/Msc_thesis/grid-generator/parallelogram_grid.nc"
-    # print(f"Testing structured/unstructured pnabla comparison with mesh_nc={mesh_nc}")
     if mesh_nc:
         xr = pytest.importorskip("xarray")
         with xr.open_dataset(mesh_nc) as ds:
-            # print(ds)
-            # print(ds.data_vars)
-            # print(ds.attrs)
-            # print(ds.variables)
             e2v = _read_e2v(ds)
-            # print(f"Read e2v with shape {e2v.shape} from dataset")
             v2e = _read_v2e(ds)
-            # print(f"Read v2e with shape {v2e.shape if v2e is not None else None} from dataset")
             lonlat = _get_lonlat(ds)
-            # print(f"Read lonlat with shape {lonlat.shape if lonlat is not None else None} from dataset")
-            # print(f"Lonlat: {lonlat}")
             dual_volumes = _first_present(
                 ds,
                 ["dual_volumes", "dual_area", "node_volume", "vertex_area"],
@@ -192,12 +183,6 @@ def test_structured_bridge_matches_unstructured(exec_alloc_descriptor):
         dual_normals=dual_normals,
         dual_volumes=dual_volumes,
     )
-    # Fill all fields with ones for debugging
-    setup.input_field.asnumpy()[:] = 1.0
-    for S in setup.S_fields:
-        S.asnumpy()[:] = 1.0
-    setup.sign_field.asnumpy()[:] = 1.0
-    setup.vol_field.asnumpy()[:] = 1.0
 
     # Build map
     if setup.mesh is not None:
@@ -212,8 +197,6 @@ def test_structured_bridge_matches_unstructured(exec_alloc_descriptor):
     # Unstructured reference
     ref0 = gtx.zeros({setup.input_field.domain.dims[0]: setup.nodes_size}, allocator=exec_alloc_descriptor.allocator)
     ref1 = gtx.zeros({setup.input_field.domain.dims[0]: setup.nodes_size}, allocator=exec_alloc_descriptor.allocator)
-    # print(f"backend: ", exec_alloc_descriptor)
-    print(f"input field: ", setup.input_field)
     pnabla.with_backend(None if exec_alloc_descriptor.executor is None else exec_alloc_descriptor)(
         setup.input_field,
         setup.S_fields,
@@ -231,7 +214,6 @@ def test_structured_bridge_matches_unstructured(exec_alloc_descriptor):
         v2e_np = setup.nodes2edge_connectivity.asnumpy()
     sign_struct = build_structured_sign_from_unstructured(sign_np, v2e_np, m)
 
-    print("input field:", setup.input_field.asnumpy())
     # 4) Run structured kernel through translator
     out0_u, out1_u = run_structured_pnabla_from_unstructured(
         pp_vertex=setup.input_field.asnumpy(),
@@ -241,35 +223,6 @@ def test_structured_bridge_matches_unstructured(exec_alloc_descriptor):
         m=m,
         backend=None if exec_alloc_descriptor.executor is None else exec_alloc_descriptor,
     )
-    for v in range(setup.nodes_size):
-
-        # --- Unstructured approach ---
-        # Get the edges connected to vertex v via V2E
-        v2e = setup.nodes2edge_connectivity.asnumpy()  # shape: (n_vertex, max_deg)
-        connected_edges = v2e[v]
-        # Filter out invalid entries (usually -1)
-        connected_edges = connected_edges[connected_edges >= 0]
-        print(f"Unstructured: Vertex {v} is connected to edges {connected_edges}")
-
-        # For each connected edge, print its endpoints and value
-        e2v = setup.edges2node_connectivity.asnumpy()  # shape: (n_edge, 2)
-        for e in connected_edges:
-            verts = e2v[e]
-            print(f"  Edge {e}: connects vertices {verts}, value = {setup.S_fields[0].asnumpy()[e]}")
-
-        # --- Structured approach ---
-        # Get (i, j) for this vertex
-        print_structured_vertex_edges(v, m, setup.S_fields[0].asnumpy())
-        # i, j = m.vertex_to_ij[v]
-        # print(f"Structured: Vertex {v} maps to (i={i}, j={j})")
-
-        # # For each Kolor (edge orientation), print the corresponding edge index and value
-        # for k in range(3):  # assuming 3 edge orientations
-        #     edge_idx = m.ijk_to_edge[i, j, k]
-        #     if edge_idx >= 0:
-        #         print(f"  Kolor {k}: edge_idx={edge_idx}, value={setup.S_fields[0].asnumpy()[edge_idx]}")
-        #     else:
-        #         print(f"  Kolor {k}: no edge (padding or boundary)")
 
     print("Structured output:", out0_u, out1_u)
     print("Unstructured reference:", ref0.asnumpy(), ref1.asnumpy())
