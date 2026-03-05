@@ -18,4 +18,4 @@ tests/next_tests/integration_tests/multi_feature_tests/ffront_tests/test_fvm_nab
   <frozen importlib._bootstrap>:488: RuntimeWarning: numpy.ndarray size changed, may indicate binary incompatibility. Expected 16 from C header, got 96 from PyObject
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-================= 1 passed, 9 deselected, 2 warnings in 45.37s =================
+================= 1 passed, 9 deselected, 2 warnings in 29.37s =================

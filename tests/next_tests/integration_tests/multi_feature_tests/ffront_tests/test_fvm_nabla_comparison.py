@@ -226,5 +226,5 @@ def test_structured_bridge_matches_unstructured(exec_alloc_descriptor):
 
     # print("Structured output:", out0_u, out1_u)
     # print("Unstructured reference:", ref0.asnumpy(), ref1.asnumpy())
-    np.testing.assert_allclose(out0_u, ref0.asnumpy(), rtol=1e-10, atol=1e-10)
-    np.testing.assert_allclose(out1_u, ref1.asnumpy(), rtol=1e-10, atol=1e-10)
+    np.testing.assert_allclose(out0_u, ref0.asnumpy(), rtol=1e-10, atol=0)
+    np.testing.assert_allclose(out1_u, ref1.asnumpy(), rtol=1e-10, atol=0)

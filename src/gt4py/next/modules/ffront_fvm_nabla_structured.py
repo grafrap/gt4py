@@ -104,36 +104,43 @@ def zavg(
 def compute_pnabla_cartesian(
     pp: gtx.Field[[IDim, JDim, Kolor], float],
     S_M: gtx.Field[[IDim, JDim, Kolor], float],
-    sign_fwd: gtx.Field[[IDim, JDim, Kolor], float],
-    sign_bwd: gtx.Field[[IDim, JDim, Kolor], float],
+    sign: tuple[
+        gtx.Field[[IDim, JDim, Kolor], float], # [0] East
+        gtx.Field[[IDim, JDim, Kolor], float], # [1] West
+        gtx.Field[[IDim, JDim, Kolor], float], # [2] NE
+        gtx.Field[[IDim, JDim, Kolor], float], # [3] SW
+        gtx.Field[[IDim, JDim, Kolor], float], # [4] NW
+        gtx.Field[[IDim, JDim, Kolor], float], # [5] SE
+    ],
     vol: gtx.Field[[IDim, JDim, Kolor], float],
     domain_max_i: gtx.int32,
     domain_max_j: gtx.int32,
 ) -> gtx.Field[[IDim, JDim, Kolor], float]:
+    
     zavgS = compute_zavgS_cartesian(pp, S_M, domain_max_i, domain_max_j)
 
     # Kolor 0: Forward edge is (i, j, 0) [East], Backward is (i, j-1, 0) [West]
     term0 = concat_where(
         JDim == 0,
-        zavgS * sign_fwd,
-        zavgS * sign_fwd + zavgS(JDim - 1) * sign_bwd
+        zavgS * sign[0],
+        zavgS * sign[0] + zavgS(JDim - 1) * sign[1]
     )
 
     # Kolor 1: Forward edge is (i, j, 1) [NE], Backward is (i-1, j, 1) [SW]
     term1 = concat_where(
         IDim == 0,
-        zavgS * sign_fwd,
-        zavgS * sign_fwd + zavgS(IDim - 1) * sign_bwd
+        zavgS * sign[2](Kolor - 1),
+        zavgS * sign[2](Kolor - 1) + zavgS(IDim - 1) * sign[3](Kolor - 1)
     )
 
     # Kolor 2: Forward edge is (i, j-1, 2) [NW], Backward is (i-1, j, 2) [SE]
     term2 = concat_where(
         IDim == 0,
-        concat_where(JDim == 0, 0.0, zavgS(JDim - 1) * sign_fwd),
+        concat_where(JDim == 0, 0.0, zavgS(JDim - 1) * sign[4](Kolor - 2)),
         concat_where(
             JDim == 0,
-            zavgS(IDim - 1) * sign_bwd,
-            zavgS(JDim - 1) * sign_fwd + zavgS(IDim - 1) * sign_bwd
+            zavgS(IDim - 1) * sign[5](Kolor - 2),
+            zavgS(JDim - 1) * sign[4](Kolor - 2) + zavgS(IDim - 1) * sign[5](Kolor - 2)
         ),
     )
 
@@ -145,13 +152,18 @@ def compute_pnabla_cartesian(
     
     return neighbor_sum(pnabla_M, axis=Kolor) / vol
 
-
 @gtx.program
 def pnabla_cartesian(
     pp: gtx.Field[[IDim, JDim, Kolor], float],
     S_M: gtx.Field[[IDim, JDim, Kolor], float],
-    sign_fwd: gtx.Field[[IDim, JDim, Kolor], float],
-    sign_bwd: gtx.Field[[IDim, JDim, Kolor], float],
+    sign: tuple[
+        gtx.Field[[IDim, JDim, Kolor], float],
+        gtx.Field[[IDim, JDim, Kolor], float],
+        gtx.Field[[IDim, JDim, Kolor], float],
+        gtx.Field[[IDim, JDim, Kolor], float],
+        gtx.Field[[IDim, JDim, Kolor], float],
+        gtx.Field[[IDim, JDim, Kolor], float],
+    ],
     vol: gtx.Field[[IDim, JDim, Kolor], float],
     out: gtx.Field[[IDim, JDim, Kolor], float],
     domain_max_i: gtx.int32,
@@ -161,8 +173,7 @@ def pnabla_cartesian(
     compute_pnabla_cartesian(
         pp,
         S_M,
-        sign_fwd,
-        sign_bwd,
+        sign,
         vol,
         domain_max_i,
         domain_max_j,
@@ -182,3 +193,4 @@ def pnabla_cartesian(
 # - E2V accesses must be written out explicitly with IDim and JDim, but produce the same result in the end.
 # - neighbor_sum goes over six edges for each vertex, hence 2 per Kolor, that's why we add every edge in the same
 #   Kolor contribution together before doing the neighbor_sum, which then just goes over the three Kolors.
+# - Remember reshifts for e.g. the sign or pp field, if we use concat_where on a Vertex field, we need to reshift back 

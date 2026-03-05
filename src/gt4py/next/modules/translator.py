@@ -142,55 +142,6 @@ def unpack_vertex_field_to_unstructured(struct_values: np.ndarray, m: IndexMap) 
     return out
 
 
-def run_structured_pnabla_from_unstructured(
-    pp_vertex: np.ndarray,
-    S_M_edges_3: tuple[np.ndarray, np.ndarray],
-    sign_struct: tuple[np.ndarray, np.ndarray], # Now a tuple of two arrays
-    vol_vertex: np.ndarray,
-    m: IndexMap,
-    backend,
-) -> tuple[np.ndarray, np.ndarray]:
-    pp_s = pack_vertex_field_to_structured(pp_vertex, m)
-    sm0_s = pack_edge_field_to_structured(S_M_edges_3[0], m)
-    sm1_s = pack_edge_field_to_structured(S_M_edges_3[1], m)
-    vol_s = pack_vertex_field_to_structured(vol_vertex, m)
-    
-
-    # print("Structured pp:", pp_s[...,0])
-    # print("Structured S_M0:", sm0_s)
-    # print("Structured S_M1:", sm1_s)
-    # print("Structured sign:", sign_struct)
-    # print("Structured vol:", vol_s[...,0])
-    sign_fwd_struct, sign_bwd_struct = sign_struct
-
-    pp_f = gtx.as_field([IDim, JDim, Kolor], pp_s)
-    sm0_f = gtx.as_field([IDim, JDim, Kolor], sm0_s)
-    sm1_f = gtx.as_field([IDim, JDim, Kolor], sm1_s)
-    sign_fwd_f = gtx.as_field([IDim, JDim, Kolor], sign_fwd_struct)
-    sign_bwd_f = gtx.as_field([IDim, JDim, Kolor], sign_bwd_struct)
-    vol_f = gtx.as_field([IDim, JDim, Kolor], vol_s)
-
-    out0 = gtx.as_field([IDim, JDim, Kolor], np.zeros_like(pp_s))
-    out1 = gtx.as_field([IDim, JDim, Kolor], np.zeros_like(pp_s))
-
-    ni, nj = m.ij_to_vertex.shape
-
-    prog = setup_program(
-        pnabla_cartesian,
-        backend=backend,
-        horizontal_sizes={
-            "domain_max_i": gtx.int32(ni),
-            "domain_max_j": gtx.int32(nj),
-            "domain_max_kolor": gtx.int32(1),
-        },
-    )
-
-    prog(pp=pp_f, S_M=sm0_f, sign_fwd=sign_fwd_f, sign_bwd=sign_bwd_f, vol=vol_f, out=out0, offset_provider={})
-    prog(pp=pp_f, S_M=sm1_f, sign_fwd=sign_fwd_f, sign_bwd=sign_bwd_f, vol=vol_f, out=out1, offset_provider={})
-
-    u0 = unpack_vertex_field_to_unstructured(out0.asnumpy(), m)
-    u1 = unpack_vertex_field_to_unstructured(out1.asnumpy(), m)
-    return u0, u1
 
 from typing import Any
 
@@ -365,10 +316,11 @@ def build_structured_sign_from_unstructured(
     sign_vertex_v2e: np.ndarray,
     nodes2edge: np.ndarray,
     m: IndexMap,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, ...]:
     ni, nj = m.ij_to_vertex.shape
-    sign_fwd = np.zeros((ni, nj, 3), dtype=sign_vertex_v2e.dtype)
-    sign_bwd = np.zeros((ni, nj, 3), dtype=sign_vertex_v2e.dtype)
+    
+    # Dynamically initialize a tuple of 6 fields
+    signs = tuple(np.zeros((ni, nj, 1), dtype=sign_vertex_v2e.dtype) for _ in range(6))
 
     for v in range(m.vertex_to_ij.shape[0]):
         i, j = m.vertex_to_ij[v]
@@ -384,21 +336,63 @@ def build_structured_sign_from_unstructured(
             
             sign_val = sign_vertex_v2e[v, l]
             
-            # Map based on whether it is an outgoing (fwd) or incoming (bwd) edge
             if ke == 0:
                 if ie == i and je == j:
-                    sign_fwd[i, j, 0] = sign_val
+                    signs[0][i, j, 0] = sign_val # East
                 elif ie == i and je == j - 1:
-                    sign_bwd[i, j, 0] = sign_val
+                    signs[1][i, j, 0] = sign_val # West
             elif ke == 1:
                 if ie == i and je == j:
-                    sign_fwd[i, j, 1] = sign_val
+                    signs[2][i, j, 0] = sign_val # NE
                 elif ie == i - 1 and je == j:
-                    sign_bwd[i, j, 1] = sign_val
+                    signs[3][i, j, 0] = sign_val # SW
             elif ke == 2:
                 if ie == i and je == j - 1:
-                    sign_fwd[i, j, 2] = sign_val
+                    signs[4][i, j, 0] = sign_val # NW
                 elif ie == i - 1 and je == j:
-                    sign_bwd[i, j, 2] = sign_val
+                    signs[5][i, j, 0] = sign_val # SE
 
-    return sign_fwd, sign_bwd
+    return signs
+
+def run_structured_pnabla_from_unstructured(
+    pp_vertex: np.ndarray,
+    S_M_edges_3: tuple[np.ndarray, np.ndarray],
+    sign_struct: tuple[np.ndarray, ...], 
+    vol_vertex: np.ndarray,
+    m: IndexMap,
+    backend,
+) -> tuple[np.ndarray, np.ndarray]:
+    pp_s = pack_vertex_field_to_structured(pp_vertex, m)
+    sm0_s = pack_edge_field_to_structured(S_M_edges_3[0], m)
+    sm1_s = pack_edge_field_to_structured(S_M_edges_3[1], m)
+    vol_s = pack_vertex_field_to_structured(vol_vertex, m)
+    
+    # Cast the entire tuple of numpy arrays into gt4py fields in one go!
+    sign_f = tuple(gtx.as_field([IDim, JDim, Kolor], s) for s in sign_struct)
+
+    pp_f = gtx.as_field([IDim, JDim, Kolor], pp_s)
+    sm0_f = gtx.as_field([IDim, JDim, Kolor], sm0_s)
+    sm1_f = gtx.as_field([IDim, JDim, Kolor], sm1_s)
+    vol_f = gtx.as_field([IDim, JDim, Kolor], vol_s)
+
+    out0 = gtx.as_field([IDim, JDim, Kolor], np.zeros_like(pp_s))
+    out1 = gtx.as_field([IDim, JDim, Kolor], np.zeros_like(pp_s))
+
+    ni, nj = m.ij_to_vertex.shape
+
+    prog = setup_program(
+        pnabla_cartesian,
+        backend=backend,
+        horizontal_sizes={
+            "domain_max_i": gtx.int32(ni),
+            "domain_max_j": gtx.int32(nj),
+            "domain_max_kolor": gtx.int32(1),
+        },
+    )
+
+    prog(pp=pp_f, S_M=sm0_f, sign=sign_f, vol=vol_f, out=out0, offset_provider={})
+    prog(pp=pp_f, S_M=sm1_f, sign=sign_f, vol=vol_f, out=out1, offset_provider={})
+
+    u0 = unpack_vertex_field_to_unstructured(out0.asnumpy(), m)
+    u1 = unpack_vertex_field_to_unstructured(out1.asnumpy(), m)
+    return u0, u1
