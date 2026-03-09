@@ -141,7 +141,74 @@ def unpack_vertex_field_to_unstructured(struct_values: np.ndarray, m: IndexMap) 
         out[v] = struct_values[i, local_j, 0]
     return out
 
+import numpy as np
+import gt4py.next as gtx
+from icon4py.model.common import dimension as dims
 
+# Structured Dimensions
+IDim = gtx.Dimension("IDim")
+JDim = gtx.Dimension("JDim")
+Kolor = gtx.Dimension("Kolor")
+KDim = dims.KDim
+
+def pack_edge_field(edge_values: np.ndarray, m: 'IndexMap') -> np.ndarray:
+    """Packs 1D or 2D unstructured edge fields into structured [I, J, Kolor, (K)]."""
+    ni, max_nj, n_kolor = m.ijk_to_edge.shape
+    has_k = edge_values.ndim == 2
+    
+    if has_k:
+        nk = edge_values.shape[1]
+        out = np.zeros((ni, max_nj, n_kolor, nk), dtype=edge_values.dtype)
+    else:
+        out = np.zeros((ni, max_nj, n_kolor), dtype=edge_values.dtype)
+        
+    for i in range(ni):
+        for j in range(max_nj):
+            for k in range(n_kolor):
+                e = m.ijk_to_edge[i, j, k]
+                if e >= 0:
+                    if has_k:
+                        out[i, j, k, :] = edge_values[e, :]
+                    else:
+                        out[i, j, k] = edge_values[e]
+    return out
+
+def unpack_edge_field(struct_values: np.ndarray, m: 'IndexMap', n_edge: int) -> np.ndarray:
+    """Unpacks structured [I, J, Kolor, (K)] fields back to unstructured."""
+    has_k = struct_values.ndim == 4
+    
+    if has_k:
+        nk = struct_values.shape[3]
+        out = np.zeros((n_edge, nk), dtype=struct_values.dtype)
+    else:
+        out = np.zeros((n_edge,), dtype=struct_values.dtype)
+        
+    ni, max_nj, n_kolor = m.ijk_to_edge.shape
+    for i in range(ni):
+        for j in range(max_nj):
+            for k in range(n_kolor):
+                e = m.ijk_to_edge[i, j, k]
+                if e >= 0:
+                    if has_k:
+                        out[e, :] = struct_values[i, j, k, :]
+                    else:
+                        out[e] = struct_values[i, j, k]
+    return out
+
+def pack_vertex_field(vertex_values: np.ndarray, m) -> np.ndarray:
+    """Packs an unstructured vertex field into [IDim, JDim, Kolor=1, (KDim)]."""
+    has_k = vertex_values.ndim == 2
+    ni, nj = m.ij_to_vertex.shape
+    
+    # Allocate with Kolor dimension of size 1
+    out = np.zeros((ni, nj, 1, vertex_values.shape[1] if has_k else 1), dtype=vertex_values.dtype)
+    for i in range(ni):
+        for j in range(nj):
+            v = m.ij_to_vertex[i, j]
+            if v >= 0:
+                # Place data exactly at Kolor index 0
+                out[i, j, 0, :] = vertex_values[v, :] if has_k else vertex_values[v]
+    return out if has_k else out[:, :, :, 0]
 
 from typing import Any
 
