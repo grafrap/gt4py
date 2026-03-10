@@ -210,6 +210,122 @@ def pack_vertex_field(vertex_values: np.ndarray, m) -> np.ndarray:
                 out[i, j, 0, :] = vertex_values[v, :] if has_k else vertex_values[v]
     return out if has_k else out[:, :, :, 0]
 
+# --- Cartesian Cell Helpers ---
+
+def build_cell_to_ijk(m: IndexMap, ds) -> np.ndarray:
+    """Maps unstructured 1D cell index from netcdf into Cartesian [I, J, Kolor] layout."""
+    import numpy as np
+    c2v = np.where(
+        ds["vertex_of_cell"].transpose("cell", "nv").values.astype(np.int32) > 0,
+        ds["vertex_of_cell"].transpose("cell", "nv").values.astype(np.int32) - 1, -1
+    )
+    n_cells = c2v.shape[0]
+    ni, nj = m.ij_to_vertex.shape
+    
+    ijk_to_cell = np.full((ni, nj, 2), -1, dtype=np.int32)
+    
+    for c in range(n_cells):
+        v = c2v[c]
+        if np.any(v < 0): continue
+        
+        i_coords = [m.vertex_to_ij[v[0], 0], m.vertex_to_ij[v[1], 0], m.vertex_to_ij[v[2], 0]]
+        j_coords = [m.vertex_to_ij[v[0], 1], m.vertex_to_ij[v[1], 1], m.vertex_to_ij[v[2], 1]]
+        
+        if any(i < 0 for i in i_coords): continue
+        
+        i_min = min(i_coords)
+        j_min = min(j_coords)
+        
+        # Kolor 0 has 2 vertices at i_min, Kolor 1 has 1 vertex at i_min
+        kolor = 0 if i_coords.count(i_min) == 2 else 1
+        
+        if 0 <= i_min < ni and 0 <= j_min < nj:
+            ijk_to_cell[i_min, j_min, kolor] = c
+            
+    return ijk_to_cell
+
+def pack_cell_field(cell_values: np.ndarray, ijk_to_cell: np.ndarray) -> np.ndarray:
+    """Packs 1D/2D unstructured Cell arrays into [IDim, JDim, Kolor, (KDim)]."""
+    import numpy as np
+    ni, nj, n_kolor = ijk_to_cell.shape
+    has_k = cell_values.ndim == 2
+    out = np.zeros((ni, nj, n_kolor, cell_values.shape[1] if has_k else 1), dtype=cell_values.dtype)
+        
+    for i in range(ni):
+        for j in range(nj):
+            for k in range(n_kolor):
+                c = ijk_to_cell[i, j, k]
+                if c >= 0:
+                    out[i, j, k, :] = cell_values[c, :] if has_k else cell_values[c]
+    return out if has_k else out[:, :, :, 0]
+
+def unpack_cell_field(struct_values: np.ndarray, ijk_to_cell: np.ndarray, n_cells: int) -> np.ndarray:
+    """Unpacks [IDim, JDim, Kolor, (KDim)] Cell arrays back to unstructured."""
+    import numpy as np
+    has_k = struct_values.ndim == 4
+    out = np.zeros((n_cells, struct_values.shape[3] if has_k else 1), dtype=struct_values.dtype)
+        
+    ni, nj, n_kolor = ijk_to_cell.shape
+    for i in range(ni):
+        for j in range(nj):
+            for k in range(n_kolor):
+                c = ijk_to_cell[i, j, k]
+                if c >= 0:
+                    out[c, :] = struct_values[i, j, k, :] if has_k else struct_values[i, j, k]
+    return out if has_k else out[:, 0]
+
+def build_c2e2co_unstructured(ijk_to_cell: np.ndarray, n_cells: int) -> np.ndarray:
+    """Uses Cartesian topology to dynamically build the exact C2E2CO connectivity map."""
+    import numpy as np
+    ni, nj, _ = ijk_to_cell.shape
+    c2e2co = np.full((n_cells, 3), -1, dtype=np.int32)
+    for i in range(ni):
+        for j in range(nj):
+            c0, c1 = ijk_to_cell[i, j, 0], ijk_to_cell[i, j, 1]
+            
+            if c0 >= 0:
+                n0_0 = ijk_to_cell[i, j, 1] if j>=0 else -1
+                n0_1 = ijk_to_cell[i, j-1, 1] if j-1>=0 else -1
+                n0_2 = ijk_to_cell[i-1, j, 1] if i-1>=0 else -1
+                c2e2co[c0] = [n0_0, n0_1, n0_2]
+                    
+            if c1 >= 0:
+                n1_0 = ijk_to_cell[i, j, 0] if j>=0 else -1
+                n1_1 = ijk_to_cell[i, j+1, 0] if j+1<nj else -1
+                n1_2 = ijk_to_cell[i+1, j, 0] if i+1<ni else -1
+                c2e2co[c1] = [n1_0, n1_1, n1_2]
+    return c2e2co
+
+def pack_c2e2co_field(field_np: np.ndarray, ijk_to_cell: np.ndarray) -> tuple[np.ndarray, ...]:
+    """Packs C2E2CO neighbour lookup tables into a tuple of 3 [IDim, JDim, Kolor] fields."""
+    import numpy as np
+    ni, nj, _ = ijk_to_cell.shape
+    n_neighbors = field_np.shape[1]
+    out_s = tuple(np.zeros((ni, nj, 2), dtype=field_np.dtype) for _ in range(n_neighbors))
+    
+    for i in range(ni):
+        for j in range(nj):
+            c0, c1 = ijk_to_cell[i, j, 0], ijk_to_cell[i, j, 1]
+            
+            if c0 >= 0:
+                n0_0 = ijk_to_cell[i, j, 1]
+                n0_1 = ijk_to_cell[i, j-1, 1] if j > 0 else -1
+                n0_2 = ijk_to_cell[i-1, j, 1] if i > 0 else -1
+                neighbors0 = [n0_0, n0_1, n0_2]
+                for idx in range(n_neighbors): 
+                    if neighbors0[idx] != -1:  # <-- THE FIX: Force 0.0 for out-of-bounds!
+                        out_s[idx][i, j, 0] = field_np[c0, idx]
+            
+            if c1 >= 0:
+                n1_0 = ijk_to_cell[i, j, 0]
+                n1_1 = ijk_to_cell[i, j+1, 0] if j+1 < nj else -1
+                n1_2 = ijk_to_cell[i+1, j, 0] if i+1 < ni else -1
+                neighbors1 = [n1_0, n1_1, n1_2]
+                for idx in range(n_neighbors): 
+                    if neighbors1[idx] != -1:  # <-- THE FIX: Force 0.0 for out-of-bounds!
+                        out_s[idx][i, j, 1] = field_np[c1, idx]
+    return out_s
+
 from typing import Any
 
 
