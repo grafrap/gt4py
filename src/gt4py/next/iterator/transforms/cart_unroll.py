@@ -72,6 +72,7 @@ map_dict = {# V2E:
                     ir.OffsetLiteral(value = "JDim"), ir.OffsetLiteral(value = 0),
                     ir.OffsetLiteral(value = "Kolor"), ir.OffsetLiteral(value = 1)),
             },
+            
             # V2C:
             (ir.OffsetLiteral(value = "V2C"), ir.OffsetLiteral(value = 0)): {
                 "kind": "shift",
@@ -148,7 +149,6 @@ map_dict = {# V2E:
                     ),
                 ),
             },
-
             (ir.OffsetLiteral(value="E2V"), ir.OffsetLiteral(value=1)): {
                 "kind": "concat_where",
                 "branches": (
@@ -178,6 +178,196 @@ map_dict = {# V2E:
                     ),
                 ),
             },
+
+            # E2C:
+            (ir.OffsetLiteral(value="E2C"), ir.OffsetLiteral(value=0)): {
+                "kind": "concat_where",
+                "branches": (
+                    (
+                        _kolor_slice(0, 1),  # edge kolor 0 -> cell (i, j-1, 1)
+                        (
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=0),
+                        ),
+                    ),
+                    (
+                        _kolor_slice(1, 2),  # edge kolor 1 -> cell (i, j-1, 1)
+                        (
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=-1),
+                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=0),
+                        ),
+                    ),
+                    (
+                        None,  # edge kolor 2 -> cell (i, j, 0)
+                        (
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=-2),
+                        ),
+                    ),
+                ),
+            },
+            (ir.OffsetLiteral(value="E2C"), ir.OffsetLiteral(value=1)): {
+                "kind": "concat_where",
+                "branches": (
+                    (
+                        _kolor_slice(0, 1),  # edge kolor 0 -> cell (i-1, j, 1)
+                        (
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=-1),
+                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=1),
+                        ),
+                    ),
+                    (
+                        _kolor_slice(1, 2),  # edge kolor 1 -> cell (i, j, 0)
+                        (
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=-1),
+                        ),
+                    ),
+                    (
+                        None,  # edge kolor 2 -> cell (i, j, 1)
+                        (
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=-1),
+                        ),
+                    ),
+                ),
+            },
+
+            # C2V:
+            (ir.OffsetLiteral(value="C2V"), ir.OffsetLiteral(value=0)): {
+                "kind": "concat_where",
+                "branches": (
+                    (
+                        _kolor_slice(0, 1),
+                        (
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=1),
+                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=0),
+                        ),
+                    ),
+                    (
+                        None, # else branch for Kolor==1
+                        (
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=1),
+                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=-1),
+                        ),
+                    ),
+                ),
+            },
+            (ir.OffsetLiteral(value="C2V"), ir.OffsetLiteral(value=1)): {
+                "kind": "concat_where",
+                "branches": (
+                    (
+                        _kolor_slice(0, 1),
+                        (
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=0),
+                        ),
+                    ),
+                    (
+                        None, # else branch for Kolor==1
+                        (
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=1),
+                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=1),
+                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=-1),
+                        ),
+                    ),
+                ),
+            },
+            (ir.OffsetLiteral(value="C2V"), ir.OffsetLiteral(value=2)): {
+                "kind": "concat_where",
+                "branches": (
+                    (
+                        _kolor_slice(0, 1),
+                        (
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=1),
+                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=0),
+                        ),
+                    ),
+                    (
+                        None, # else branch for Kolor==1
+                        (
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=1),
+                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=-1),
+                        ),
+                    ),
+                ),
+            },
+
+            # C2E: 
+            (ir.OffsetLiteral(value="C2E"), ir.OffsetLiteral(value=0)): {
+                "kind": "concat_where",
+                "branches": (
+                    (
+                        _kolor_slice(0, 1), # cell (i, j, 0) -> edge kolor 1
+                        (
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=1),
+                        ),
+                    ),
+                    (
+                        None, # else branch for Kolor==1, cell (i, j, 1) -> edge (i+1, j, 0)
+                        (
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=1),
+                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=-1),
+                        ),
+                    ),
+                ),
+            },
+            (ir.OffsetLiteral(value="C2E"), ir.OffsetLiteral(value=1)): {
+                "kind": "concat_where",
+                "branches": (
+                    (
+                        _kolor_slice(0, 1), # cell (i, j, 0) -> edge kolor 2
+                        (
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=2),
+                        ),
+                    ),
+                    (
+                        None, # else branch for Kolor==1, cell (i, j, 1) -> edge (i, j, 2)
+                        (
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=1),
+                        ),
+                    ),
+                ),
+            },
+            (ir.OffsetLiteral(value="C2E"), ir.OffsetLiteral(value=2)): {
+                "kind": "concat_where",
+                "branches": (
+                    (
+                        _kolor_slice(0, 1), # cell (i, j, 0) -> edge kolor 0
+                        (
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=0),
+                        ),
+                    ),
+                    (
+                        None, # else branch for Kolor==1, cell (i, j, 1) -> edge (i, j+1, 1)
+                        (
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=1),
+                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=0),
+                        ),
+                    ),
+                ),
+            },
         }
             
 needs_concat_where = {
@@ -187,7 +377,13 @@ needs_concat_where = {
     ir.OffsetLiteral(value="C2E"),
 }
 
-
+def _build_concat_where_from_branches(arg: ir.Expr, branches):
+    # branches: ((cond_or_none, shift_spec), ...)
+    cond, shift_spec = branches[0]
+    expr = _apply_shift_chain(arg, shift_spec)
+    if len(branches) == 1:
+        return expr
+    return im.concat_where(cond, expr, _build_concat_where_from_branches(arg, branches[1:]))
 
 @dataclasses.dataclass
 class CartUnroll(NodeTranslator):
@@ -209,11 +405,12 @@ class CartUnroll(NodeTranslator):
                     return _apply_shift_chain(arg, entry["shifts"])
 
                 if entry["kind"] == "concat_where":
-                    (cond0, s0), (cond1, s1), (_, s2) = entry["branches"]
-                    b0 = _apply_shift_chain(arg, s0)
-                    b1 = _apply_shift_chain(arg, s1)
-                    b2 = _apply_shift_chain(arg, s2)
-                    return im.concat_where(cond0, b0, im.concat_where(cond1, b1, b2))
+                    return _build_concat_where_from_branches(arg, entry["branches"])
+                    # (cond0, s0), (cond1, s1), (_, s2) = entry["branches"]
+                    # b0 = _apply_shift_chain(arg, s0)
+                    # b1 = _apply_shift_chain(arg, s1)
+                    # b2 = _apply_shift_chain(arg, s2)
+                    # return im.concat_where(cond0, b0, im.concat_where(cond1, b1, b2))
         return new_node
 
 # dict V2V[0] -> cart, ...
