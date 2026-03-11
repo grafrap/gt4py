@@ -29,7 +29,21 @@ def _kolor_slice(start: int, stop: int) -> ir.Expr:
     )
 
 map_dict = {# V2E:
-            (ir.OffsetLiteral(value="V2E"), ir.OffsetLiteral(value=0)): {
+            (ir.OffsetLiteral(value = "V2E"), ir.OffsetLiteral(value = 0)): {
+                "kind": "shift",
+                "shifts": (
+                    ir.OffsetLiteral(value = "IDim"), ir.OffsetLiteral(value = 0),
+                    ir.OffsetLiteral(value = "JDim"), ir.OffsetLiteral(value = 0),
+                    ir.OffsetLiteral(value = "Kolor"), ir.OffsetLiteral(value = 0)),
+            },
+            (ir.OffsetLiteral(value = "V2E"), ir.OffsetLiteral(value = 1)): {
+                "kind": "shift",
+                "shifts": (
+                    ir.OffsetLiteral(value = "IDim"), ir.OffsetLiteral(value = 0),
+                    ir.OffsetLiteral(value = "JDim"), ir.OffsetLiteral(value = 0),
+                    ir.OffsetLiteral(value = "Kolor"), ir.OffsetLiteral(value = 1)),
+            },
+            (ir.OffsetLiteral(value = "V2E"), ir.OffsetLiteral(value = 2)): {
                 "kind": "shift",
                 "shifts": (
                     ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
@@ -37,40 +51,26 @@ map_dict = {# V2E:
                     ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=2),
                 ),
             },
-            (ir.OffsetLiteral(value="V2E"), ir.OffsetLiteral(value=1)): {
+            (ir.OffsetLiteral(value = "V2E"), ir.OffsetLiteral(value = 3)): {
                 "kind": "shift",
                 "shifts": (
                     ir.OffsetLiteral(value = "IDim"), ir.OffsetLiteral(value = 0),
                     ir.OffsetLiteral(value = "JDim"), ir.OffsetLiteral(value = -1),
                     ir.OffsetLiteral(value = "Kolor"), ir.OffsetLiteral(value = 0)),
             },
-            (ir.OffsetLiteral(value="V2E"), ir.OffsetLiteral(value=2)): {
+            (ir.OffsetLiteral(value = "V2E"), ir.OffsetLiteral(value = 4)): {
                 "kind": "shift",
                 "shifts":(
                     ir.OffsetLiteral(value = "IDim"), ir.OffsetLiteral(value = -1),
                     ir.OffsetLiteral(value = "JDim"), ir.OffsetLiteral(value = 0),
                     ir.OffsetLiteral(value = "Kolor"), ir.OffsetLiteral(value = 1)),
             },
-            (ir.OffsetLiteral(value = "V2E"), ir.OffsetLiteral(value = 3)): {
+            (ir.OffsetLiteral(value = "V2E"), ir.OffsetLiteral(value = 5)): {
                 "kind": "shift",
                 "shifts": (
                     ir.OffsetLiteral(value = "IDim"), ir.OffsetLiteral(value = -1),
                     ir.OffsetLiteral(value = "JDim"), ir.OffsetLiteral(value = 0),
                     ir.OffsetLiteral(value = "Kolor"), ir.OffsetLiteral(value = 2)),
-            },
-            (ir.OffsetLiteral(value = "V2E"), ir.OffsetLiteral(value = 4)): {
-                "kind": "shift",
-                "shifts": (
-                    ir.OffsetLiteral(value = "IDim"), ir.OffsetLiteral(value = 0),
-                    ir.OffsetLiteral(value = "JDim"), ir.OffsetLiteral(value = 0),
-                    ir.OffsetLiteral(value = "Kolor"), ir.OffsetLiteral(value = 0)),
-            },
-            (ir.OffsetLiteral(value = "V2E"), ir.OffsetLiteral(value = 5)): {
-                "kind": "shift",
-                "shifts": (
-                    ir.OffsetLiteral(value = "IDim"), ir.OffsetLiteral(value = 0),
-                    ir.OffsetLiteral(value = "JDim"), ir.OffsetLiteral(value = 0),
-                    ir.OffsetLiteral(value = "Kolor"), ir.OffsetLiteral(value = 1)),
             },
             
             # V2C:
@@ -78,43 +78,43 @@ map_dict = {# V2E:
                 "kind": "shift",
                 "shifts": (
                     ir.OffsetLiteral(value = "IDim"), ir.OffsetLiteral(value = 0),
-                    ir.OffsetLiteral(value = "JDim"), ir.OffsetLiteral(value = -1),
-                    ir.OffsetLiteral(value = "Kolor"), ir.OffsetLiteral(value = 1)),
+                    ir.OffsetLiteral(value = "JDim"), ir.OffsetLiteral(value = 0),
+                    ir.OffsetLiteral(value = "Kolor"), ir.OffsetLiteral(value = 0)),
             },
             (ir.OffsetLiteral(value = "V2C"), ir.OffsetLiteral(value = 1)): {
                 "kind": "shift",
                 "shifts": (
                     ir.OffsetLiteral(value = "IDim"), ir.OffsetLiteral(value = 0),
                     ir.OffsetLiteral(value = "JDim"), ir.OffsetLiteral(value = -1),
-                    ir.OffsetLiteral(value = "Kolor"), ir.OffsetLiteral(value = 0)),
+                    ir.OffsetLiteral(value = "Kolor"), ir.OffsetLiteral(value = 1)),
             },
             (ir.OffsetLiteral(value = "V2C"), ir.OffsetLiteral(value = 2)): {
+                "kind": "shift",
+                "shifts": (
+                    ir.OffsetLiteral(value = "IDim"), ir.OffsetLiteral(value = 0),
+                    ir.OffsetLiteral(value = "JDim"), ir.OffsetLiteral(value = -1),
+                    ir.OffsetLiteral(value = "Kolor"), ir.OffsetLiteral(value = 0)),
+            },
+            (ir.OffsetLiteral(value = "V2C"), ir.OffsetLiteral(value = 3)): {
                 "kind": "shift",
                 "shifts": (
                     ir.OffsetLiteral(value = "IDim"), ir.OffsetLiteral(value = -1),
                     ir.OffsetLiteral(value = "JDim"), ir.OffsetLiteral(value = -1),
                     ir.OffsetLiteral(value = "Kolor"), ir.OffsetLiteral(value = 1)),
             },
-            (ir.OffsetLiteral(value = "V2C"), ir.OffsetLiteral(value = 3)): {
-                "kind": "shift",
-                "shifts": (
-                    ir.OffsetLiteral(value = "IDim"), ir.OffsetLiteral(value = -1),
-                    ir.OffsetLiteral(value = "JDim"), ir.OffsetLiteral(value = 0),
-                    ir.OffsetLiteral(value = "Kolor"), ir.OffsetLiteral(value = 0)),
-            },
             (ir.OffsetLiteral(value = "V2C"), ir.OffsetLiteral(value = 4)): {
                 "kind": "shift",
                 "shifts": (
                     ir.OffsetLiteral(value = "IDim"), ir.OffsetLiteral(value = -1),
                     ir.OffsetLiteral(value = "JDim"), ir.OffsetLiteral(value = 0),
-                    ir.OffsetLiteral(value = "Kolor"), ir.OffsetLiteral(value = 1)),
+                    ir.OffsetLiteral(value = "Kolor"), ir.OffsetLiteral(value = 0)),
             },
             (ir.OffsetLiteral(value = "V2C"), ir.OffsetLiteral(value = 5)): {
                 "kind": "shift",
                 "shifts": (
-                    ir.OffsetLiteral(value = "IDim"), ir.OffsetLiteral(value = 0),
+                    ir.OffsetLiteral(value = "IDim"), ir.OffsetLiteral(value = -1),
                     ir.OffsetLiteral(value = "JDim"), ir.OffsetLiteral(value = 0),
-                    ir.OffsetLiteral(value = "Kolor"), ir.OffsetLiteral(value = 0)),
+                    ir.OffsetLiteral(value = "Kolor"), ir.OffsetLiteral(value = 1)),
             },
 
             # From now on, we need concat_where to sort out the cases,
@@ -134,7 +134,7 @@ map_dict = {# V2E:
                     (
                         _kolor_slice(1, 2),
                         (
-                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=1),
                             ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
                             ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=-1),
                         ),
@@ -142,8 +142,8 @@ map_dict = {# V2E:
                     (
                         None,  # else branch for Kolor==2
                         (
-                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=1),
-                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=1),
                             ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=-2),
                         ),
                     ),
@@ -163,7 +163,7 @@ map_dict = {# V2E:
                     (
                         _kolor_slice(1, 2),
                         (
-                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=1),
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
                             ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
                             ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=-1),
                         ),
@@ -171,8 +171,8 @@ map_dict = {# V2E:
                     (
                         None,
                         (
-                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
-                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=1),
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=1),
+                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
                             ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=-2),
                         ),
                     ),
@@ -184,7 +184,7 @@ map_dict = {# V2E:
                 "kind": "concat_where",
                 "branches": (
                     (
-                        _kolor_slice(0, 1),  # edge kolor 0 -> cell (i, j-1, 1)
+                        _kolor_slice(0, 1),  # edge kolor 0 -> cell (i, j, 0)
                         (
                             ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
                             ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
@@ -192,11 +192,11 @@ map_dict = {# V2E:
                         ),
                     ),
                     (
-                        _kolor_slice(1, 2),  # edge kolor 1 -> cell (i, j-1, 1)
+                        _kolor_slice(1, 2),  # edge kolor 1 -> cell (i, j, 0)
                         (
                             ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
-                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=-1),
-                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=-1),
                         ),
                     ),
                     (
@@ -221,11 +221,11 @@ map_dict = {# V2E:
                         ),
                     ),
                     (
-                        _kolor_slice(1, 2),  # edge kolor 1 -> cell (i, j, 0)
+                        _kolor_slice(1, 2),  # edge kolor 1 -> cell (i, j-1, 1)
                         (
                             ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
-                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
-                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=-1),
+                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=-1),
+                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=0),
                         ),
                     ),
                     (
@@ -246,7 +246,7 @@ map_dict = {# V2E:
                     (
                         _kolor_slice(0, 1),
                         (
-                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=1),
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
                             ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
                             ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=0),
                         ),
@@ -255,7 +255,7 @@ map_dict = {# V2E:
                         None, # else branch for Kolor==1
                         (
                             ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=1),
-                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=1),
                             ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=-1),
                         ),
                     ),
@@ -268,14 +268,14 @@ map_dict = {# V2E:
                         _kolor_slice(0, 1),
                         (
                             ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
-                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=1),
                             ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=0),
                         ),
                     ),
                     (
                         None, # else branch for Kolor==1
                         (
-                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=1),
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
                             ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=1),
                             ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=-1),
                         ),
@@ -288,16 +288,16 @@ map_dict = {# V2E:
                     (
                         _kolor_slice(0, 1),
                         (
-                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
-                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=1),
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=1),
+                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
                             ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=0),
                         ),
                     ),
                     (
                         None, # else branch for Kolor==1
                         (
-                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
-                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=1),
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=1),
+                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
                             ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=-1),
                         ),
                     ),
@@ -309,19 +309,19 @@ map_dict = {# V2E:
                 "kind": "concat_where",
                 "branches": (
                     (
-                        _kolor_slice(0, 1), # cell (i, j, 0) -> edge kolor 1
+                        _kolor_slice(0, 1), # cell (i, j, 0) -> edge kolor 0
                         (
                             ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
                             ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
-                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=1),
+                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=0),
                         ),
                     ),
                     (
-                        None, # else branch for Kolor==1, cell (i, j, 1) -> edge (i+1, j, 0)
+                        None, # else branch for Kolor==1, cell (i, j, 1) -> edge (i, j+1, 1)
                         (
-                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=1),
-                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
-                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=-1),
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=1),
+                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=0),
                         ),
                     ),
                 ),
@@ -351,19 +351,19 @@ map_dict = {# V2E:
                 "kind": "concat_where",
                 "branches": (
                     (
-                        _kolor_slice(0, 1), # cell (i, j, 0) -> edge kolor 0
+                        _kolor_slice(0, 1), # cell (i, j, 0) -> edge kolor 1
                         (
                             ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
                             ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
-                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=1),
                         ),
                     ),
                     (
-                        None, # else branch for Kolor==1, cell (i, j, 1) -> edge (i, j+1, 1)
+                        None, # else branch for Kolor==1, cell (i, j, 1) -> edge (i+1, j, 0)
                         (
-                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
-                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=1),
-                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=1),
+                            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=-1),
                         ),
                     ),
                 ),

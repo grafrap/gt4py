@@ -21,7 +21,7 @@ def test_V2E():
     #     "Not implementeds we don't have an easy way to determine the type of the one literal (type inference is to expensive)."
     # )
     testee = im.shift("V2E", 0)("iter")
-    expected = im.shift("Kolor", 2)(im.shift("JDim", -1)((im.shift("IDim", 0)("iter"))))
+    expected = im.shift("Kolor", 0)(im.shift("JDim", 0)((im.shift("IDim", 0)("iter"))))
     expected = NormalizeShifts().visit(expected)
 
     actual = CartUnroll.apply(testee)
@@ -29,35 +29,35 @@ def test_V2E():
     assert actual == expected
 
     testee = im.shift("V2E", 1)("iter")
-    expected = im.shift("Kolor", 0)(im.shift("JDim", -1)((im.shift("IDim", 0)("iter"))))
+    expected = im.shift("Kolor", 1)(im.shift("JDim", 0)((im.shift("IDim", 0)("iter"))))
     expected = NormalizeShifts().visit(expected)
     actual = CartUnroll.apply(testee)
     actual = NormalizeShifts().visit(actual)
     assert actual == expected
 
     testee = im.shift("V2E", 2)("iter")
-    expected = im.shift("Kolor", 1)(im.shift("JDim", 0)((im.shift("IDim", -1)("iter"))))
+    expected = im.shift("Kolor", 2)(im.shift("JDim", -1)((im.shift("IDim", 0)("iter"))))
     expected = NormalizeShifts().visit(expected)
     actual = CartUnroll.apply(testee)
     actual = NormalizeShifts().visit(actual)
     assert actual == expected
 
     testee = im.shift("V2E", 3)("iter")
-    expected = im.shift("Kolor", 2)(im.shift("JDim", 0)((im.shift("IDim", -1)("iter"))))
+    expected = im.shift("Kolor", 0)(im.shift("JDim", -1)((im.shift("IDim", 0)("iter"))))
     expected = NormalizeShifts().visit(expected)
     actual = CartUnroll.apply(testee)
     actual = NormalizeShifts().visit(actual)
     assert actual == expected
 
     testee = im.shift("V2E", 4)("iter")
-    expected = im.shift("Kolor", 0)(im.shift("JDim", 0)((im.shift("IDim", 0)("iter"))))
+    expected = im.shift("Kolor", 1)(im.shift("JDim", 0)((im.shift("IDim", -1)("iter"))))
     expected = NormalizeShifts().visit(expected)
     actual = CartUnroll.apply(testee)
     actual = NormalizeShifts().visit(actual)
     assert actual == expected
 
     testee = im.shift("V2E", 5)("iter")
-    expected = im.shift("Kolor", 1)(im.shift("JDim", 0)((im.shift("IDim", 0)("iter"))))
+    expected = im.shift("Kolor", 2)(im.shift("JDim", 0)((im.shift("IDim", -1)("iter"))))
     expected = NormalizeShifts().visit(expected)
     actual = CartUnroll.apply(testee)
     actual = NormalizeShifts().visit(actual)
@@ -65,42 +65,42 @@ def test_V2E():
 
 def test_V2C():
     testee = im.shift("V2C", 0)("iter")
-    expected = im.shift("Kolor", 1)(im.shift("JDim", -1)((im.shift("IDim", 0)("iter"))))
+    expected = im.shift("Kolor", 0)(im.shift("JDim", 0)((im.shift("IDim", 0)("iter"))))
     expected = NormalizeShifts().visit(expected)
     actual = CartUnroll.apply(testee)
     actual = NormalizeShifts().visit(actual)
     assert actual == expected
 
     testee = im.shift("V2C", 1)("iter")
-    expected = im.shift("Kolor", 0)(im.shift("JDim", -1)((im.shift("IDim", 0)("iter"))))
+    expected = im.shift("Kolor", 1)(im.shift("JDim", -1)((im.shift("IDim", 0)("iter"))))
     expected = NormalizeShifts().visit(expected)
     actual = CartUnroll.apply(testee)
     actual = NormalizeShifts().visit(actual)
     assert actual == expected
 
     testee = im.shift("V2C", 2)("iter")
-    expected = im.shift("Kolor", 1)(im.shift("JDim", -1)((im.shift("IDim", -1)("iter"))))
+    expected = im.shift("Kolor", 0)(im.shift("JDim", -1)((im.shift("IDim", 0)("iter"))))
     expected = NormalizeShifts().visit(expected)
     actual = CartUnroll.apply(testee)
     actual = NormalizeShifts().visit(actual)
     assert actual == expected
 
     testee = im.shift("V2C", 3)("iter")
-    expected = im.shift("Kolor", 0)(im.shift("JDim", 0)((im.shift("IDim", -1)("iter"))))
+    expected = im.shift("Kolor", 1)(im.shift("JDim", -1)((im.shift("IDim", -1)("iter"))))
     expected = NormalizeShifts().visit(expected)
     actual = CartUnroll.apply(testee)
     actual = NormalizeShifts().visit(actual)
     assert actual == expected
 
     testee = im.shift("V2C", 4)("iter")
-    expected = im.shift("Kolor", 1)(im.shift("JDim", 0)((im.shift("IDim", -1)("iter"))))
+    expected = im.shift("Kolor", 0)(im.shift("JDim", 0)((im.shift("IDim", -1)("iter"))))
     expected = NormalizeShifts().visit(expected)
     actual = CartUnroll.apply(testee)
     actual = NormalizeShifts().visit(actual)
     assert actual == expected
 
     testee = im.shift("V2C", 5)("iter")
-    expected = im.shift("Kolor", 0)(im.shift("JDim", 0)((im.shift("IDim", 0)("iter"))))
+    expected = im.shift("Kolor", 1)(im.shift("JDim", 0)((im.shift("IDim", -1)("iter"))))
     expected = NormalizeShifts().visit(expected)
     actual = CartUnroll.apply(testee)
     actual = NormalizeShifts().visit(actual)
@@ -121,8 +121,8 @@ def test_E2V():
     )
 
     b0 = im.shift("Kolor", 0)(im.shift("JDim", 0)(im.shift("IDim", 0)("iter")))
-    b1 = im.shift("Kolor", -1)(im.shift("JDim", 0)(im.shift("IDim", 0)("iter")))
-    b2 = im.shift("Kolor", -2)(im.shift("JDim", 0)(im.shift("IDim", 1)("iter")))
+    b1 = im.shift("Kolor", -1)(im.shift("JDim", 0)(im.shift("IDim", 1)("iter")))
+    b2 = im.shift("Kolor", -2)(im.shift("JDim", 1)(im.shift("IDim", 0)("iter")))
 
     expected = im.concat_where(cond0, b0, im.concat_where(cond1, b1, b2))
 
@@ -134,8 +134,8 @@ def test_E2V():
 
     testee = im.shift("E2V", 1)("iter")
     b0 = im.shift("Kolor", 0)(im.shift("JDim", 1)(im.shift("IDim", 0)("iter")))
-    b1 = im.shift("Kolor", -1)(im.shift("JDim", 0)(im.shift("IDim", 1)("iter")))
-    b2 = im.shift("Kolor", -2)(im.shift("JDim", 1)(im.shift("IDim", 0)("iter")))
+    b1 = im.shift("Kolor", -1)(im.shift("JDim", 0)(im.shift("IDim", 0)("iter")))
+    b2 = im.shift("Kolor", -2)(im.shift("JDim", 0)(im.shift("IDim", 1)("iter")))
 
     expected = im.concat_where(cond0, b0, im.concat_where(cond1, b1, b2))
     actual = CartUnroll.apply(testee)
@@ -156,7 +156,7 @@ def test_E2C():
     )
 
     b0 = im.shift("Kolor", 0)(im.shift("JDim", 0)(im.shift("IDim", 0)("iter")))
-    b1 = im.shift("Kolor", 0)(im.shift("JDim", -1)(im.shift("IDim", 0)("iter")))
+    b1 = im.shift("Kolor", -1)(im.shift("JDim", 0)(im.shift("IDim", 0)("iter")))
     b2 = im.shift("Kolor", -2)(im.shift("JDim", 0)(im.shift("IDim", 0)("iter")))
 
     expected = im.concat_where(cond0, b0, im.concat_where(cond1, b1, b2))
@@ -167,7 +167,7 @@ def test_E2C():
 
     testee = im.shift("E2C", 1)("iter")
     b0 = im.shift("Kolor", 1)(im.shift("JDim", 0)(im.shift("IDim", -1)("iter")))
-    b1 = im.shift("Kolor", -1)(im.shift("JDim", 0)(im.shift("IDim", 0)("iter")))
+    b1 = im.shift("Kolor", 0)(im.shift("JDim", -1)(im.shift("IDim", 0)("iter")))
     b2 = im.shift("Kolor", -1)(im.shift("JDim", 0)(im.shift("IDim", 0)("iter")))
 
     expected = im.concat_where(cond0, b0, im.concat_where(cond1, b1, b2))
@@ -185,16 +185,6 @@ def test_C2V():
         {kolor: (ir.OffsetLiteral(value=0), ir.OffsetLiteral(value=1))},
     )
 
-    b0 = im.shift("Kolor", 0)(im.shift("JDim", 0)(im.shift("IDim", 1)("iter")))
-    b1 = im.shift("Kolor", -1)(im.shift("JDim", 0)(im.shift("IDim", 1)("iter")))
-
-    expected = im.concat_where(cond, b0, b1)
-    actual = CartUnroll.apply(testee)
-    actual = NormalizeShifts().visit(actual)
-    expected = NormalizeShifts().visit(expected)
-    assert actual == expected
-
-    testee = im.shift("C2V", 1)("iter")
     b0 = im.shift("Kolor", 0)(im.shift("JDim", 0)(im.shift("IDim", 0)("iter")))
     b1 = im.shift("Kolor", -1)(im.shift("JDim", 1)(im.shift("IDim", 1)("iter")))
 
@@ -204,9 +194,19 @@ def test_C2V():
     expected = NormalizeShifts().visit(expected)
     assert actual == expected
 
-    testee = im.shift("C2V", 2)("iter")
+    testee = im.shift("C2V", 1)("iter")
     b0 = im.shift("Kolor", 0)(im.shift("JDim", 1)(im.shift("IDim", 0)("iter")))
     b1 = im.shift("Kolor", -1)(im.shift("JDim", 1)(im.shift("IDim", 0)("iter")))
+
+    expected = im.concat_where(cond, b0, b1)
+    actual = CartUnroll.apply(testee)
+    actual = NormalizeShifts().visit(actual)
+    expected = NormalizeShifts().visit(expected)
+    assert actual == expected
+
+    testee = im.shift("C2V", 2)("iter")
+    b0 = im.shift("Kolor", 0)(im.shift("JDim", 0)(im.shift("IDim", 1)("iter")))
+    b1 = im.shift("Kolor", -1)(im.shift("JDim", 0)(im.shift("IDim", 1)("iter")))
 
     expected = im.concat_where(cond, b0, b1)
     actual = CartUnroll.apply(testee)
@@ -222,8 +222,8 @@ def test_C2E():
         {kolor: (ir.OffsetLiteral(value=0), ir.OffsetLiteral(value=1))},
     )
 
-    b0 = im.shift("Kolor", 1)(im.shift("JDim", 0)(im.shift("IDim", 0)("iter")))
-    b1 = im.shift("Kolor", -1)(im.shift("JDim", 0)(im.shift("IDim", 1)("iter")))
+    b0 = im.shift("Kolor", 0)(im.shift("JDim", 0)(im.shift("IDim", 0)("iter")))
+    b1 = im.shift("Kolor", 0)(im.shift("JDim", 1)(im.shift("IDim", 0)("iter")))
 
     expected = im.concat_where(cond, b0, b1)
     actual = CartUnroll.apply(testee)
@@ -242,8 +242,8 @@ def test_C2E():
     assert actual == expected
 
     testee = im.shift("C2E", 2)("iter")
-    b0 = im.shift("Kolor", 0)(im.shift("JDim", 0)(im.shift("IDim", 0)("iter")))
-    b1 = im.shift("Kolor", 0)(im.shift("JDim", 1)(im.shift("IDim", 0)("iter")))
+    b0 = im.shift("Kolor", 1)(im.shift("JDim", 0)(im.shift("IDim", 0)("iter")))
+    b1 = im.shift("Kolor", -1)(im.shift("JDim", 0)(im.shift("IDim", 1)("iter")))
 
     expected = im.concat_where(cond, b0, b1)
     actual = CartUnroll.apply(testee)
