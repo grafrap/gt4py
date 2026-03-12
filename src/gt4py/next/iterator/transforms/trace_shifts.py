@@ -117,6 +117,10 @@ class CombinedTracer(Tracer):
 
 
 def _combine(*values):
+    tracer_values = tuple(val for val in values if isinstance(val, Tracer))
+    if tracer_values:
+        return CombinedTracer(tracer_values)
+
     # `OffsetLiteral`s may occur in `list_get` calls
     if not all(
         val in [Sentinel.VALUE, Sentinel.TYPE] or isinstance(val, ir.OffsetLiteral)
@@ -170,6 +174,10 @@ def _lift(f):
 
 
 def _reduce(f, init):
+    return _combine
+
+
+def _cartesian_reduce(f, init, axis):
     return _combine
 
 
@@ -249,6 +257,19 @@ def _as_fieldop(stencil, domain=None):
 
     return applied_as_fieldop
 
+def _concat_where(cond, true_branch, false_branch):
+    return _if(Sentinel.VALUE, true_branch, false_branch)
+
+def _named_range(*args):
+    return Sentinel.VALUE
+
+
+def _cartesian_domain(*args):
+    return Sentinel.VALUE
+
+
+def _unstructured_domain(*args):
+    return Sentinel.VALUE
 
 _START_CTX: Final = {
     "as_fieldop": _as_fieldop,
@@ -258,10 +279,15 @@ _START_CTX: Final = {
     "lift": _lift,
     "scan": _scan,
     "reduce": _reduce,
+    "cartesian_reduce": _cartesian_reduce,
     "neighbors": _neighbors,
     "map_": _map,
     "if_": _if,
     "make_tuple": _make_tuple,
+    "concat_where": _concat_where,
+    "named_range": _named_range,
+    "cartesian_domain": _cartesian_domain,
+    "unstructured_domain": _unstructured_domain,
 }
 
 

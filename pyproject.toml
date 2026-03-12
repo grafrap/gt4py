@@ -54,7 +54,8 @@ test = [
   'pytest-cov>=5.0.0',
   'pytest-factoryboy>=2.6.1',
   'pytest-instafail>=0.5.0',
-  'pytest-xdist[psutil]>=3.5.0'
+  'pytest-xdist[psutil]>=3.5.0',
+  'xarray>=2023.0.0'
 ]
 typing = [
   'mypy[faster-cache]>=1.13.0',
@@ -352,7 +353,7 @@ docstring-code-format = true
 # TD: flake8-todos
 # UP: pyupgrade
 # YTT: flake8-2020
-exclude = ['docs/**', "examples/**", "tests/**"]
+exclude = ['docs/**', "examples/**", "tests/**", "typings/**"]
 explicit-preview-rules = true
 extend-select = ["F822"]  # TODO(egparedes): remove when not longer in preview
 ignore = [

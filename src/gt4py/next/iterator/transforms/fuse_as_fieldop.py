@@ -140,6 +140,11 @@ def fuse_as_fieldop(
     new_stencil_body: itir.Expr = stencil.expr
 
     for eligible, stencil_param, arg in zip(eligible_args, stencil.params, args, strict=True):
+        if eligible and cpm.is_applied_as_fieldop(arg):
+            arg_as_fieldop = ir_misc.canonicalize_as_fieldop(arg)
+            arg_stencil = arg_as_fieldop.fun.args[0]  # type: ignore[attr-defined]
+            if not isinstance(arg_stencil, itir.Lambda):
+                eligible = False
         if eligible:
             if cpm.is_applied_as_fieldop(arg):
                 pass
@@ -184,7 +189,7 @@ def fuse_as_fieldop(
     )  # to keep the tree small
     new_stencil = merge_let.MergeLet().visit(new_stencil)
     new_stencil = inline_lambdas.InlineLambdas.apply(
-        new_stencil, opcount_preserving=True, force_inline_lift_args=True
+        new_stencil, opcount_preserving=False, force_inline_lift_args=True
     )
     new_stencil = inline_lifts.InlineLifts().visit(new_stencil)
 
@@ -206,6 +211,7 @@ def _arg_inline_predicate(node: itir.Expr, shifts: set[tuple[itir.OffsetLiteral,
         is_applied_fieldop := cpm.is_applied_as_fieldop(node)
         and not cpm.is_call_to(node.fun.args[0], "scan")
     ) or cpm.is_call_to(node, "if_"):
+        return True
         # always inline arg if it is an applied fieldop with only a single arg
         if is_applied_fieldop and len(node.args) == 1:
             return True
@@ -398,7 +404,8 @@ class FuseAsFieldOp(
         if cpm.is_applied_as_fieldop(node):
             node = ir_misc.canonicalize_as_fieldop(node)
             stencil = node.fun.args[0]  # type: ignore[attr-defined]  # ensure cpm.is_applied_as_fieldop
-            assert isinstance(stencil, itir.Lambda) or cpm.is_call_to(stencil, "scan")
+            if not (isinstance(stencil, itir.Lambda) or cpm.is_call_to(stencil, "scan")):
+                return None
             args: list[itir.Expr] = node.args
             shifts = trace_shifts.trace_stencil(stencil, num_args=len(args))
 

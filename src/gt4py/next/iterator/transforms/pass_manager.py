@@ -6,12 +6,17 @@
 # Please, refer to the LICENSE file in the root directory.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from typing import Optional, Protocol
+import os
+import sys
+from typing import Optional, Protocol, cast
 
+from gt4py import eve
 from gt4py.next import common, utils
-from gt4py.next.iterator import ir as itir
+from gt4py.next.iterator import ir as itir, pretty_printer
+from gt4py.next.iterator.ir_utils import common_pattern_matcher as cpm
 from gt4py.next.iterator.transforms import (
     concat_where,
+    cart_unroll,
     dead_code_elimination,
     fuse_as_fieldop,
     global_tmps,
@@ -32,6 +37,7 @@ from gt4py.next.iterator.transforms.inline_lambdas import InlineLambdas
 from gt4py.next.iterator.transforms.inline_scalar import InlineScalar
 from gt4py.next.iterator.transforms.merge_let import MergeLet
 from gt4py.next.iterator.transforms.normalize_shifts import NormalizeShifts
+from gt4py.next.iterator.transforms.unroll_cartesian_reduce import UnrollCartesianReduce
 from gt4py.next.iterator.transforms.unroll_reduce import UnrollReduce
 from gt4py.next.iterator.type_system.inference import infer
 
@@ -40,6 +46,110 @@ class GTIRTransform(Protocol):
     def __call__(
         self, _: itir.Program, *, offset_provider: common.OffsetProvider
     ) -> itir.Program: ...
+
+
+class _FieldviewDebugStats(eve.NodeVisitor):
+    def __init__(self) -> None:
+        self.cartesian_reduce_nodes: list[itir.FunCall] = []
+        self.nested_as_fieldop_nodes: list[itir.FunCall] = []
+        self.named_range_nodes: list[itir.FunCall] = []
+        self.named_range_arg_debug: list[tuple[str, str, str]] = []
+        self.named_range_count = 0
+
+    def visit_FunCall(self, node: itir.FunCall, **kwargs):
+        if cpm.is_call_to(node, "cartesian_reduce"):
+            self.cartesian_reduce_nodes.append(node)
+        if cpm.is_call_to(node, "named_range"):
+            self.named_range_count += 1
+            self.named_range_nodes.append(node)
+            axis, start, stop = node.args
+            self.named_range_arg_debug.append(
+                (
+                    f"{type(axis).__name__}:{getattr(axis, 'value', None)}",
+                    f"{type(start).__name__}:{getattr(start, 'value', getattr(start, 'name', None))}",
+                    f"{type(stop).__name__}:{getattr(stop, 'value', getattr(stop, 'name', None))}",
+                )
+            )
+
+        if cpm.is_applied_as_fieldop(node):
+            if any(
+                cpm.is_applied_as_fieldop(arg) for arg in node.args if isinstance(arg, itir.FunCall)
+            ):
+                self.nested_as_fieldop_nodes.append(node)
+
+        self.generic_visit(node, **kwargs)
+
+
+def _debug_dump_fieldview_ir(stage: str, ir: itir.Program) -> None:
+    if not os.environ.get("GT4PY_DEBUG_FIELDVIEW_IR"):
+        return
+
+    stats = _FieldviewDebugStats()
+    stats.visit(ir)
+
+    print(
+        f"[GT4PY_DEBUG_FIELDVIEW_IR] stage={stage} "
+        f"cartesian_reduce_calls={len(stats.cartesian_reduce_nodes)} "
+        f"nested_as_fieldop_calls={len(stats.nested_as_fieldop_nodes)} "
+        f"named_range_calls={stats.named_range_count}",
+        file=sys.stderr,
+    )
+
+    if stats.cartesian_reduce_nodes:
+        print("[GT4PY_DEBUG_FIELDVIEW_IR] unresolved cartesian_reduce snippets:", file=sys.stderr)
+        for node in stats.cartesian_reduce_nodes[:5]:
+            print(pretty_printer.pformat(node), file=sys.stderr)
+
+    if stats.nested_as_fieldop_nodes:
+        print("[GT4PY_DEBUG_FIELDVIEW_IR] nested as_fieldop snippets:", file=sys.stderr)
+        for node in stats.nested_as_fieldop_nodes[:5]:
+            print(pretty_printer.pformat(node), file=sys.stderr)
+
+    if stats.named_range_nodes:
+        print("[GT4PY_DEBUG_FIELDVIEW_IR] named_range snippets:", file=sys.stderr)
+        for node in stats.named_range_nodes[:5]:
+            print(pretty_printer.pformat(node), file=sys.stderr)
+        print("[GT4PY_DEBUG_FIELDVIEW_IR] named_range arg types:", file=sys.stderr)
+        for axis_dbg, start_dbg, stop_dbg in stats.named_range_arg_debug[:5]:
+            print(f"axis={axis_dbg} start={start_dbg} stop={stop_dbg}", file=sys.stderr)
+
+    if os.environ.get("GT4PY_DEBUG_FIELDVIEW_IR_FULL"):
+        print("[GT4PY_DEBUG_FIELDVIEW_IR] full pre-infer-domain IR:", file=sys.stderr)
+        print(pretty_printer.pformat(ir), file=sys.stderr)
+
+
+def _apply_unroll_reduce_pipeline(
+    ir: itir.Program,
+    *,
+    offset_provider_type: common.OffsetProviderType,
+    uids: utils.IDGeneratorPool,
+    use_offset_literal_index: bool = True,
+) -> itir.Program:
+    for _ in range(10):
+        try:
+            unrolled = cast(
+                itir.Program,
+                UnrollReduce.apply(
+                    ir,
+                    offset_provider_type=offset_provider_type,
+                    uids=uids,
+                    use_offset_literal_index=use_offset_literal_index,
+                ),
+            )
+            unrolled = cast(itir.Program, CollapseListGet().visit(unrolled))
+            unrolled = cast(itir.Program, NormalizeShifts().visit(unrolled))
+            # this is required as nested neighbor reductions can contain lifts, e.g.,
+            # `neighbors(V2Eₒ, ↑f(...))`
+            unrolled = cast(itir.Program, inline_lifts.InlineLifts().visit(unrolled))
+            unrolled = cast(itir.Program, NormalizeShifts().visit(unrolled))
+        except Exception as e:
+            raise RuntimeError("Failed inside _apply_unroll_reduce_pipeline") from e
+        if unrolled == ir:
+            break
+        ir = unrolled
+    else:
+        raise RuntimeError("Reduction unrolling failed.")
+    return ir
 
 
 # TODO(tehrengruber): Revisit interface to configure temporary extraction. We currently forward
@@ -57,13 +167,20 @@ def apply_common_transforms(
     #: A dictionary mapping axes names to their length. See :func:`infer_domain.infer_expr` for
     #: more details.
     symbolic_domain_sizes: Optional[dict[str, str]] = None,
+    cartesian_reduce_axis_ranges: Optional[dict[common.Dimension, tuple[int, int]]] = None,
 ) -> itir.Program:
     assert isinstance(ir, itir.Program)
 
     offset_provider_type = common.offset_provider_to_type(offset_provider)
+    print_ir = False
+    if print_ir:
+        print("\n" + "=" * 60)
+        print("=== FINAL GTIR HANDED TO GTFN BACKEND ===")
+        print("=" * 60)
+        print(ir)
+        print("=" * 60 + "\n")
 
     uids = utils.IDGeneratorPool()
-
     ir = MergeLet().visit(ir)
     ir = inline_fundefs.InlineFundefs().visit(ir)
 
@@ -81,19 +198,36 @@ def apply_common_transforms(
     ir = inline_dynamic_shifts.InlineDynamicShifts.apply(
         ir, offset_provider_type=offset_provider_type, uids=uids
     )  # domain inference does not support dynamic offsets yet
+
+    ir = cart_unroll.CartUnroll.apply(ir)
+    ir = NormalizeShifts().visit(ir)
     ir = infer_domain_ops.InferDomainOps.apply(ir)
     ir = concat_where.canonicalize_domain_argument(ir)
-
+    if cartesian_reduce_axis_ranges is None:
+        cartesian_reduce_axis_ranges = {common.Dimension("Kolor"): (0, 3)}
+    ir = UnrollCartesianReduce.apply(ir, axis_ranges=cartesian_reduce_axis_ranges)
+    if print_ir:
+        print("\n" + "=" * 60)
+        print("=== GTIR AFTER UNROLLING CARTESIAN REDUCE ===")
+        print("=" * 60)
+        print(ir)
+        print("=" * 60 + "\n")
     ir = infer_domain.infer_program(
         ir,
         offset_provider=offset_provider,
         symbolic_domain_sizes=symbolic_domain_sizes,
+        allow_uninferred=True,
     )
     ir = prune_empty_concat_where.prune_empty_concat_where(ir)
     ir = remove_broadcast.RemoveBroadcast.apply(ir)
-
+    ir = cast(itir.Program, ConstantFolding.apply(ir))
+    if print_ir:
+        print("\n" + "=" * 60)
+        print("=== GTIR AFTER COMMON TRANSFORMS BEFORE INFER_DOMAIN ===")
+        print("=" * 60)
+        print(ir)
+        print("=" * 60 + "\n")
     ir = concat_where.transform_to_as_fieldop(ir)
-
     for _ in range(10):
         inlined = ir
 
@@ -113,9 +247,12 @@ def apply_common_transforms(
         # expressions like `tuple_get(make_tuple(as_fieldop(stencil)(...)))` where stencil returns
         # a list. Such expressions must be inlined however because no backend supports such
         # field operators right now.
-        inlined = fuse_as_fieldop.FuseAsFieldOp.apply(
-            inlined, uids=uids, offset_provider_type=offset_provider_type
-        )
+        try:
+            inlined = fuse_as_fieldop.FuseAsFieldOp.apply(
+                inlined, uids=uids, offset_provider_type=offset_provider_type
+            )
+        except Exception:
+            pass
 
         if inlined == ir:
             break
@@ -146,51 +283,154 @@ def apply_common_transforms(
     ir = CollapseListGet().visit(ir)
 
     if unroll_reduce:
-        for _ in range(10):
-            unrolled = UnrollReduce.apply(ir, offset_provider_type=offset_provider_type, uids=uids)
-            unrolled = CollapseListGet().visit(unrolled)
-            unrolled = NormalizeShifts().visit(unrolled)
-            # this is required as nested neighbor reductions can contain lifts, e.g.,
-            # `neighbors(V2Eₒ, ↑f(...))`
-            unrolled = inline_lifts.InlineLifts().visit(unrolled)
-            unrolled = NormalizeShifts().visit(unrolled)
-            if unrolled == ir:
-                break
-            ir = unrolled
-        else:
-            raise RuntimeError("Reduction unrolling failed.")
+        ir = _apply_unroll_reduce_pipeline(
+            ir,
+            offset_provider_type=offset_provider_type,
+            uids=uids,
+        )
 
     ir = InlineLambdas.apply(
         ir, opcount_preserving=True, force_inline_lambda_args=force_inline_lambda_args
     )
+    if print_ir:
+        print("\n" + "=" * 60)
+        print("=== GTIR END ===")
+        print("=" * 60)
+        print(ir)
+        print("=" * 60 + "\n")
 
     assert isinstance(ir, itir.Program)
     return ir
 
 
 def apply_fieldview_transforms(
-    ir: itir.Program, *, offset_provider: common.OffsetProvider
+    ir: itir.Program,
+    *,
+    offset_provider: common.OffsetProvider,
+    unroll_reduce: bool = False,
+    cartesian_reduce_axis_ranges: Optional[dict[common.Dimension, tuple[int, int]]] = None,
 ) -> itir.Program:
     offset_provider_type = common.offset_provider_to_type(offset_provider)
 
     uids = utils.IDGeneratorPool()
 
+    print_ir = False
+    if print_ir:
+        print("\n" + "=" * 60)
+        print("=== GTIR BEFORE FIELDVIEW TRANSFORMS ===")
+        print("=" * 60)
+        print(ir)
+        print("=" * 60 + "\n")
+
     ir = inline_fundefs.InlineFundefs().visit(ir)
+    if print_ir:
+        print("\n" + "=" * 60)
+        print("=== GTIR AFTER INLINING FUNDEFS ===")
+        print("=" * 60)
+        print(ir)
+        print("=" * 60 + "\n")
     ir = inline_fundefs.prune_unreferenced_fundefs(ir)
+    if print_ir:
+        print("\n" + "=" * 60)
+        print("=== GTIR AFTER PRUNING UNREFERENCED FUNDEFS ===")
+        print("=" * 60)
+        print(ir)
+        print("=" * 60 + "\n")
     # required for dead-code-elimination and `prune_empty_concat_where` pass
     ir = concat_where.expand_tuple_args(ir, offset_provider_type=offset_provider_type)  # type: ignore[assignment]  # always an itir.Program
+    if print_ir:
+        print("\n" + "=" * 60)
+        print("=== GTIR AFTER EXPANDING CONCAT_WHERE TUPLE ARGS ===")
+        print("=" * 60)
+        print(ir)
+        print("=" * 60 + "\n")
     ir = dead_code_elimination.dead_code_elimination(
         ir, offset_provider_type=offset_provider_type, uids=uids
     )
+    if print_ir:
+        print("\n" + "=" * 60)
+        print("=== GTIR AFTER DEAD CODE ELIMINATION ===")
+        print("=" * 60)
+        print(ir)
+        print("=" * 60 + "\n")
     ir = inline_dynamic_shifts.InlineDynamicShifts.apply(
         ir, offset_provider_type=offset_provider_type, uids=uids
     )  # domain inference does not support dynamic offsets yet
-
+    if print_ir:
+        print("\n" + "=" * 60)
+        print("=== GTIR AFTER INLINING DYNAMIC SHIFTS ===")
+        print("=" * 60)
+        print(ir)
+        print("=" * 60 + "\n")
     ir = infer_domain_ops.InferDomainOps.apply(ir)
+    if print_ir:
+        print("\n" + "=" * 60)
+        print("=== GTIR AFTER INFERRING DOMAIN OPS ===")
+        print("=" * 60)
+        print(ir)
+        print("=" * 60 + "\n")
     ir = concat_where.canonicalize_domain_argument(ir)
+    if print_ir:
+        print("\n" + "=" * 60)
+        print("=== GTIR AFTER CANONICALIZING CONCAT_WHERE DOMAIN ARGUMENTS ===")
+        print("=" * 60)
+        print(ir)
+        print("=" * 60 + "\n")
     ir = ConstantFolding.apply(ir)  # type: ignore[assignment]  # always an itir.Program
-
+    if print_ir:
+        print("\n" + "=" * 60)
+        print("=== GTIR AFTER CONSTANT FOLDING ===")
+        print("=" * 60)
+        print(ir)
+        print("=" * 60 + "\n")
+    if cartesian_reduce_axis_ranges is None:
+        cartesian_reduce_axis_ranges = {common.Dimension("Kolor"): (0, 3)}
+    ir = UnrollCartesianReduce.apply(ir, axis_ranges=cartesian_reduce_axis_ranges)
+    if print_ir:
+        print("\n" + "=" * 60)
+        print("=== GTIR AFTER UNROLLING CARTESIAN REDUCE ===")
+        print("=" * 60)
+        print(ir)
+        print("=" * 60 + "\n")
     ir = infer_domain.infer_program(ir, offset_provider=offset_provider)
+    ir = ConstantFolding.apply(ir)  # type: ignore[assignment]  # always an itir.Program
+    if print_ir:
+        print("\n" + "=" * 60)
+        print("=== GTIR AFTER INFERRING DOMAIN ===")
+        print("=" * 60)
+        print(ir)
+        print("=" * 60 + "\n")
     ir = prune_empty_concat_where.prune_empty_concat_where(ir)
+    if print_ir:
+        print("\n" + "=" * 60)
+        print("=== GTIR AFTER PRUNING EMPTY CONCAT_WHERE ===")
+        print("=" * 60)
+        print(ir)
+        print("=" * 60 + "\n")
     ir = remove_broadcast.RemoveBroadcast.apply(ir)
+    if print_ir:
+        print("\n" + "=" * 60)
+        print("=== GTIR AFTER REMOVING BROADCAST ===")
+        print("=" * 60)
+        print(ir)
+        print("=" * 60 + "\n")
+    # print(f"Unrolling reduce: {unroll_reduce}")
+    # if unroll_reduce:
+    #     ir = _apply_unroll_reduce_pipeline(
+    #         ir,
+    #         offset_provider_type=offset_provider_type,
+    #         uids=uids,
+    #         use_offset_literal_index=False,  # Fieldview does not support non-literal offsets
+    #     )
+
+    # ir = infer_domain.infer_program(ir, offset_provider=offset_provider)
+
+    print_ir = True
+    if print_ir:
+        print("\n" + "=" * 60)
+        print("=== GTIR AFTER UNROLLING REDUCE (IF ENABLED) ===")
+        print("=" * 60)
+        print(ir)
+        print("=" * 60 + "\n")
+
     return ir

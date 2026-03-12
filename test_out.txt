@@ -1,0 +1,21 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.0.2, pluggy-1.6.0 -- /home/raphael/Documents/Studium/Msc_thesis/gt4py/.venv/bin/python
+cachedir: .pytest_cache
+hypothesis profile 'default'
+rootdir: /home/raphael/Documents/Studium/Msc_thesis/gt4py-cop
+configfile: pyproject.toml
+plugins: Faker-40.4.0, devtools-0.12.2, hypothesis-6.151.9
+collecting ... collected 10 items / 9 deselected / 1 selected
+
+tests/next_tests/integration_tests/multi_feature_tests/ffront_tests/test_fvm_nabla_comparison.py::test_structured_bridge_matches_unstructured[gtfn.run_gtfn] PASSED [100%]
+
+=============================== warnings summary ===============================
+tests/next_tests/__init__.py:20
+  /home/raphael/Documents/Studium/Msc_thesis/gt4py-cop/tests/next_tests/__init__.py:20: UserWarning: You are running GT4Py tests with BUILD_CACHE_LIFETIME set to PERSISTENT!
+    warnings.warn(
+
+tests/next_tests/integration_tests/multi_feature_tests/ffront_tests/test_fvm_nabla_comparison.py::test_structured_bridge_matches_unstructured[gtfn.run_gtfn]
+  <frozen importlib._bootstrap>:488: RuntimeWarning: numpy.ndarray size changed, may indicate binary incompatibility. Expected 16 from C header, got 96 from PyObject
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+================= 1 passed, 9 deselected, 2 warnings in 29.37s =================

@@ -133,8 +133,13 @@ class SymbolicDomain:
                 assert isinstance(val, itir.OffsetLiteral) and isinstance(val.value, int)
                 current_dim = connectivity_type
                 # cartesian offset
+                if current_dim not in new_ranges:
+                    new_ranges[current_dim] = SymbolicRange(
+                        itir.InfinityLiteral.NEGATIVE,
+                        itir.InfinityLiteral.POSITIVE,
+                    )
                 new_ranges[current_dim] = SymbolicRange.translate(
-                    self.ranges[current_dim], val.value
+                    new_ranges[current_dim], val.value
                 )
             elif isinstance(connectivity_type, common.NeighborConnectivityType):
                 # unstructured shift
