@@ -18,6 +18,74 @@ class IndexMap:
     edge_to_ijk: np.ndarray       # (n_edge, 3) -> (i, j, k) j is local_j
     ijk_to_edge: np.ndarray       # (ni, max_nj, 3) padded with -1
 
+
+@dataclass(frozen=True)
+class StructuredRemapSizes:
+    nx: int
+    ny: int
+    max_i: int
+    max_j: int
+    vertex_size: int
+    edge_size_padded: int
+    cell_size: int
+
+
+def infer_structured_remap_sizes(
+    *,
+    domain_length: float,
+    mean_edge_length: float,
+    n_cells: int,
+) -> StructuredRemapSizes:
+    if mean_edge_length <= 0:
+        raise ValueError("mean_edge_length must be > 0.")
+
+    nx = int(np.int32(domain_length / mean_edge_length))
+    if nx <= 0:
+        raise ValueError(
+            f"Invalid nx={nx} inferred from domain_length={domain_length} and mean_edge_length={mean_edge_length}."
+        )
+
+    ny = int(np.int32(n_cells / (2 * nx)))
+    if ny <= 0:
+        raise ValueError(f"Invalid ny={ny} inferred from n_cells={n_cells} and nx={nx}.")
+
+    max_j = nx + 1
+    max_i = ny + 1
+
+    vertex_size = max_i * max_j
+    edge_size_padded = 3 * max_i * max_j
+    cell_size = 2 * nx * ny
+
+    return StructuredRemapSizes(
+        nx=nx,
+        ny=ny,
+        max_i=max_i,
+        max_j=max_j,
+        vertex_size=vertex_size,
+        edge_size_padded=edge_size_padded,
+        cell_size=cell_size,
+    )
+
+
+def load_structured_remap_sizes_from_netcdf(nc_path: str) -> StructuredRemapSizes:
+    import xarray as xr
+
+    with xr.open_dataset(nc_path) as ds:
+        if "domain_length" not in ds.attrs or "mean_edge_length" not in ds.attrs:
+            raise KeyError(
+                "Dataset must contain attributes 'domain_length' and 'mean_edge_length'."
+            )
+        if "cell" not in ds.sizes:
+            raise KeyError("Dataset must contain dimension 'cell'.")
+
+        sizes = infer_structured_remap_sizes(
+            domain_length=float(ds.attrs["domain_length"]),
+            mean_edge_length=float(ds.attrs["mean_edge_length"]),
+            n_cells=int(ds.sizes["cell"]),
+        )
+
+    return sizes
+
 def build_index_map_for_ragged_lonlat_e2v(
     lonlat_deg: np.ndarray,
     e2v: np.ndarray,
@@ -143,13 +211,13 @@ def unpack_vertex_field_to_unstructured(struct_values: np.ndarray, m: IndexMap) 
 
 import numpy as np
 import gt4py.next as gtx
-from icon4py.model.common import dimension as dims
+# from icon4py.model.common import dimension as dims
 
 # Structured Dimensions
 IDim = gtx.Dimension("IDim")
 JDim = gtx.Dimension("JDim")
 Kolor = gtx.Dimension("Kolor")
-KDim = dims.KDim
+KDim = gtx.Dimension("KDim", kind=gtx.DimensionKind.VERTICAL)
 
 def pack_edge_field(edge_values: np.ndarray, m: 'IndexMap') -> np.ndarray:
     """Packs 1D or 2D unstructured edge fields into structured [I, J, Kolor, (K)]."""
@@ -457,14 +525,12 @@ def build_index_map_from_ds_regular(ds, e2v):
     compute nx, ny and build the structured index map via lonlat + e2v.
     Returns IndexMap or raises ValueError if not regular.
     """
-    import numpy as np
-
-    nx = int(np.int32(ds.attrs["domain_length"] / ds.attrs["mean_edge_length"]))
-    # test_simple_structured uses (ds.sizes["cell"]) / (2 * nx)
-    ny = int(np.int32((ds.sizes["cell"]) / (2 * nx)))
-    max_j = nx + 1
-    max_i = ny + 1
-    expected_nodes = int(max_i * max_j)
+    sizes = infer_structured_remap_sizes(
+        domain_length=float(ds.attrs["domain_length"]),
+        mean_edge_length=float(ds.attrs["mean_edge_length"]),
+        n_cells=int(ds.sizes["cell"]),
+    )
+    expected_nodes = sizes.vertex_size
 
     # read lonlat from ICON-style names used in your file
     lon = ds["longitude_vertices"].values.astype(np.float64)
@@ -472,7 +538,9 @@ def build_index_map_from_ds_regular(ds, e2v):
     lonlat = np.stack([lon, lat], axis=1)
 
     if lonlat.shape[0] != expected_nodes:
-        raise ValueError(f"Dataset is not regular: expected {expected_nodes} nodes, got {lonlat.shape[0]}")
+        raise ValueError(
+            f"Dataset is not regular: expected {expected_nodes} nodes, got {lonlat.shape[0]}"
+        )
 
     # e2v must be (n_edge,2) already converted to 0-based
     return build_index_map_from_lonlat_e2v(lonlat, e2v, nodes_size=expected_nodes)

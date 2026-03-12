@@ -7,6 +7,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from typing import Tuple
+import os
 
 import numpy as np
 import pytest
@@ -29,6 +30,52 @@ from next_tests.integration_tests.multi_feature_tests.fvm_nabla_setup import (
     assert_close,
     nabla_setup,
 )
+from gt4py.next.modules.translator import load_structured_remap_sizes_from_netcdf
+
+
+def _first_present(ds, names, required=True):
+    for name in names:
+        if name in ds:
+            return ds[name].values
+    if required:
+        raise KeyError(f"None of the variables {names} found in dataset.")
+    return None
+
+
+def _read_e2v(ds):
+    raw = _first_present(ds, ["E2V", "edge_vertices", "edges2nodes", "edge_node_connectivity"])
+    arr = np.asarray(raw, dtype=np.int32)
+    if arr.ndim != 2:
+        raise ValueError("e2v dataset must be 2-D")
+    if arr.shape[1] != 2:
+        arr = arr.T
+    if arr.shape[1] != 2:
+        raise ValueError(f"e2v must have shape (n_edge, 2), got {arr.shape}")
+    return np.where(arr > 0, arr - 1, -1)
+
+
+def _read_v2e(ds):
+    raw = _first_present(
+        ds,
+        ["V2E", "vertex_edges", "nodes2edges", "node_edge_connectivity", "edges_of_vertex"],
+        required=False,
+    )
+    if raw is None:
+        return None
+    arr = np.asarray(raw, dtype=np.int32)
+    if arr.ndim != 2:
+        raise ValueError("v2e dataset must be 2-D")
+    if arr.shape[0] < arr.shape[1]:
+        arr = arr.T
+    return np.where(arr > 0, arr - 1, -1)
+
+
+def _read_lonlat(ds):
+    if "longitude_vertices" in ds and "latitude_vertices" in ds:
+        lon = ds["longitude_vertices"].values.astype(np.float64)
+        lat = ds["latitude_vertices"].values.astype(np.float64)
+        return np.stack([lon, lat], axis=1)
+    return _first_present(ds, ["lonlat", "vertex_lonlat", "node_lonlat"], required=False)
 
 
 @gtx.field_operator
@@ -78,6 +125,52 @@ def test_ffront_compute_zavgS(exec_alloc_descriptor):
 
     assert_close(-199755464.25741270, np.min(zavgS.asnumpy()))
     assert_close(388241977.58389181, np.max(zavgS.asnumpy()))
+
+
+@pytest.mark.requires_atlas
+def test_ffront_compute_zavgS_parallelogram_grid(exec_alloc_descriptor):
+    mesh_nc = os.environ.get(
+        "GT4PY_TRANSLATOR_MESH",
+        "/home/raphael/Documents/Studium/Msc_thesis/grid-generator/parallelogram_grid.nc",
+    )
+    xr = pytest.importorskip("xarray")
+
+    with xr.open_dataset(mesh_nc) as ds:
+        e2v = _read_e2v(ds)
+        v2e = _read_v2e(ds)
+        lonlat = _read_lonlat(ds)
+        remap_sizes = load_structured_remap_sizes_from_netcdf(mesh_nc)
+
+        setup = nabla_setup.from_connectivity(
+            allocator=exec_alloc_descriptor.allocator,
+            e2v=e2v,
+            v2e=v2e,
+            lonlat_deg=lonlat,
+        )
+
+        assert setup.nodes_size == remap_sizes.vertex_size
+        assert setup.edges_size <= remap_sizes.edge_size_padded
+        assert int(ds.sizes["cell"]) == remap_sizes.cell_size
+
+    zavgS = gtx.zeros({Edge: setup.edges_size}, allocator=exec_alloc_descriptor.allocator)
+
+    compute_zavgS.with_backend(
+        None if exec_alloc_descriptor.executor is None else exec_alloc_descriptor
+    )(
+        setup.input_field,
+        setup.S_fields[0],
+        out=zavgS,
+        offset_provider={"E2V": setup.edges2node_connectivity},
+    )
+
+    e2v_conn = setup.edges2node_connectivity.asnumpy()
+    valid = np.all(e2v_conn >= 0, axis=1)
+    pp = setup.input_field.asnumpy()
+    s_m = setup.S_fields[0].asnumpy()
+    ref = np.zeros_like(s_m)
+    ref[valid] = s_m[valid] * 0.5 * (pp[e2v_conn[valid, 0]] + pp[e2v_conn[valid, 1]])
+
+    np.testing.assert_allclose(zavgS.asnumpy(), ref, rtol=1e-12, atol=1e-12)
 
 
 @pytest.mark.requires_atlas

@@ -16,6 +16,7 @@ from gt4py.next.iterator import ir as itir, pretty_printer
 from gt4py.next.iterator.ir_utils import common_pattern_matcher as cpm
 from gt4py.next.iterator.transforms import (
     concat_where,
+    cart_unroll,
     dead_code_elimination,
     fuse_as_fieldop,
     global_tmps,
@@ -197,6 +198,9 @@ def apply_common_transforms(
     ir = inline_dynamic_shifts.InlineDynamicShifts.apply(
         ir, offset_provider_type=offset_provider_type, uids=uids
     )  # domain inference does not support dynamic offsets yet
+
+    ir = cart_unroll.CartUnroll.apply(ir)
+    ir = NormalizeShifts().visit(ir)
     ir = infer_domain_ops.InferDomainOps.apply(ir)
     ir = concat_where.canonicalize_domain_argument(ir)
     if cartesian_reduce_axis_ranges is None:
