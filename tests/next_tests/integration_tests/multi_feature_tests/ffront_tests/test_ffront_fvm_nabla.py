@@ -16,6 +16,9 @@ pytest.importorskip("atlas4py")
 
 from gt4py import next as gtx
 from gt4py.next import neighbor_sum
+from gt4py.next.program_processors.program_setup_utils import setup_program
+from gt4py.next.program_processors.runners.gtfn import run_gtfn_cached as gtfn_cpu
+
 
 from next_tests.integration_tests.feature_tests.ffront_tests.ffront_test_utils import (
     exec_alloc_descriptor,
@@ -31,6 +34,15 @@ from next_tests.integration_tests.multi_feature_tests.fvm_nabla_setup import (
     nabla_setup,
 )
 from gt4py.next.modules.translator import load_structured_remap_sizes_from_netcdf
+from gt4py.next.modules.translator import (
+    IDim,
+    JDim,
+    Kolor,
+    build_index_map_from_lonlat_e2v,
+    pack_edge_field_to_structured,
+    pack_vertex_field_to_structured,
+    unpack_edge_field,
+)
 
 
 def _first_present(ds, names, required=True):
@@ -141,6 +153,8 @@ def test_ffront_compute_zavgS_parallelogram_grid(exec_alloc_descriptor):
         lonlat = _read_lonlat(ds)
         remap_sizes = load_structured_remap_sizes_from_netcdf(mesh_nc)
 
+        print(f"remap sies: ",remap_sizes)
+
         setup = nabla_setup.from_connectivity(
             allocator=exec_alloc_descriptor.allocator,
             e2v=e2v,
@@ -152,16 +166,43 @@ def test_ffront_compute_zavgS_parallelogram_grid(exec_alloc_descriptor):
         assert setup.edges_size <= remap_sizes.edge_size_padded
         assert int(ds.sizes["cell"]) == remap_sizes.cell_size
 
-    zavgS = gtx.zeros({Edge: setup.edges_size}, allocator=exec_alloc_descriptor.allocator)
+    index_map = build_index_map_from_lonlat_e2v(
+        lonlat,
+        e2v,
+        nodes_size=setup.nodes_size,
+        edges_size=setup.edges_size,
+    )
 
-    compute_zavgS.with_backend(
-        None if exec_alloc_descriptor.executor is None else exec_alloc_descriptor
-    )(
-        setup.input_field,
-        setup.S_fields[0],
-        out=zavgS,
+    pp_struct_np = pack_vertex_field_to_structured(setup.input_field.asnumpy(), index_map)
+    s_m_struct_np = pack_edge_field_to_structured(setup.S_fields[0].asnumpy(), index_map)
+    zavgS_struct_np = np.zeros_like(s_m_struct_np)
+
+    assert pp_struct_np.shape[0] == remap_sizes.max_i
+    assert pp_struct_np.shape[1] == remap_sizes.max_j
+    assert s_m_struct_np.shape[2] == 3
+
+    pp_struct = gtx.as_field([IDim, JDim, Kolor], pp_struct_np, allocator=exec_alloc_descriptor.allocator)
+    s_m_struct = gtx.as_field(
+        [IDim, JDim, Kolor], s_m_struct_np, allocator=exec_alloc_descriptor.allocator
+    )
+    zavgS_struct = gtx.as_field(
+        [IDim, JDim, Kolor], zavgS_struct_np, allocator=exec_alloc_descriptor.allocator
+    )
+
+    selected_backend = gtfn_cpu
+    compute_zavgS_program = setup_program(
+        compute_zavgS,
+        backend=selected_backend,
         offset_provider={"E2V": setup.edges2node_connectivity},
     )
+
+    compute_zavgS_program(
+        pp=pp_struct,
+        S_M=s_m_struct,
+        out=zavgS_struct,
+    )
+
+    zavgS_np = unpack_edge_field(zavgS_struct.asnumpy(), index_map, setup.edges_size)
 
     e2v_conn = setup.edges2node_connectivity.asnumpy()
     valid = np.all(e2v_conn >= 0, axis=1)
@@ -170,7 +211,7 @@ def test_ffront_compute_zavgS_parallelogram_grid(exec_alloc_descriptor):
     ref = np.zeros_like(s_m)
     ref[valid] = s_m[valid] * 0.5 * (pp[e2v_conn[valid, 0]] + pp[e2v_conn[valid, 1]])
 
-    np.testing.assert_allclose(zavgS.asnumpy(), ref, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(zavgS_np, ref, rtol=1e-12, atol=1e-12)
 
 
 @pytest.mark.requires_atlas

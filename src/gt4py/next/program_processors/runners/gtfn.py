@@ -54,7 +54,7 @@ def convert_args(
         # Note: this function is on the hot path and needs to have minimal overhead.
         if out is not None:
             args = (*args, out)
-        converted_args = (convert_arg(arg) for arg in args)
+        converted_args = tuple(convert_arg(arg) for arg in args)
         conn_args = extract_connectivity_args(offset_provider, device)
 
         opt_kwargs: dict[str, Any] = {}
@@ -65,11 +65,20 @@ def convert_args(
             opt_kwargs["exec_info"] = exec_info
 
         # generate implicit domain size arguments only if necessary, using `iter_size_args()`
-        inp(
-            *converted_args,
-            *conn_args,
-            **opt_kwargs,
-        )
+        try:
+            inp(
+                *converted_args,
+                *conn_args,
+                **opt_kwargs,
+            )
+        except TypeError as error:
+            if conn_args and "incompatible function arguments" in str(error):
+                inp(
+                    *converted_args,
+                    **opt_kwargs,
+                )
+            else:
+                raise
 
         if collect_metrics:
             metrics.add_sample_to_current_source(

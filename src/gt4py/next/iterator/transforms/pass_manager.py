@@ -172,7 +172,7 @@ def apply_common_transforms(
     assert isinstance(ir, itir.Program)
 
     offset_provider_type = common.offset_provider_to_type(offset_provider)
-    print_ir = False
+    print_ir = True
     if print_ir:
         print("\n" + "=" * 60)
         print("=== FINAL GTIR HANDED TO GTFN BACKEND ===")
@@ -228,6 +228,12 @@ def apply_common_transforms(
         print(ir)
         print("=" * 60 + "\n")
     ir = concat_where.transform_to_as_fieldop(ir)
+    if print_ir:
+        print("\n" + "=" * 60)
+        print("=== GTIR AFTER TRANSFORM AS FIELDOP ===")
+        print("=" * 60)
+        print(ir)
+        print("=" * 60 + "\n")
     for _ in range(10):
         inlined = ir
 
@@ -260,6 +266,12 @@ def apply_common_transforms(
     else:
         raise RuntimeError("Inlining 'lift' and 'lambdas' did not converge.")
 
+    if print_ir:
+        print("\n" + "=" * 60)
+        print("=== GTIR AFTER INLINING LIFTS AND LAMBDAS ===")
+        print("=" * 60)
+        print(ir)
+        print("=" * 60 + "\n")
     # breaks in test_zero_dim_tuple_arg as trivial tuple_get is not inlined
     if common_subexpression_elimination:
         ir = CommonSubexpressionElimination.apply(
@@ -277,6 +289,13 @@ def apply_common_transforms(
             uids=uids,
         )
 
+    if print_ir:
+        print("\n" + "=" * 60)
+        print("=== GTIR AFTER COMMON TRANSFORMS ===")
+        print("=" * 60)
+        print(ir)
+        print("=" * 60 + "\n")
+
     ir = NormalizeShifts().visit(ir)
 
     ir = FuseMaps(uids=uids).visit(ir)
@@ -288,6 +307,12 @@ def apply_common_transforms(
             offset_provider_type=offset_provider_type,
             uids=uids,
         )
+    if print_ir:
+        print("\n" + "=" * 60)
+        print("=== GTIR AFTER UNROLLING REDUCE (IF ENABLED) ===")
+        print("=" * 60)
+        print(ir)
+        print("=" * 60 + "\n")
 
     ir = InlineLambdas.apply(
         ir, opcount_preserving=True, force_inline_lambda_args=force_inline_lambda_args

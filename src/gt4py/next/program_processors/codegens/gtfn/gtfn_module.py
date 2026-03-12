@@ -109,12 +109,17 @@ class GTFNTranslationStep(
         return parameters, arg_exprs
 
     def _process_connectivity_args(
-        self, offset_provider_type: common.OffsetProviderType
+        self,
+        offset_provider_type: common.OffsetProviderType,
+        *,
+        used_offset_tags: Optional[set[str]] = None,
     ) -> tuple[list[interface.Parameter], list[str]]:
         parameters: list[interface.Parameter] = []
         arg_exprs: list[str] = []
 
         for name, connectivity_type in offset_provider_type.items():
+            if used_offset_tags is not None and name not in used_offset_tags:
+                continue
             if isinstance(connectivity_type, common.NeighborConnectivityType):
                 if connectivity_type.dtype.scalar_type not in [np.int32, np.int64]:
                     raise ValueError(
@@ -152,6 +157,25 @@ class GTFNTranslationStep(
                 )
 
         return parameters, arg_exprs
+
+    @staticmethod
+    def _collect_used_offset_tags(program: itir.Program) -> set[str]:
+        return (
+            program.walk_values()
+            .if_isinstance(itir.OffsetLiteral)
+            .filter(lambda offset_literal: isinstance(offset_literal.value, str))
+            .getattr("value")
+            .to_set()
+        )
+
+    @staticmethod
+    def _resolve_effective_arg_types(
+        program: itir.Program, arg_types: tuple[ts.TypeSpec, ...]
+    ) -> tuple[ts.TypeSpec, ...]:
+        effective_arg_types: list[ts.TypeSpec] = []
+        for arg_type, param in zip(arg_types, program.params, strict=True):
+            effective_arg_types.append(param.type if param.type is not None else arg_type)
+        return tuple(effective_arg_types)
 
     def _preprocess_program(
         self,
@@ -255,8 +279,12 @@ class GTFNTranslationStep(
         offset_provider: common.OffsetProvider | common.OffsetProviderType,
         column_axis: Optional[common.Dimension],
         cartesian_reduce_axis_ranges: Optional[dict[common.Dimension, tuple[int, int]]] = None,
+        *,
+        already_preprocessed: bool = False,
     ) -> str:
-        if self.enable_itir_transforms:
+        if already_preprocessed:
+            new_program = program
+        elif self.enable_itir_transforms:
             new_program = self._preprocess_program(
                 program,
                 offset_provider,
@@ -285,18 +313,34 @@ class GTFNTranslationStep(
     ) -> stages.ProgramSource[languages.NanobindSrcL, languages.LanguageWithHeaderFilesSettings]:
         """Generate GTFN C++ code from the ITIR definition."""
         program: itir.Program = inp.data
+        arg_types = inp.args.args
+        cartesian_reduce_axis_ranges = self._resolve_cartesian_reduce_axis_ranges(
+            program, inp.args.argument_descriptor_contexts
+        )
+
+        if self.enable_itir_transforms:
+            transformed_program = self._preprocess_program(
+                program,
+                inp.args.offset_provider,
+                cartesian_reduce_axis_ranges=cartesian_reduce_axis_ranges,
+            )
+        else:
+            transformed_program = program
+
+        used_offset_tags = self._collect_used_offset_tags(transformed_program)
+        effective_arg_types = self._resolve_effective_arg_types(transformed_program, arg_types)
 
         # handle regular parameters and arguments of the program (i.e. what the user defined in
         #  the program)
-        arg_types = inp.args.args
         regular_parameters, regular_args_expr = self._process_regular_arguments(
-            program, arg_types, inp.args.offset_provider_type
+            transformed_program, effective_arg_types, inp.args.offset_provider_type
         )
 
         # handle connectivity parameters and arguments (i.e. what the user provided in the offset
         #  provider)
         connectivity_parameters, connectivity_args_expr = self._process_connectivity_args(
-            inp.args.offset_provider_type
+            inp.args.offset_provider_type,
+            used_offset_tags=used_offset_tags,
         )
 
         # combine into a format that is aligned with what the backend expects
@@ -310,14 +354,12 @@ class GTFNTranslationStep(
             f"{', '.join(connectivity_args_expr)})({', '.join(args_expr)});"
         )
         decl_src = cpp_interface.render_function_declaration(function, body=decl_body)
-        cartesian_reduce_axis_ranges = self._resolve_cartesian_reduce_axis_ranges(
-            program, inp.args.argument_descriptor_contexts
-        )
         stencil_src = self.generate_stencil_source(
-            program,
+            transformed_program,
             inp.args.offset_provider,
             inp.args.column_axis,
             cartesian_reduce_axis_ranges=cartesian_reduce_axis_ranges,
+            already_preprocessed=True,
         )
         source_code = interface.format_source(
             self._language_settings(),

@@ -161,11 +161,16 @@ def _(arg: ts.ScalarType) -> ts.ScalarType:
 def synthesize_binary_math_comparison_builtins(
     lhs, rhs
 ) -> ts.ScalarType | ts.TupleType | ts.DomainType:
+    if isinstance(lhs, it_ts.OffsetLiteralType):
+        lhs = lhs.value
+    if isinstance(rhs, it_ts.OffsetLiteralType):
+        rhs = rhs.value
+
     if isinstance(lhs, ts.ScalarType) and isinstance(rhs, ts.DimensionType):
         return ts.DomainType(dims=[rhs.dim])
     if isinstance(lhs, ts.DimensionType) and isinstance(rhs, ts.ScalarType):
         return ts.DomainType(dims=[lhs.dim])
-    assert all(isinstance(lhs, (ts.ScalarType, ts.DeferredType)) for arg in (lhs, rhs))
+    assert all(isinstance(arg, (ts.ScalarType, ts.DeferredType)) for arg in (lhs, rhs))
     return ts.ScalarType(kind=ts.ScalarKind.BOOL)
 
 

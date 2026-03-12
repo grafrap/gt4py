@@ -137,11 +137,12 @@ def _collect_offset_definitions(
         .filter(lambda offset_literal: isinstance(offset_literal.value, str))
         .getattr("value")
     ).to_set()
-    # implicit offsets don't occur in the `offset_provider_type`, get them from the used offset tags
+    # collect only offsets actually used in the IR (including implicit offsets)
+    # to avoid introducing irrelevant connectivity tags into code generation.
     offset_provider_type = {
         offset_name: common.get_offset_type(offset_provider_type, offset_name)
         for offset_name in used_offset_tags
-    } | {**offset_provider_type}
+    }
     offset_definitions = {}
 
     for offset_name, dim_or_connectivity_type in offset_provider_type.items():
