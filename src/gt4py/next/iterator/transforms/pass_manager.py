@@ -27,6 +27,7 @@ from gt4py.next.iterator.transforms import (
     inline_lifts,
     prune_empty_concat_where,
     remove_broadcast,
+    structured_field_remap,
 )
 from gt4py.next.iterator.transforms.collapse_list_get import CollapseListGet
 from gt4py.next.iterator.transforms.collapse_tuple import CollapseTuple
@@ -78,6 +79,15 @@ class _FieldviewDebugStats(eve.NodeVisitor):
                 self.nested_as_fieldop_nodes.append(node)
 
         self.generic_visit(node, **kwargs)
+
+
+def _structured_field_remap_enabled() -> bool:
+    return os.environ.get("GT4PY_ENABLE_STRUCTURED_FIELD_REMAP", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _debug_dump_fieldview_ir(stage: str, ir: itir.Program) -> None:
@@ -172,7 +182,7 @@ def apply_common_transforms(
     assert isinstance(ir, itir.Program)
 
     offset_provider_type = common.offset_provider_to_type(offset_provider)
-    print_ir = False
+    print_ir = True
     if print_ir:
         print("\n" + "=" * 60)
         print("=== FINAL GTIR HANDED TO GTFN BACKEND ===")
@@ -198,6 +208,8 @@ def apply_common_transforms(
     ir = inline_dynamic_shifts.InlineDynamicShifts.apply(
         ir, offset_provider_type=offset_provider_type, uids=uids
     )  # domain inference does not support dynamic offsets yet
+    if _structured_field_remap_enabled() or True:
+        ir = structured_field_remap.StructuredFieldRemap.apply(ir)
 
     ir = cart_unroll.CartUnroll.apply(ir)
     ir = NormalizeShifts().visit(ir)

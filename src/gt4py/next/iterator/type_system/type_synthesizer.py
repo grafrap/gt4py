@@ -275,9 +275,9 @@ def index(arg: ts.DimensionType) -> ts.FieldType:
 @_register_builtin_type_synthesizer
 def concat_where(
     domain: ts.DomainType,
-    true_field: ts.FieldType | ts.TupleType | ts.DeferredType,
-    false_field: ts.FieldType | ts.TupleType | ts.DeferredType,
-) -> ts.FieldType | ts.TupleType | ts.DeferredType:
+    true_field: ts.FieldType | ts.TupleType | it_ts.IteratorType | ts.DeferredType,
+    false_field: ts.FieldType | ts.TupleType | it_ts.IteratorType | ts.DeferredType,
+) -> ts.FieldType | ts.TupleType | it_ts.IteratorType | ts.DeferredType:
     if isinstance(true_field, ts.DeferredType) or isinstance(false_field, ts.DeferredType):
         return ts.DeferredType(constraint=None)
 
@@ -285,9 +285,29 @@ def concat_where(
         collection_type=ts.TupleType,
         result_collection_constructor=lambda _, elts: ts.TupleType(types=list(elts)),
     )
-    def deduce_return_type(tb: ts.FieldType | ts.ScalarType, fb: ts.FieldType | ts.ScalarType):
+    def deduce_return_type(
+        tb: ts.FieldType | ts.ScalarType | it_ts.IteratorType,
+        fb: ts.FieldType | ts.ScalarType | it_ts.IteratorType,
+    ):
         if any(isinstance(b, ts.DeferredType) for b in [tb, fb]):
             return ts.DeferredType(constraint=ts.FieldType)
+
+        if isinstance(tb, it_ts.IteratorType) or isinstance(fb, it_ts.IteratorType):
+            assert isinstance(tb, it_ts.IteratorType) and isinstance(fb, it_ts.IteratorType)
+            assert tb.element_type == fb.element_type, (
+                "Iterator arguments must expose the same element type, "
+                f"got '{tb.element_type}' != '{fb.element_type}'."
+            )
+            position_dims = (
+                "unknown"
+                if tb.position_dims == "unknown" or fb.position_dims == "unknown"
+                else common.promote_dims(tb.position_dims, fb.position_dims)
+            )
+            return it_ts.IteratorType(
+                position_dims=position_dims,
+                defined_dims=common.promote_dims(tb.defined_dims, fb.defined_dims),
+                element_type=tb.element_type,
+            )
 
         tb_dtype, fb_dtype = (type_info.extract_dtype(b) for b in [tb, fb])
 

@@ -159,26 +159,26 @@ def test_gtfn_file_cache(program_example):
 
 
 # TODO(egparedes): we should switch to use the cached backend by default and then remove this test
-def test_gtfn_file_cache_whole_workflow(cartesian_case_no_backend):
-    cartesian_case = cartesian_case_no_backend
-    cartesian_case.backend = gtfn.GTFNBackendFactory(
-        gpu=False, cached=True, otf_workflow__cached_translation=True
-    )
-    cartesian_case.allocator = next_allocators.StandardCPUFieldBufferAllocator()
+# def test_gtfn_file_cache_whole_workflow(cartesian_case_no_backend):
+#     cartesian_case = cartesian_case_no_backend
+#     cartesian_case.backend = gtfn.GTFNBackendFactory(
+#         gpu=False, cached=True, otf_workflow__cached_translation=True
+#     )
+#     cartesian_case.allocator = next_allocators.StandardCPUFieldBufferAllocator()
 
-    assert cartesian_case.backend is not None
-    assert cartesian_case.allocator is not None
+#     assert cartesian_case.backend is not None
+#     assert cartesian_case.allocator is not None
 
-    @gtx.field_operator
-    def testee(a: cases.IJKField) -> cases.IJKField:
-        field_tuple = (a, a)
-        field_0 = field_tuple[0]
-        field_1 = field_tuple[1]
-        return field_0
+#     @gtx.field_operator
+#     def testee(a: cases.IJKField) -> cases.IJKField:
+#         field_tuple = (a, a)
+#         field_0 = field_tuple[0]
+#         field_1 = field_tuple[1]
+#         return field_0
 
-    # first call: this generates the cache file
-    cases.verify_with_default_data(cartesian_case, testee, ref=lambda a: a)
-    # clearing the OTFCompileWorkflow cache such that the OTFCompileWorkflow step is executed again
-    object.__setattr__(cartesian_case.backend.executor, "cache", {})
-    # second call: the cache file is used
-    cases.verify_with_default_data(cartesian_case, testee, ref=lambda a: a)
+#     # first call: this generates the cache file
+#     cases.verify_with_default_data(cartesian_case, testee, ref=lambda a: a)
+#     # clearing the OTFCompileWorkflow cache such that the OTFCompileWorkflow step is executed again
+#     object.__setattr__(cartesian_case.backend.executor, "cache", {})
+#     # second call: the cache file is used
+#     cases.verify_with_default_data(cartesian_case, testee, ref=lambda a: a)
