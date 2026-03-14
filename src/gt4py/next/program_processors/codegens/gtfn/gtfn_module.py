@@ -182,12 +182,18 @@ class GTFNTranslationStep(
         program: itir.Program,
         offset_provider: common.OffsetProvider | common.OffsetProviderType,
         cartesian_reduce_axis_ranges: Optional[dict[common.Dimension, tuple[int, int]]] = None,
+        symbolic_domain_sizes: Optional[dict[str, Any]] = None,
     ) -> itir.Program:
+        effective_symbolic_domain_sizes = (
+            self.symbolic_domain_sizes
+            if symbolic_domain_sizes is None
+            else symbolic_domain_sizes
+        )
         apply_common_transforms = functools.partial(
             pass_manager.apply_common_transforms,
             extract_temporaries=True,
             offset_provider=offset_provider,
-            symbolic_domain_sizes=self.symbolic_domain_sizes,
+            symbolic_domain_sizes=effective_symbolic_domain_sizes,
             cartesian_reduce_axis_ranges=cartesian_reduce_axis_ranges,
         )
 
@@ -204,6 +210,25 @@ class GTFNTranslationStep(
             new_program = apply_common_transforms(program, unroll_reduce=True)
 
         return new_program
+
+    def _resolve_symbolic_domain_sizes(
+        self,
+        argument_descriptor_contexts: arguments.ArgStaticDescriptorsContextsByType,
+    ) -> Optional[dict[str, Any]]:
+        resolved: dict[str, Any] = {}
+        if self.symbolic_domain_sizes is not None:
+            resolved.update(self.symbolic_domain_sizes)
+
+        static_arg_descriptors = argument_descriptor_contexts.get(arguments.StaticArg)
+        if static_arg_descriptors is not None:
+            for name in ("max_i", "max_j", "domain_max_i", "domain_max_j", "nx", "ny"):
+                descriptor = static_arg_descriptors.get(name)
+                if not isinstance(descriptor, arguments.StaticArg):
+                    continue
+                if isinstance(descriptor.value, (int, np.integer)):
+                    resolved[name] = int(descriptor.value)
+
+        return resolved or None
 
     @staticmethod
     def _infer_kolor_extent_from_program(program: itir.Program) -> Optional[int]:
@@ -285,10 +310,12 @@ class GTFNTranslationStep(
         if already_preprocessed:
             new_program = program
         elif self.enable_itir_transforms:
+            resolved_symbolic_domain_sizes = self._resolve_symbolic_domain_sizes({})
             new_program = self._preprocess_program(
                 program,
                 offset_provider,
                 cartesian_reduce_axis_ranges=cartesian_reduce_axis_ranges,
+                symbolic_domain_sizes=resolved_symbolic_domain_sizes,
             )
         else:
             assert isinstance(program, itir.Program)
@@ -317,12 +344,16 @@ class GTFNTranslationStep(
         cartesian_reduce_axis_ranges = self._resolve_cartesian_reduce_axis_ranges(
             program, inp.args.argument_descriptor_contexts
         )
+        resolved_symbolic_domain_sizes = self._resolve_symbolic_domain_sizes(
+            inp.args.argument_descriptor_contexts
+        )
 
         if self.enable_itir_transforms:
             transformed_program = self._preprocess_program(
                 program,
                 inp.args.offset_provider,
                 cartesian_reduce_axis_ranges=cartesian_reduce_axis_ranges,
+                symbolic_domain_sizes=resolved_symbolic_domain_sizes,
             )
         else:
             transformed_program = program

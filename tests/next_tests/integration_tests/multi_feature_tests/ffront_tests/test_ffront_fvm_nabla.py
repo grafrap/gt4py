@@ -17,7 +17,7 @@ pytest.importorskip("atlas4py")
 from gt4py import next as gtx
 from gt4py.next import neighbor_sum
 from gt4py.next.program_processors.program_setup_utils import setup_program
-from gt4py.next.program_processors.runners.gtfn import run_gtfn_cached as gtfn_cpu
+from gt4py.next.program_processors.runners import gtfn as gtfn_runner
 
 
 from next_tests.integration_tests.feature_tests.ffront_tests.ffront_test_utils import (
@@ -40,8 +40,10 @@ from gt4py.next.modules.translator import (
     Kolor,
     build_index_map_from_lonlat_e2v,
     pack_edge_field_to_structured,
+    pack_vertex_field,
     pack_vertex_field_to_structured,
     unpack_edge_field,
+    unpack_vertex_field_to_unstructured,
 )
 
 
@@ -189,7 +191,14 @@ def test_ffront_compute_zavgS_parallelogram_grid(exec_alloc_descriptor):
         [IDim, JDim, Kolor], zavgS_struct_np, allocator=exec_alloc_descriptor.allocator
     )
 
-    selected_backend = gtfn_cpu
+    selected_backend = gtfn_runner.GTFNBackendFactory(
+        cached=True,
+        otf_workflow__cached_translation=True,
+        otf_workflow__bare_translation__symbolic_domain_sizes={
+            "max_i": int(remap_sizes.max_i),
+            "max_j": int(remap_sizes.max_j),
+        },
+    )
     compute_zavgS_program = setup_program(
         compute_zavgS,
         backend=selected_backend,
@@ -238,3 +247,112 @@ def test_ffront_nabla(exec_alloc_descriptor):
     assert_close(3.5455427772565435e-003, np.max(pnabla_MXX.asnumpy()))
     assert_close(-3.3540113705465301e-003, np.min(pnabla_MYY.asnumpy()))
     assert_close(3.3540113705465301e-003, np.max(pnabla_MYY.asnumpy()))
+
+def test_ffront_nabla_parallelogram_grid(exec_alloc_descriptor):
+    mesh_nc = os.environ.get(
+        "GT4PY_TRANSLATOR_MESH",
+        "/home/raphael/Documents/Studium/Msc_thesis/grid-generator/parallelogram_grid.nc",
+    )
+    xr = pytest.importorskip("xarray")
+
+    with xr.open_dataset(mesh_nc) as ds:
+        e2v = _read_e2v(ds)
+        v2e = _read_v2e(ds)
+        lonlat = _read_lonlat(ds)
+        remap_sizes = load_structured_remap_sizes_from_netcdf(mesh_nc)
+
+        print(f"remap sies: ",remap_sizes)
+
+        setup = nabla_setup.from_connectivity(
+            allocator=exec_alloc_descriptor.allocator,
+            e2v=e2v,
+            v2e=v2e,
+            lonlat_deg=lonlat,
+        )
+
+        assert setup.nodes_size == remap_sizes.vertex_size
+        assert setup.edges_size <= remap_sizes.edge_size_padded
+        assert int(ds.sizes["cell"]) == remap_sizes.cell_size
+    
+    index_map = build_index_map_from_lonlat_e2v(
+        lonlat,
+        e2v,
+        nodes_size=setup.nodes_size,
+        edges_size=setup.edges_size,
+    )
+
+    pp_struct_np = pack_vertex_field_to_structured(setup.input_field.asnumpy(), index_map)
+    s_m_struct_np = pack_edge_field_to_structured(setup.S_fields[0].asnumpy(), index_map)
+    sign_struct_np = pack_vertex_field(setup.sign_field.asnumpy(), index_map)
+    assert sign_struct_np.ndim == 4
+    assert sign_struct_np.shape[2] == 1
+    assert sign_struct_np.shape[3] == 6
+    vol_struct_np = pack_vertex_field_to_structured(setup.vol_field.asnumpy(), index_map)
+    pnabla_mxx_struct_np = np.zeros_like(vol_struct_np)
+    pnabla_myy_struct_np = np.zeros_like(vol_struct_np)
+
+    pp_struct = gtx.as_field([IDim, JDim, Kolor], pp_struct_np, allocator=exec_alloc_descriptor.allocator)
+    s_m_struct = gtx.as_field(
+        [IDim, JDim, Kolor], s_m_struct_np, allocator=exec_alloc_descriptor.allocator
+    )
+    sign_struct = gtx.as_field(
+        [IDim, JDim, Kolor, V2EDim], sign_struct_np, allocator=exec_alloc_descriptor.allocator
+    )
+    vol_struct = gtx.as_field(
+        [IDim, JDim, Kolor], vol_struct_np, allocator=exec_alloc_descriptor.allocator
+    )
+    pnabla_mxx_struct = gtx.as_field(
+        [IDim, JDim, Kolor], pnabla_mxx_struct_np, allocator=exec_alloc_descriptor.allocator
+    )
+    pnabla_myy_struct = gtx.as_field(
+        [IDim, JDim, Kolor], pnabla_myy_struct_np, allocator=exec_alloc_descriptor.allocator
+    )
+
+    selected_backend = gtfn_runner.GTFNBackendFactory(
+        cached=True,
+        otf_workflow__cached_translation=True,
+        otf_workflow__bare_translation__symbolic_domain_sizes={
+            "max_i": int(remap_sizes.max_i),
+            "max_j": int(remap_sizes.max_j),
+        },
+    )
+    pnabla_mxx_program = setup_program(
+        compute_pnabla,
+        backend=selected_backend,
+        offset_provider={
+            "E2V": setup.edges2node_connectivity,
+            "V2E": setup.nodes2edge_connectivity,
+        },
+    )
+    pnabla_myy_program = setup_program(
+        compute_pnabla,
+        backend=selected_backend,
+        offset_provider={
+            "E2V": setup.edges2node_connectivity,
+            "V2E": setup.nodes2edge_connectivity,
+        },
+    )
+
+    pnabla_mxx_program(
+        pp=pp_struct,
+        S_M=s_m_struct,
+        sign=sign_struct,
+        vol=vol_struct,
+        out=pnabla_mxx_struct,
+    )
+    pnabla_myy_program(
+        pp=pp_struct,
+        S_M=s_m_struct,
+        sign=sign_struct,
+        vol=vol_struct,
+        out=pnabla_myy_struct,
+    )
+
+    pnabla_mxx_np = unpack_vertex_field_to_unstructured(pnabla_mxx_struct.asnumpy(), index_map)
+    pnabla_myy_np = unpack_vertex_field_to_unstructured(pnabla_myy_struct.asnumpy(), index_map)
+
+    # TODO this check is not sensitive enough, need to implement a proper numpy reference!
+    assert_close(-3.5455427772566003e-003, np.min(pnabla_mxx_np))
+    assert_close(3.5455427772565435e-003, np.max(pnabla_mxx_np))
+    assert_close(-3.3540113705465301e-003, np.min(pnabla_myy_np))
+    assert_close(3.3540113705465301e-003, np.max(pnabla_myy_np))

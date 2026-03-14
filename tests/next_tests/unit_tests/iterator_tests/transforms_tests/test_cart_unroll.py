@@ -12,8 +12,21 @@ from gt4py.next import common
 from gt4py.eve import SymbolRef
 from gt4py.next.iterator import ir
 from gt4py.next.iterator.ir_utils import ir_makers as im
-from gt4py.next.iterator.transforms.cart_unroll import CartUnroll
+from gt4py.next.iterator.ir_utils import common_pattern_matcher as cpm
+from gt4py.next.iterator.transforms.cart_unroll import CartUnroll, map_dict
 from gt4py.next.iterator.transforms.normalize_shifts import NormalizeShifts
+from gt4py.next.type_system import type_specifications as ts
+
+
+def test_normalize_shifts_removes_zero_offsets():
+    testee = im.shift("_OffIDim", 0)(im.shift("_OffJDim", 0)("iter"))
+    actual = NormalizeShifts().visit(testee)
+    assert actual == im.ref("iter")
+
+    testee = im.shift("_OffIDim", 0)(im.shift("_OffJDim", -1)("iter"))
+    actual = NormalizeShifts().visit(testee)
+    expected = im.shift("_OffJDim", -1)("iter")
+    assert actual == expected
 
 
 def test_V2E():
@@ -129,8 +142,6 @@ def test_E2V():
     actual = CartUnroll.apply(testee)
     actual = NormalizeShifts().visit(actual)
     expected = NormalizeShifts().visit(expected)
-    print(actual)
-    print(expected)
     assert actual == expected
 
     testee = im.shift("E2V", 1)("iter")
@@ -711,3 +722,373 @@ def test_C2E2C2E2C():
     actual = NormalizeShifts().visit(actual)
     expected = NormalizeShifts().visit(expected)
     assert actual == expected
+
+
+@pytest.mark.parametrize("axis", ["Edge", "Vertex", "Cell"])
+def test_unstructured_domain_is_rewritten_to_cartesian_domain(axis):
+    out = im.ref("out")
+    start = im.tuple_get(0, im.call("get_domain_range")(out, ir.AxisLiteral(value=axis)))
+    stop = im.tuple_get(1, im.call("get_domain_range")(out, ir.AxisLiteral(value=axis)))
+    testee = im.call("unstructured_domain")(im.call("named_range")(ir.AxisLiteral(value=axis), start, stop))
+
+    IDim = common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL)
+    JDim = common.Dimension("JDim", kind=common.DimensionKind.HORIZONTAL)
+    Kolor = common.Dimension("Kolor", kind=common.DimensionKind.HORIZONTAL)
+    kolor_stop = {"Vertex": 1, "Cell": 2, "Edge": 3}[axis]
+
+    expected = im.call("cartesian_domain")(
+        im.named_range(
+            IDim,
+            im.tuple_get(0, im.call("get_domain_range")(out, IDim)),
+            im.tuple_get(1, im.call("get_domain_range")(out, IDim)),
+        ),
+        im.named_range(
+            JDim,
+            im.tuple_get(0, im.call("get_domain_range")(out, JDim)),
+            im.tuple_get(1, im.call("get_domain_range")(out, JDim)),
+        ),
+        im.named_range(
+            Kolor,
+            ir.OffsetLiteral(value=0),
+            ir.OffsetLiteral(value=kolor_stop),
+        ),
+    )
+
+    actual = CartUnroll.apply(testee)
+    assert actual == expected
+
+
+def test_lifted_applied_shift_is_rewritten_to_lifted_concat_where():
+    IDim = common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL)
+    JDim = common.Dimension("JDim", kind=common.DimensionKind.HORIZONTAL)
+    Kolor = common.Dimension("Kolor", kind=common.DimensionKind.HORIZONTAL)
+
+    domain = im.call("cartesian_domain")(
+        im.named_range(IDim, 0, 4),
+        im.named_range(JDim, 0, 5),
+        im.named_range(Kolor, 0, 2),
+    )
+
+    testee = im.as_fieldop(
+        im.lambda_("it")(im.deref(im.shift("E2V", 0)("it"))),
+        domain,
+    )("arg")
+
+    cond0 = im.call("cartesian_domain")(im.named_range(Kolor, 0, 1))
+    cond1 = im.call("cartesian_domain")(im.named_range(Kolor, 1, 2))
+
+    b0 = im.as_fieldop(
+        im.lambda_("__cart_unroll_it")(
+            im.deref(
+                im.shift("_OffKolor", 0)(
+                    im.shift("_OffJDim", 0)(im.shift("_OffIDim", 0)("__cart_unroll_it"))
+                )
+            )
+        ),
+        domain,
+    )("arg")
+    b1 = im.as_fieldop(
+        im.lambda_("__cart_unroll_it")(
+            im.deref(
+                im.shift("_OffKolor", -1)(
+                    im.shift("_OffJDim", 0)(im.shift("_OffIDim", 1)("__cart_unroll_it"))
+                )
+            )
+        ),
+        domain,
+    )("arg")
+    b2 = im.as_fieldop(
+        im.lambda_("__cart_unroll_it")(
+            im.deref(
+                im.shift("_OffKolor", -2)(
+                    im.shift("_OffJDim", 1)(im.shift("_OffIDim", 0)("__cart_unroll_it"))
+                )
+            )
+        ),
+        domain,
+    )("arg")
+    actual = CartUnroll.apply(testee)
+    actual = NormalizeShifts().visit(actual)
+
+    assert cpm.is_call_to(actual, "concat_where")
+    _, branch0, tail = actual.args
+    assert cpm.is_call_to(tail, "concat_where")
+    _, branch1, branch2 = tail.args
+
+    def _assert_lifted_branch_shift(branch, expected_shift):
+        assert cpm.is_applied_as_fieldop(branch)
+        assert isinstance(branch.fun, ir.FunCall)
+        assert isinstance(branch.fun.args[0], ir.Lambda)
+        stencil = branch.fun.args[0]
+        assert cpm.is_call_to(stencil.expr, "deref")
+        assert len(stencil.expr.args) == 1
+        shifted = NormalizeShifts().visit(stencil.expr.args[0])
+        assert shifted == NormalizeShifts().visit(expected_shift)
+
+    _assert_lifted_branch_shift(
+        branch0,
+        im.shift("_OffKolor", 0)(im.shift("_OffJDim", 0)(im.shift("_OffIDim", 0)("__cart_unroll_it"))),
+    )
+    _assert_lifted_branch_shift(
+        branch1,
+        im.shift("_OffKolor", -1)(
+            im.shift("_OffJDim", 0)(im.shift("_OffIDim", 1)("__cart_unroll_it"))
+        ),
+    )
+    _assert_lifted_branch_shift(
+        branch2,
+        im.shift("_OffKolor", -2)(
+            im.shift("_OffJDim", 1)(im.shift("_OffIDim", 0)("__cart_unroll_it"))
+        ),
+    )
+
+
+def test_cartesian_remapped_type_includes_cell_fields():
+    Cell = common.Dimension("Cell", kind=common.DimensionKind.HORIZONTAL)
+    testee = ts.FieldType(dims=[Cell], dtype=ts.ScalarType(kind=ts.ScalarKind.FLOAT64))
+
+    actual = CartUnroll._cartesian_remapped_type(testee)
+
+    assert isinstance(actual, ts.FieldType)
+    assert [d.value for d in actual.dims] == ["IDim", "JDim", "Kolor"]
+
+
+def test_cartesian_remapped_type_preserves_local_dims():
+    Vertex = common.Dimension("Vertex", kind=common.DimensionKind.HORIZONTAL)
+    V2EDim = common.Dimension("V2E", kind=common.DimensionKind.LOCAL)
+    testee = ts.FieldType(dims=[Vertex, V2EDim], dtype=ts.ScalarType(kind=ts.ScalarKind.FLOAT64))
+
+    actual = CartUnroll._cartesian_remapped_type(testee)
+
+    assert isinstance(actual, ts.FieldType)
+    assert [d.value for d in actual.dims] == ["IDim", "JDim", "Kolor", "V2E"]
+
+
+def test_v2e_neighbors_reduce_plus_rewritten_generically():
+    def _contains_call(node: ir.Node, name: str) -> bool:
+        if cpm.is_call_to(node, name):
+            return True
+        if isinstance(node, ir.FunCall):
+            if _contains_call(node.fun, name):
+                return True
+            return any(_contains_call(arg, name) for arg in node.args)
+        if isinstance(node, ir.Lambda):
+            return _contains_call(node.expr, name)
+        return False
+
+    neighbors_applied = im.as_fieldop(im.lambda_("it")(im.neighbors("V2E", "it")))("zavgS")
+    mapped = im.as_fieldop(
+        im.lambda_("a", "b")(im.map_("multiplies")(im.deref("a"), im.deref("b")))
+    )(neighbors_applied, "sign")
+    testee = im.as_fieldop(im.lambda_("lst")(im.reduce("plus", 0)(im.deref("lst"))))(mapped)
+
+    actual = CartUnroll.apply(testee)
+    actual = NormalizeShifts().visit(actual)
+
+    assert not _contains_call(actual, "neighbors")
+    assert not _contains_call(actual, "reduce")
+
+
+def test_neighbors_reduce_rewritten_for_non_v2e_connection_and_maximum():
+    def _contains_neighbors(node: ir.Node) -> bool:
+        if cpm.is_call_to(node, "neighbors"):
+            return True
+        if isinstance(node, ir.FunCall):
+            if _contains_neighbors(node.fun):
+                return True
+            return any(_contains_neighbors(arg) for arg in node.args)
+        if isinstance(node, ir.Lambda):
+            return _contains_neighbors(node.expr)
+        return False
+
+    neighbors_applied = im.as_fieldop(im.lambda_("it")(im.neighbors("E2C", "it")))("zavgS")
+    mapped = im.as_fieldop(
+        im.lambda_("a", "b")(im.map_("plus")(im.deref("a"), im.deref("b")))
+    )(neighbors_applied, "sign")
+    init = im.literal("0.0", "float64")
+    testee = im.as_fieldop(im.lambda_("lst")(im.reduce("maximum", init)(im.deref("lst"))))(mapped)
+
+    actual = CartUnroll.apply(testee)
+    actual = NormalizeShifts().visit(actual)
+
+    assert not _contains_neighbors(actual)
+
+
+def test_neighbors_reduce_rewritten_for_minimum_without_map_pattern():
+    def _contains_call(node: ir.Node, name: str) -> bool:
+        if cpm.is_call_to(node, name):
+            return True
+        if isinstance(node, ir.FunCall):
+            if _contains_call(node.fun, name):
+                return True
+            return any(_contains_call(arg, name) for arg in node.args)
+        if isinstance(node, ir.Lambda):
+            return _contains_call(node.expr, name)
+        return False
+
+    neighbors_applied = im.as_fieldop(im.lambda_("it")(im.neighbors("V2E", "it")))("zavgS")
+    init = im.literal("1.0", "float64")
+    testee = im.as_fieldop(im.lambda_("lst")(im.reduce("minimum", init)(im.deref("lst"))))(
+        neighbors_applied
+    )
+
+    actual = CartUnroll.apply(testee)
+    actual = NormalizeShifts().visit(actual)
+
+    assert not _contains_call(actual, "neighbors")
+    assert not _contains_call(actual, "reduce")
+
+
+@pytest.mark.parametrize(
+    ("axis", "kolor_stop"),
+    [("Vertex", 1), ("Cell", 2), ("Edge", 3)],
+)
+def test_unstructured_domain_inlines_nx_ny_and_kolor_bounds_when_available(axis, kolor_stop):
+    domain_expr = im.call("unstructured_domain")(
+        im.call("named_range")(
+            ir.AxisLiteral(value=axis),
+            im.tuple_get(0, im.call("get_domain_range")(im.ref("out"), ir.AxisLiteral(value=axis))),
+            im.tuple_get(1, im.call("get_domain_range")(im.ref("out"), ir.AxisLiteral(value=axis))),
+        )
+    )
+
+    testee = ir.Program(
+        id="testee",
+        function_definitions=[],
+        params=[im.sym("inp"), im.sym("out"), im.sym("max_i"), im.sym("max_j")],
+        declarations=[],
+        body=[ir.SetAt(expr=im.ref("inp"), domain=domain_expr, target=im.ref("out"))],
+    )
+
+    IDim = common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL)
+    JDim = common.Dimension("JDim", kind=common.DimensionKind.HORIZONTAL)
+    Kolor = common.Dimension("Kolor", kind=common.DimensionKind.HORIZONTAL)
+
+    expected = ir.Program(
+        id="testee",
+        function_definitions=[],
+        params=[im.sym("inp"), im.sym("out"), im.sym("max_i"), im.sym("max_j")],
+        declarations=[],
+        body=[
+            ir.SetAt(
+                expr=im.ref("inp"),
+                domain=im.call("cartesian_domain")(
+                    im.named_range(IDim, ir.OffsetLiteral(value=0), im.ref("max_i")),
+                    im.named_range(JDim, ir.OffsetLiteral(value=0), im.ref("max_j")),
+                    im.named_range(
+                        Kolor,
+                        ir.OffsetLiteral(value=0),
+                        ir.OffsetLiteral(value=kolor_stop),
+                    ),
+                ),
+                target=im.ref("out"),
+            )
+        ],
+    )
+
+    actual = CartUnroll.apply(testee)
+    assert actual == expected
+
+
+def test_tuple_get_get_domain_range_inlines_max_i_max_j():
+    IDim = common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL)
+    JDim = common.Dimension("JDim", kind=common.DimensionKind.HORIZONTAL)
+    Kolor = common.Dimension("Kolor", kind=common.DimensionKind.HORIZONTAL)
+
+    domain_expr = im.call("cartesian_domain")(
+        im.named_range(
+            IDim,
+            im.tuple_get(0, im.call("get_domain_range")(im.ref("out"), IDim)),
+            im.tuple_get(1, im.call("get_domain_range")(im.ref("out"), IDim)),
+        ),
+        im.named_range(
+            JDim,
+            im.tuple_get(0, im.call("get_domain_range")(im.ref("out"), JDim)),
+            im.tuple_get(1, im.call("get_domain_range")(im.ref("out"), JDim)),
+        ),
+        im.named_range(
+            Kolor,
+            im.tuple_get(0, im.call("get_domain_range")(im.ref("out"), Kolor)),
+            im.tuple_get(1, im.call("get_domain_range")(im.ref("out"), Kolor)),
+        ),
+    )
+
+    testee = ir.Program(
+        id="testee",
+        function_definitions=[],
+        params=[im.sym("inp"), im.sym("out"), im.sym("max_i"), im.sym("max_j")],
+        declarations=[],
+        body=[ir.SetAt(expr=im.ref("inp"), domain=domain_expr, target=im.ref("out"))],
+    )
+
+    expected = ir.Program(
+        id="testee",
+        function_definitions=[],
+        params=[im.sym("inp"), im.sym("out"), im.sym("max_i"), im.sym("max_j")],
+        declarations=[],
+        body=[
+            ir.SetAt(
+                expr=im.ref("inp"),
+                domain=im.call("cartesian_domain")(
+                    im.named_range(IDim, ir.OffsetLiteral(value=0), im.ref("max_i")),
+                    im.named_range(JDim, ir.OffsetLiteral(value=0), im.ref("max_j")),
+                    im.named_range(Kolor, ir.OffsetLiteral(value=0), ir.OffsetLiteral(value=3)),
+                ),
+                target=im.ref("out"),
+            )
+        ],
+    )
+
+    actual = CartUnroll.apply(testee)
+    assert actual == expected
+
+
+def test_tuple_get_get_domain_range_inlines_symbolic_domain_sizes():
+    IDim = common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL)
+    JDim = common.Dimension("JDim", kind=common.DimensionKind.HORIZONTAL)
+
+    domain_expr = im.call("cartesian_domain")(
+        im.named_range(
+            IDim,
+            im.tuple_get(0, im.call("get_domain_range")(im.ref("out"), IDim)),
+            im.tuple_get(1, im.call("get_domain_range")(im.ref("out"), IDim)),
+        ),
+        im.named_range(
+            JDim,
+            im.tuple_get(0, im.call("get_domain_range")(im.ref("out"), JDim)),
+            im.tuple_get(1, im.call("get_domain_range")(im.ref("out"), JDim)),
+        ),
+    )
+
+    testee = ir.Program(
+        id="testee",
+        function_definitions=[],
+        params=[im.sym("inp"), im.sym("out"), im.sym("size_i"), im.sym("size_j")],
+        declarations=[],
+        body=[ir.SetAt(expr=im.ref("inp"), domain=domain_expr, target=im.ref("out"))],
+    )
+
+    expected = ir.Program(
+        id="testee",
+        function_definitions=[],
+        params=[im.sym("inp"), im.sym("out"), im.sym("size_i"), im.sym("size_j")],
+        declarations=[],
+        body=[
+            ir.SetAt(
+                expr=im.ref("inp"),
+                domain=im.call("cartesian_domain")(
+                    im.named_range(IDim, ir.OffsetLiteral(value=0), im.ref("size_i")),
+                    im.named_range(JDim, ir.OffsetLiteral(value=0), im.ref("size_j")),
+                ),
+                target=im.ref("out"),
+            )
+        ],
+    )
+
+    actual = CartUnroll.apply(
+        testee,
+        symbolic_domain_sizes={"max_i": "size_i", "max_j": "size_j"},
+    )
+    assert actual == expected
+
+
