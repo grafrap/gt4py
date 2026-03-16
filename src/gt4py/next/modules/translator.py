@@ -3,7 +3,7 @@ import numpy as np
 import gt4py.next as gtx
 from gt4py.next.iterator import atlas_utils
 
-from .ffront_fvm_nabla_structured import IDim, JDim, Kolor, pnabla_cartesian
+from .ffront_fvm_nabla_structured import IDim, JDim, Kolor#, pnabla_cartesian
 from gt4py.next.program_processors.program_setup_utils import setup_program
 
 
@@ -605,45 +605,45 @@ def build_structured_sign_from_unstructured(
 
     return signs
 
-def run_structured_pnabla_from_unstructured(
-    pp_vertex: np.ndarray,
-    S_M_edges_3: tuple[np.ndarray, np.ndarray],
-    sign_struct: tuple[np.ndarray, ...], 
-    vol_vertex: np.ndarray,
-    m: IndexMap,
-    backend,
-) -> tuple[np.ndarray, np.ndarray]:
-    pp_s = pack_vertex_field_to_structured(pp_vertex, m)
-    sm0_s = pack_edge_field_to_structured(S_M_edges_3[0], m)
-    sm1_s = pack_edge_field_to_structured(S_M_edges_3[1], m)
-    vol_s = pack_vertex_field_to_structured(vol_vertex, m)
+# def run_structured_pnabla_from_unstructured(
+#     pp_vertex: np.ndarray,
+#     S_M_edges_3: tuple[np.ndarray, np.ndarray],
+#     sign_struct: tuple[np.ndarray, ...], 
+#     vol_vertex: np.ndarray,
+#     m: IndexMap,
+#     backend,
+# ) -> tuple[np.ndarray, np.ndarray]:
+#     pp_s = pack_vertex_field_to_structured(pp_vertex, m)
+#     sm0_s = pack_edge_field_to_structured(S_M_edges_3[0], m)
+#     sm1_s = pack_edge_field_to_structured(S_M_edges_3[1], m)
+#     vol_s = pack_vertex_field_to_structured(vol_vertex, m)
     
-    # Cast the entire tuple of numpy arrays into gt4py fields in one go!
-    sign_f = tuple(gtx.as_field([IDim, JDim, Kolor], s) for s in sign_struct)
+#     # Cast the entire tuple of numpy arrays into gt4py fields in one go!
+#     sign_f = tuple(gtx.as_field([IDim, JDim, Kolor], s) for s in sign_struct)
 
-    pp_f = gtx.as_field([IDim, JDim, Kolor], pp_s)
-    sm0_f = gtx.as_field([IDim, JDim, Kolor], sm0_s)
-    sm1_f = gtx.as_field([IDim, JDim, Kolor], sm1_s)
-    vol_f = gtx.as_field([IDim, JDim, Kolor], vol_s)
+#     pp_f = gtx.as_field([IDim, JDim, Kolor], pp_s)
+#     sm0_f = gtx.as_field([IDim, JDim, Kolor], sm0_s)
+#     sm1_f = gtx.as_field([IDim, JDim, Kolor], sm1_s)
+#     vol_f = gtx.as_field([IDim, JDim, Kolor], vol_s)
 
-    out0 = gtx.as_field([IDim, JDim, Kolor], np.zeros_like(pp_s))
-    out1 = gtx.as_field([IDim, JDim, Kolor], np.zeros_like(pp_s))
+#     out0 = gtx.as_field([IDim, JDim, Kolor], np.zeros_like(pp_s))
+#     out1 = gtx.as_field([IDim, JDim, Kolor], np.zeros_like(pp_s))
 
-    ni, nj = m.ij_to_vertex.shape
+#     ni, nj = m.ij_to_vertex.shape
 
-    prog = setup_program(
-        pnabla_cartesian,
-        backend=backend,
-        horizontal_sizes={
-            "domain_max_i": gtx.int32(ni),
-            "domain_max_j": gtx.int32(nj),
-            "domain_max_kolor": gtx.int32(1),
-        },
-    )
+#     prog = setup_program(
+#         pnabla_cartesian,
+#         backend=backend,
+#         horizontal_sizes={
+#             "domain_max_i": gtx.int32(ni),
+#             "domain_max_j": gtx.int32(nj),
+#             "domain_max_kolor": gtx.int32(1),
+#         },
+#     )
 
-    prog(pp=pp_f, S_M=sm0_f, sign=sign_f, vol=vol_f, out=out0, offset_provider={})
-    prog(pp=pp_f, S_M=sm1_f, sign=sign_f, vol=vol_f, out=out1, offset_provider={})
+#     prog(pp=pp_f, S_M=sm0_f, sign=sign_f, vol=vol_f, out=out0, offset_provider={})
+#     prog(pp=pp_f, S_M=sm1_f, sign=sign_f, vol=vol_f, out=out1, offset_provider={})
 
-    u0 = unpack_vertex_field_to_unstructured(out0.asnumpy(), m)
-    u1 = unpack_vertex_field_to_unstructured(out1.asnumpy(), m)
-    return u0, u1
+#     u0 = unpack_vertex_field_to_unstructured(out0.asnumpy(), m)
+#     u1 = unpack_vertex_field_to_unstructured(out1.asnumpy(), m)
+#     return u0, u1

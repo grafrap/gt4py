@@ -226,9 +226,11 @@ def apply_common_transforms(
     uids = utils.IDGeneratorPool()
     ir = MergeLet().visit(ir)
     ir = inline_fundefs.InlineFundefs().visit(ir)
+    _print_ir_block("=== GTIR AFTER INLINING FUNDEFS ===", ir, enabled=print_ir)
 
     ir = inline_fundefs.prune_unreferenced_fundefs(ir)
     ir = NormalizeShifts().visit(ir)
+    _print_ir_block("=== GTIR AFTER PRUNING UNREFERENCED FUNDEFS AND NORMALIZING SHIFTS ===", ir, enabled=print_ir)
 
     # TODO(tehrengruber): Many iterator test contain lifts that need to be inlined, e.g.
     #  test_can_deref. We didn't notice previously as FieldOpFusion did this implicitly everywhere.
@@ -238,14 +240,17 @@ def apply_common_transforms(
     ir = dead_code_elimination.dead_code_elimination(
         ir, uids=uids, offset_provider_type=offset_provider_type
     )  # domain inference does not support dead-code
+    _print_ir_block("=== GTIR AFTER DEAD CODE ELIMINATION ===", ir, enabled=print_ir)
     ir = inline_dynamic_shifts.InlineDynamicShifts.apply(
         ir, offset_provider_type=offset_provider_type, uids=uids
     )  # domain inference does not support dynamic offsets yet
 
     ir = cart_unroll.CartUnroll.apply(ir, symbolic_domain_sizes=symbolic_domain_sizes)
     ir = NormalizeShifts().visit(ir)
+    _print_ir_block("=== GTIR AFTER CARTESIAN UNROLLING ===", ir, enabled=print_ir)
     ir = infer_domain_ops.InferDomainOps.apply(ir)
     ir = concat_where.canonicalize_domain_argument(ir)
+    _print_ir_block("=== GTIR AFTER CANONICALIZING DOMAIN ARGUMENTS ===", ir, enabled=print_ir)
     if cartesian_reduce_axis_ranges is None:
         cartesian_reduce_axis_ranges = {common.Dimension("Kolor"): (0, 3)}
     ir = UnrollCartesianReduce.apply(ir, axis_ranges=cartesian_reduce_axis_ranges)
@@ -331,6 +336,7 @@ def apply_common_transforms(
     ir = InlineLambdas.apply(
         ir, opcount_preserving=True, force_inline_lambda_args=force_inline_lambda_args
     )
+    ir = cart_unroll.RewriteCartesianCanDeref.apply(ir)
     ir = NormalizeShifts().visit(ir)
     _print_ir_block("=== GTIR END ===", ir, enabled=print_ir)
 

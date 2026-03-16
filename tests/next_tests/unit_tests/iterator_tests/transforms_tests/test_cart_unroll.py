@@ -13,7 +13,7 @@ from gt4py.eve import SymbolRef
 from gt4py.next.iterator import ir
 from gt4py.next.iterator.ir_utils import ir_makers as im
 from gt4py.next.iterator.ir_utils import common_pattern_matcher as cpm
-from gt4py.next.iterator.transforms.cart_unroll import CartUnroll, map_dict
+from gt4py.next.iterator.transforms.cart_unroll import CartUnroll, _bounded_shifted_deref, map_dict
 from gt4py.next.iterator.transforms.normalize_shifts import NormalizeShifts
 from gt4py.next.type_system import type_specifications as ts
 
@@ -27,6 +27,28 @@ def test_normalize_shifts_removes_zero_offsets():
     actual = NormalizeShifts().visit(testee)
     expected = im.shift("_OffJDim", -1)("iter")
     assert actual == expected
+
+
+def test_normalize_shifts_keeps_zero_offsets_on_connectivity_axes():
+    testee = im.shift("E2V", 0)("iter")
+    actual = NormalizeShifts().visit(testee)
+    assert actual == testee
+
+
+def test_bounded_shifted_deref_adds_idim_jdim_bounds_guard():
+    shifted = _bounded_shifted_deref(
+        im.ref("inp"),
+        (
+            ir.OffsetLiteral(value="IDim"),
+            ir.OffsetLiteral(value=-1),
+            ir.OffsetLiteral(value="JDim"),
+            ir.OffsetLiteral(value=1),
+        ),
+        im.literal("0.0", "float64"),
+    )
+    print(shifted)
+
+    assert cpm.is_call_to(shifted, "if_")
 
 
 def test_V2E():
@@ -725,37 +747,14 @@ def test_C2E2C2E2C():
 
 
 @pytest.mark.parametrize("axis", ["Edge", "Vertex", "Cell"])
-def test_unstructured_domain_is_rewritten_to_cartesian_domain(axis):
+def test_unstructured_domain_is_not_rewritten_to_cartesian_domain_without_bounds(axis):
     out = im.ref("out")
     start = im.tuple_get(0, im.call("get_domain_range")(out, ir.AxisLiteral(value=axis)))
     stop = im.tuple_get(1, im.call("get_domain_range")(out, ir.AxisLiteral(value=axis)))
     testee = im.call("unstructured_domain")(im.call("named_range")(ir.AxisLiteral(value=axis), start, stop))
 
-    IDim = common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL)
-    JDim = common.Dimension("JDim", kind=common.DimensionKind.HORIZONTAL)
-    Kolor = common.Dimension("Kolor", kind=common.DimensionKind.HORIZONTAL)
-    kolor_stop = {"Vertex": 1, "Cell": 2, "Edge": 3}[axis]
-
-    expected = im.call("cartesian_domain")(
-        im.named_range(
-            IDim,
-            im.tuple_get(0, im.call("get_domain_range")(out, IDim)),
-            im.tuple_get(1, im.call("get_domain_range")(out, IDim)),
-        ),
-        im.named_range(
-            JDim,
-            im.tuple_get(0, im.call("get_domain_range")(out, JDim)),
-            im.tuple_get(1, im.call("get_domain_range")(out, JDim)),
-        ),
-        im.named_range(
-            Kolor,
-            ir.OffsetLiteral(value=0),
-            ir.OffsetLiteral(value=kolor_stop),
-        ),
-    )
-
     actual = CartUnroll.apply(testee)
-    assert actual == expected
+    assert actual == testee
 
 
 def test_lifted_applied_shift_is_rewritten_to_lifted_concat_where():
@@ -864,7 +863,7 @@ def test_cartesian_remapped_type_preserves_local_dims():
     assert [d.value for d in actual.dims] == ["IDim", "JDim", "Kolor", "V2E"]
 
 
-def test_v2e_neighbors_reduce_plus_rewritten_generically():
+def test_v2e_neighbors_reduce_plus_is_generically_unrolled():
     def _contains_call(node: ir.Node, name: str) -> bool:
         if cpm.is_call_to(node, name):
             return True
@@ -939,6 +938,62 @@ def test_neighbors_reduce_rewritten_for_minimum_without_map_pattern():
     assert not _contains_call(actual, "reduce")
 
 
+def test_neighbors_reduce_edge_to_vertex_writes_only_kolor0():
+    def _contains_call(node: ir.Node, name: str) -> bool:
+        if cpm.is_call_to(node, name):
+            return True
+        if isinstance(node, ir.FunCall):
+            if _contains_call(node.fun, name):
+                return True
+            return any(_contains_call(arg, name) for arg in node.args)
+        if isinstance(node, ir.Lambda):
+            return _contains_call(node.expr, name)
+        return False
+
+    vertex_axis = ir.AxisLiteral(value="Vertex")
+    domain_expr = im.call("unstructured_domain")(
+        im.call("named_range")(
+            vertex_axis,
+            im.tuple_get(0, im.call("get_domain_range")(im.ref("out"), vertex_axis)),
+            im.tuple_get(1, im.call("get_domain_range")(im.ref("out"), vertex_axis)),
+        )
+    )
+
+    neighbors_applied = im.as_fieldop(im.lambda_("it")(im.neighbors("V2E", "it")))("zavgS")
+    mapped = im.as_fieldop(
+        im.lambda_("a", "b")(im.map_("multiplies")(im.deref("a"), im.deref("b")))
+    )(neighbors_applied, "sign")
+    reduce_expr = im.as_fieldop(im.lambda_("lst")(im.reduce("plus", 0)(im.deref("lst"))))(mapped)
+
+    testee = ir.Program(
+        id="testee",
+        function_definitions=[],
+        params=[im.sym("zavgS"), im.sym("sign"), im.sym("out"), im.sym("max_i"), im.sym("max_j")],
+        declarations=[],
+        body=[ir.SetAt(expr=reduce_expr, domain=domain_expr, target=im.ref("out"))],
+    )
+
+    IDim = common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL)
+    JDim = common.Dimension("JDim", kind=common.DimensionKind.HORIZONTAL)
+    Kolor = common.Dimension("Kolor", kind=common.DimensionKind.HORIZONTAL)
+
+    actual = CartUnroll.apply(testee)
+    actual = NormalizeShifts().visit(actual)
+
+    expected_domain = im.call("cartesian_domain")(
+        im.named_range(IDim, ir.OffsetLiteral(value=0), im.ref("max_i")),
+        im.named_range(JDim, ir.OffsetLiteral(value=0), im.ref("max_j")),
+        im.named_range(Kolor, ir.OffsetLiteral(value=0), ir.OffsetLiteral(value=1)),
+    )
+
+    assert isinstance(actual, ir.Program)
+    assert len(actual.body) == 1
+    assert isinstance(actual.body[0], ir.SetAt)
+    assert actual.body[0].domain == expected_domain
+    assert not _contains_call(actual.body[0].expr, "neighbors")
+    assert not _contains_call(actual.body[0].expr, "reduce")
+
+
 @pytest.mark.parametrize(
     ("axis", "kolor_stop"),
     [("Vertex", 1), ("Cell", 2), ("Edge", 3)],
@@ -988,6 +1043,28 @@ def test_unstructured_domain_inlines_nx_ny_and_kolor_bounds_when_available(axis,
 
     actual = CartUnroll.apply(testee)
     assert actual == expected
+
+
+def test_unstructured_domain_is_not_rewritten_without_max_i_max_j():
+    axis = "Edge"
+    domain_expr = im.call("unstructured_domain")(
+        im.call("named_range")(
+            ir.AxisLiteral(value=axis),
+            im.tuple_get(0, im.call("get_domain_range")(im.ref("out"), ir.AxisLiteral(value=axis))),
+            im.tuple_get(1, im.call("get_domain_range")(im.ref("out"), ir.AxisLiteral(value=axis))),
+        )
+    )
+
+    testee = ir.Program(
+        id="testee",
+        function_definitions=[],
+        params=[im.sym("inp"), im.sym("out")],
+        declarations=[],
+        body=[ir.SetAt(expr=im.ref("inp"), domain=domain_expr, target=im.ref("out"))],
+    )
+
+    actual = CartUnroll.apply(testee)
+    assert actual == testee
 
 
 def test_tuple_get_get_domain_range_inlines_max_i_max_j():

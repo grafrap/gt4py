@@ -271,6 +271,14 @@ def _cartesian_domain(*args):
 def _unstructured_domain(*args):
     return Sentinel.VALUE
 
+
+def _get_domain_range(*args):
+    return Sentinel.VALUE
+
+
+def _index(*args):
+    return Sentinel.VALUE
+
 _START_CTX: Final = {
     "as_fieldop": _as_fieldop,
     "deref": _deref,
@@ -288,6 +296,8 @@ _START_CTX: Final = {
     "named_range": _named_range,
     "cartesian_domain": _cartesian_domain,
     "unstructured_domain": _unstructured_domain,
+    "get_domain_range": _get_domain_range,
+    "index": _index,
 }
 
 

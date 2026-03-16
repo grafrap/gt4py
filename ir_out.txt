@@ -1,0 +1,727 @@
+
+============================================================
+=== FINAL GTIR HANDED TO GTFN BACKEND ===
+============================================================
+__field_operator_compute_neighbor_sum_unweighted(zavgS, out) {
+  compute_neighbor_sum_unweighted = λ(zavgS) → 
+    (⇑(λ(__arg0) → reduce(plus, 0)(·__arg0)))((⇑(λ(it) → neighbors(V2Eₒ, it)))(zavgS));
+  out @ u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+       ← compute_neighbor_sum_unweighted(zavgS);
+}
+============================================================
+
+)
+    );
+  out @ u⟨ Edgeₕ: [get_domain_range(out, Edgeₕ)[0], get_domain_range(out, Edgeₕ)[1][ ⟩
+       ← compute_zavgS(pp, S_M);
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER INLINING FUNDEFS ===
+============================================================
+__field_operator_compute_neighbor_sum_unweighted(zavgS, out) {
+  compute_neighbor_sum_unweighted = λ(zavgS) → 
+    (⇑(λ(__arg0) → reduce(plus, 0)(·__arg0)))((⇑(λ(it) → neighbors(V2Eₒ, it)))(zavgS));
+  out @ u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+       ← (λ(zavgS) → (⇑(λ(__arg0) → reduce(plus, 0)(·__arg0)))((⇑(λ(it) → neighbors(V2Eₒ, it)))(zavgS)))(
+           zavgS
+         );
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER INLINING FUNDEFS ===
+============================================================
+__field_operator_compute_zavgS(pp, S_M, out) {
+  compute_zavgS = λ(pp, S_M) → 
+    (λ(zavgᐞ0) → (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(S_M, zavgᐞ0))(
+      (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(
+        0.5, (⇑(λ(__arg0, __arg1) → ·__arg0 + ·__arg1))(
+               (⇑(λ(__it) → ·⟪E2Vₒ, 0ₒ⟫(__it)))(pp), (⇑(λ(__it) → ·⟪E2Vₒ, 1ₒ⟫(__it)))(pp)
+             )
+      )
+    );
+  out @ u⟨ Edgeₕ: [get_domain_range(out, Edgeₕ)[0], get_domain_range(out, Edgeₕ)[1][ ⟩
+       ← (λ(pp, S_M) → (λ(zavgᐞ0) → (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(S_M, zavgᐞ0))(
+                         (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(
+                           0.5, (⇑(λ(__arg0, __arg1) → ·__arg0 + ·__arg1))(
+                                  (⇑(λ(__it) → ·⟪E2Vₒ, 0ₒ⟫(__it)))(pp), (⇑(λ(__it) → ·⟪E2Vₒ, 1ₒ⟫(__it)))(pp)
+                                )
+                         )
+                       ))(pp, S_M);
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER PRUNING UNREFERENCED FUNDEFS AND NORMALIZING SHIFTS ===
+============================================================
+__field_operator_compute_zavgS(pp, S_M, out) {
+  out @ u⟨ Edgeₕ: [get_domain_range(out, Edgeₕ)[0], get_domain_range(out, Edgeₕ)[1][ ⟩
+       ← (λ(pp, S_M) → (λ(zavgᐞ0) → (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(S_M, zavgᐞ0))(
+                         (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(
+                           0.5, (⇑(λ(__arg0, __arg1) → ·__arg0 + ·__arg1))(
+                                  (⇑(λ(__it) → ·⟪E2Vₒ, 0ₒ⟫(__it)))(pp), (⇑(λ(__it) → ·⟪E2Vₒ, 1ₒ⟫(__it)))(pp)
+                                )
+                         )
+                       ))(pp, S_M);
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER PRUNING UNREFERENCED FUNDEFS AND NORMALIZING SHIFTS ===
+============================================================
+__field_operator_compute_neighbor_sum_unweighted(zavgS, out) {
+  out @ u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+       ← (λ(zavgS) → (⇑(λ(__arg0) → reduce(plus, 0)(·__arg0)))((⇑(λ(it) → neighbors(V2Eₒ, it)))(zavgS)))(
+           zavgS
+         );
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER DEAD CODE ELIMINATION ===
+============================================================
+__field_operator_compute_neighbor_sum_unweighted(zavgS, out) {
+  out @ u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+       ← (⇑(λ(__arg0) → reduce(plus, 0)(·__arg0)))((⇑(λ(it) → neighbors(V2Eₒ, it)))(zavgS));
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER CARTESIAN UNROLLING ===
+============================================================
+__field_operator_compute_neighbor_sum_unweighted(zavgS, out) {
+  out @ c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 1ₒ[ ⟩
+       ← as_fieldop(λ(__cart_reduce_arg0) → 
+                      0 + (if can_deref(__cart_reduce_arg0) then ·__cart_reduce_arg0 else 0.0)
+                      + (if   can_deref(⟪_OffKolorₒ, 1ₒ⟫(__cart_reduce_arg0))
+                         then ·⟪_OffKolorₒ, 1ₒ⟫(__cart_reduce_arg0)
+                         else 0.0) + (if   can_deref(⟪_OffJDimₒ, -1ₒ, _OffKolorₒ, 2ₒ⟫(__cart_reduce_arg0))
+                                      then ·⟪_OffJDimₒ, -1ₒ, _OffKolorₒ, 2ₒ⟫(__cart_reduce_arg0)
+                                      else 0.0) + (if   can_deref(⟪_OffJDimₒ, -1ₒ⟫(__cart_reduce_arg0))
+                                                   then ·⟪_OffJDimₒ, -1ₒ⟫(__cart_reduce_arg0)
+                                                   else 0.0)
+                      + (if   can_deref(⟪_OffIDimₒ, -1ₒ, _OffKolorₒ, 1ₒ⟫(__cart_reduce_arg0))
+                         then ·⟪_OffIDimₒ, -1ₒ, _OffKolorₒ, 1ₒ⟫(__cart_reduce_arg0)
+                         else 0.0) + (if   can_deref(⟪_OffIDimₒ, -1ₒ, _OffKolorₒ, 2ₒ⟫(__cart_reduce_arg0))
+                                      then ·⟪_OffIDimₒ, -1ₒ, _OffKolorₒ, 2ₒ⟫(__cart_reduce_arg0)
+                                      else 0.0), c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 1ₒ[ ⟩)(
+           zavgS
+         );
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER DEAD CODE ELIMINATION ===
+============================================================
+__field_operator_compute_zavgS(pp, S_M, out) {
+  out @ u⟨ Edgeₕ: [get_domain_range(out, Edgeₕ)[0], get_domain_range(out, Edgeₕ)[1][ ⟩
+       ← (⇑(λ(__arg0_, __arg1_) → ·__arg0_ × ·__arg1_))(
+           S_M, (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(
+                  0.5, (⇑(λ(__arg0, __arg1) → ·__arg0 + ·__arg1))(
+                         (⇑(λ(__it) → ·⟪E2Vₒ, 0ₒ⟫(__it)))(pp), (⇑(λ(__it) → ·⟪E2Vₒ, 1ₒ⟫(__it)))(pp)
+                       )
+                )
+         );
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER CANONICALIZING DOMAIN ARGUMENTS ===
+============================================================
+__field_operator_compute_neighbor_sum_unweighted(zavgS, out) {
+  out @ c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 1ₒ[ ⟩
+       ← as_fieldop(λ(__cart_reduce_arg0) → 
+                      0 + (if can_deref(__cart_reduce_arg0) then ·__cart_reduce_arg0 else 0.0)
+                      + (if   can_deref(⟪_OffKolorₒ, 1ₒ⟫(__cart_reduce_arg0))
+                         then ·⟪_OffKolorₒ, 1ₒ⟫(__cart_reduce_arg0)
+                         else 0.0) + (if   can_deref(⟪_OffJDimₒ, -1ₒ, _OffKolorₒ, 2ₒ⟫(__cart_reduce_arg0))
+                                      then ·⟪_OffJDimₒ, -1ₒ, _OffKolorₒ, 2ₒ⟫(__cart_reduce_arg0)
+                                      else 0.0) + (if   can_deref(⟪_OffJDimₒ, -1ₒ⟫(__cart_reduce_arg0))
+                                                   then ·⟪_OffJDimₒ, -1ₒ⟫(__cart_reduce_arg0)
+                                                   else 0.0)
+                      + (if   can_deref(⟪_OffIDimₒ, -1ₒ, _OffKolorₒ, 1ₒ⟫(__cart_reduce_arg0))
+                         then ·⟪_OffIDimₒ, -1ₒ, _OffKolorₒ, 1ₒ⟫(__cart_reduce_arg0)
+                         else 0.0) + (if   can_deref(⟪_OffIDimₒ, -1ₒ, _OffKolorₒ, 2ₒ⟫(__cart_reduce_arg0))
+                                      then ·⟪_OffIDimₒ, -1ₒ, _OffKolorₒ, 2ₒ⟫(__cart_reduce_arg0)
+                                      else 0.0), c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 1ₒ[ ⟩)(
+           zavgS
+         );
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER UNROLLING CARTESIAN REDUCE ===
+============================================================
+__field_operator_compute_neighbor_sum_unweighted(zavgS, out) {
+  out @ c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 1ₒ[ ⟩
+       ← as_fieldop(λ(__cart_reduce_arg0) → 
+                      0 + (if can_deref(__cart_reduce_arg0) then ·__cart_reduce_arg0 else 0.0)
+                      + (if   can_deref(⟪_OffKolorₒ, 1ₒ⟫(__cart_reduce_arg0))
+                         then ·⟪_OffKolorₒ, 1ₒ⟫(__cart_reduce_arg0)
+                         else 0.0) + (if   can_deref(⟪_OffJDimₒ, -1ₒ, _OffKolorₒ, 2ₒ⟫(__cart_reduce_arg0))
+                                      then ·⟪_OffJDimₒ, -1ₒ, _OffKolorₒ, 2ₒ⟫(__cart_reduce_arg0)
+                                      else 0.0) + (if   can_deref(⟪_OffJDimₒ, -1ₒ⟫(__cart_reduce_arg0))
+                                                   then ·⟪_OffJDimₒ, -1ₒ⟫(__cart_reduce_arg0)
+                                                   else 0.0)
+                      + (if   can_deref(⟪_OffIDimₒ, -1ₒ, _OffKolorₒ, 1ₒ⟫(__cart_reduce_arg0))
+                         then ·⟪_OffIDimₒ, -1ₒ, _OffKolorₒ, 1ₒ⟫(__cart_reduce_arg0)
+                         else 0.0) + (if   can_deref(⟪_OffIDimₒ, -1ₒ, _OffKolorₒ, 2ₒ⟫(__cart_reduce_arg0))
+                                      then ·⟪_OffIDimₒ, -1ₒ, _OffKolorₒ, 2ₒ⟫(__cart_reduce_arg0)
+                                      else 0.0), c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 1ₒ[ ⟩)(
+           zavgS
+         );
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER CARTESIAN UNROLLING ===
+============================================================
+__field_operator_compute_zavgS(pp, S_M, out) {
+  out @ c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩
+       ← (⇑(λ(__arg0_, __arg1_) → ·__arg0_ × ·__arg1_))(
+           S_M,
+           (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(
+             0.5,
+             (⇑(λ(__arg0, __arg1) → ·__arg0 + ·__arg1))(
+               concat_where(
+                 c⟨ Kolorₕ: [0ₒ, 1ₒ[ ⟩,
+                 as_fieldop(
+                   λ(__cart_unroll_it) → ·__cart_unroll_it, c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩
+                 )(pp),
+                 concat_where(c⟨ Kolorₕ: [1ₒ, 2ₒ[ ⟩,
+                              as_fieldop(λ(__cart_unroll_it) → ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -1ₒ⟫(__cart_unroll_it),
+                                         c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩)(pp),
+                              as_fieldop(λ(__cart_unroll_it) → ·⟪_OffJDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(__cart_unroll_it),
+                                         c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩)(pp))
+               ), concat_where(
+                    c⟨ Kolorₕ: [0ₒ, 1ₒ[ ⟩,
+                    as_fieldop(λ(__cart_unroll_it) → ·⟪_OffJDimₒ, 1ₒ⟫(__cart_unroll_it),
+                               c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩)(pp),
+                    concat_where(c⟨ Kolorₕ: [1ₒ, 2ₒ[ ⟩,
+                                 as_fieldop(λ(__cart_unroll_it) → ·⟪_OffKolorₒ, -1ₒ⟫(__cart_unroll_it),
+                                            c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩)(pp),
+                                 as_fieldop(λ(__cart_unroll_it) → ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(__cart_unroll_it),
+                                            c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩)(pp))
+                  )
+             )
+           )
+         );
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER CANONICALIZING DOMAIN ARGUMENTS ===
+============================================================
+__field_operator_compute_zavgS(pp, S_M, out) {
+  out @ c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩
+       ← (⇑(λ(__arg0_, __arg1_) → ·__arg0_ × ·__arg1_))(
+           S_M,
+           (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(
+             0.5,
+             (⇑(λ(__arg0, __arg1) → ·__arg0 + ·__arg1))(
+               (λ(__cwcda_field_a, __cwcda_field_b) → 
+                  concat_where(c⟨ Kolorₕ: [-∞, 0ₒ[ ⟩,
+                               __cwcda_field_a,
+                               concat_where(c⟨ Kolorₕ: [1ₒ, ∞[ ⟩, __cwcda_field_a, __cwcda_field_b)))(
+                 (λ(__cwcda_field_a, __cwcda_field_b) → 
+                    concat_where(c⟨ Kolorₕ: [-∞, 1ₒ[ ⟩,
+                                 __cwcda_field_a,
+                                 concat_where(c⟨ Kolorₕ: [2ₒ, ∞[ ⟩, __cwcda_field_a, __cwcda_field_b)))(
+                   as_fieldop(λ(__cart_unroll_it) → ·⟪_OffJDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(__cart_unroll_it),
+                              c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩)(pp),
+                   as_fieldop(λ(__cart_unroll_it) → ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -1ₒ⟫(__cart_unroll_it),
+                              c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩)(pp)
+                 ),
+                 as_fieldop(
+                   λ(__cart_unroll_it) → ·__cart_unroll_it, c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩
+                 )(pp)
+               ), (λ(__cwcda_field_a, __cwcda_field_b) → 
+                     concat_where(c⟨ Kolorₕ: [-∞, 0ₒ[ ⟩,
+                                  __cwcda_field_a,
+                                  concat_where(c⟨ Kolorₕ: [1ₒ, ∞[ ⟩, __cwcda_field_a, __cwcda_field_b)))(
+                    (λ(__cwcda_field_a, __cwcda_field_b) → 
+                       concat_where(c⟨ Kolorₕ: [-∞, 1ₒ[ ⟩,
+                                    __cwcda_field_a,
+                                    concat_where(c⟨ Kolorₕ: [2ₒ, ∞[ ⟩, __cwcda_field_a, __cwcda_field_b)))(
+                      as_fieldop(λ(__cart_unroll_it) → ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(__cart_unroll_it),
+                                 c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩)(pp),
+                      as_fieldop(λ(__cart_unroll_it) → ·⟪_OffKolorₒ, -1ₒ⟫(__cart_unroll_it),
+                                 c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩)(pp)
+                    ), as_fieldop(λ(__cart_unroll_it) → ·⟪_OffJDimₒ, 1ₒ⟫(__cart_unroll_it),
+                                  c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩)(pp)
+                  )
+             )
+           )
+         );
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER COMMON TRANSFORMS BEFORE INFER_DOMAIN ===
+============================================================
+__field_operator_compute_neighbor_sum_unweighted(zavgS, out) {
+  out @ c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 1ₒ[ ⟩
+       ← as_fieldop(λ(__cart_reduce_arg0) → 
+                      (if can_deref(__cart_reduce_arg0) then ·__cart_reduce_arg0 else 0.0)
+                      + (if   can_deref(⟪_OffKolorₒ, 1ₒ⟫(__cart_reduce_arg0))
+                         then ·⟪_OffKolorₒ, 1ₒ⟫(__cart_reduce_arg0)
+                         else 0.0) + (if   can_deref(⟪_OffJDimₒ, -1ₒ, _OffKolorₒ, 2ₒ⟫(__cart_reduce_arg0))
+                                      then ·⟪_OffJDimₒ, -1ₒ, _OffKolorₒ, 2ₒ⟫(__cart_reduce_arg0)
+                                      else 0.0) + (if   can_deref(⟪_OffJDimₒ, -1ₒ⟫(__cart_reduce_arg0))
+                                                   then ·⟪_OffJDimₒ, -1ₒ⟫(__cart_reduce_arg0)
+                                                   else 0.0)
+                      + (if   can_deref(⟪_OffIDimₒ, -1ₒ, _OffKolorₒ, 1ₒ⟫(__cart_reduce_arg0))
+                         then ·⟪_OffIDimₒ, -1ₒ, _OffKolorₒ, 1ₒ⟫(__cart_reduce_arg0)
+                         else 0.0) + (if   can_deref(⟪_OffIDimₒ, -1ₒ, _OffKolorₒ, 2ₒ⟫(__cart_reduce_arg0))
+                                      then ·⟪_OffIDimₒ, -1ₒ, _OffKolorₒ, 2ₒ⟫(__cart_reduce_arg0)
+                                      else 0.0), c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 1ₒ[ ⟩)(
+           zavgS
+         );
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER UNROLLING CARTESIAN REDUCE ===
+============================================================
+__field_operator_compute_zavgS(pp, S_M, out) {
+  out @ c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩
+       ← (⇑(λ(__arg0_, __arg1_) → ·__arg0_ × ·__arg1_))(
+           S_M,
+           (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(
+             0.5,
+             (⇑(λ(__arg0, __arg1) → ·__arg0 + ·__arg1))(
+               (λ(__cwcda_field_a, __cwcda_field_b) → 
+                  concat_where(c⟨ Kolorₕ: [-∞, 0ₒ[ ⟩,
+                               __cwcda_field_a,
+                               concat_where(c⟨ Kolorₕ: [1ₒ, ∞[ ⟩, __cwcda_field_a, __cwcda_field_b)))(
+                 (λ(__cwcda_field_a, __cwcda_field_b) → 
+                    concat_where(c⟨ Kolorₕ: [-∞, 1ₒ[ ⟩,
+                                 __cwcda_field_a,
+                                 concat_where(c⟨ Kolorₕ: [2ₒ, ∞[ ⟩, __cwcda_field_a, __cwcda_field_b)))(
+                   as_fieldop(λ(__cart_unroll_it) → ·⟪_OffJDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(__cart_unroll_it),
+                              c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩)(pp),
+                   as_fieldop(λ(__cart_unroll_it) → ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -1ₒ⟫(__cart_unroll_it),
+                              c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩)(pp)
+                 ),
+                 as_fieldop(
+                   λ(__cart_unroll_it) → ·__cart_unroll_it, c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩
+                 )(pp)
+               ), (λ(__cwcda_field_a, __cwcda_field_b) → 
+                     concat_where(c⟨ Kolorₕ: [-∞, 0ₒ[ ⟩,
+                                  __cwcda_field_a,
+                                  concat_where(c⟨ Kolorₕ: [1ₒ, ∞[ ⟩, __cwcda_field_a, __cwcda_field_b)))(
+                    (λ(__cwcda_field_a, __cwcda_field_b) → 
+                       concat_where(c⟨ Kolorₕ: [-∞, 1ₒ[ ⟩,
+                                    __cwcda_field_a,
+                                    concat_where(c⟨ Kolorₕ: [2ₒ, ∞[ ⟩, __cwcda_field_a, __cwcda_field_b)))(
+                      as_fieldop(λ(__cart_unroll_it) → ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(__cart_unroll_it),
+                                 c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩)(pp),
+                      as_fieldop(λ(__cart_unroll_it) → ·⟪_OffKolorₒ, -1ₒ⟫(__cart_unroll_it),
+                                 c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩)(pp)
+                    ), as_fieldop(λ(__cart_unroll_it) → ·⟪_OffJDimₒ, 1ₒ⟫(__cart_unroll_it),
+                                  c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩)(pp)
+                  )
+             )
+           )
+         );
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER TRANSFORM AS FIELDOP ===
+============================================================
+__field_operator_compute_neighbor_sum_unweighted(zavgS, out) {
+  out @ c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 1ₒ[ ⟩
+       ← as_fieldop(λ(__cart_reduce_arg0) → 
+                      (if can_deref(__cart_reduce_arg0) then ·__cart_reduce_arg0 else 0.0)
+                      + (if   can_deref(⟪_OffKolorₒ, 1ₒ⟫(__cart_reduce_arg0))
+                         then ·⟪_OffKolorₒ, 1ₒ⟫(__cart_reduce_arg0)
+                         else 0.0) + (if   can_deref(⟪_OffJDimₒ, -1ₒ, _OffKolorₒ, 2ₒ⟫(__cart_reduce_arg0))
+                                      then ·⟪_OffJDimₒ, -1ₒ, _OffKolorₒ, 2ₒ⟫(__cart_reduce_arg0)
+                                      else 0.0) + (if   can_deref(⟪_OffJDimₒ, -1ₒ⟫(__cart_reduce_arg0))
+                                                   then ·⟪_OffJDimₒ, -1ₒ⟫(__cart_reduce_arg0)
+                                                   else 0.0)
+                      + (if   can_deref(⟪_OffIDimₒ, -1ₒ, _OffKolorₒ, 1ₒ⟫(__cart_reduce_arg0))
+                         then ·⟪_OffIDimₒ, -1ₒ, _OffKolorₒ, 1ₒ⟫(__cart_reduce_arg0)
+                         else 0.0) + (if   can_deref(⟪_OffIDimₒ, -1ₒ, _OffKolorₒ, 2ₒ⟫(__cart_reduce_arg0))
+                                      then ·⟪_OffIDimₒ, -1ₒ, _OffKolorₒ, 2ₒ⟫(__cart_reduce_arg0)
+                                      else 0.0), c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 1ₒ[ ⟩)(
+           zavgS
+         );
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER INLINING LIFTS AND LAMBDAS ===
+============================================================
+__field_operator_compute_neighbor_sum_unweighted(zavgS, out) {
+  out @ c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 1ₒ[ ⟩
+       ← as_fieldop(λ(__cart_reduce_arg0) → 
+                      (if can_deref(__cart_reduce_arg0) then ·__cart_reduce_arg0 else 0.0)
+                      + (if   can_deref(⟪_OffKolorₒ, 1ₒ⟫(__cart_reduce_arg0))
+                         then ·⟪_OffKolorₒ, 1ₒ⟫(__cart_reduce_arg0)
+                         else 0.0) + (if   can_deref(⟪_OffJDimₒ, -1ₒ, _OffKolorₒ, 2ₒ⟫(__cart_reduce_arg0))
+                                      then ·⟪_OffJDimₒ, -1ₒ, _OffKolorₒ, 2ₒ⟫(__cart_reduce_arg0)
+                                      else 0.0) + (if   can_deref(⟪_OffJDimₒ, -1ₒ⟫(__cart_reduce_arg0))
+                                                   then ·⟪_OffJDimₒ, -1ₒ⟫(__cart_reduce_arg0)
+                                                   else 0.0)
+                      + (if   can_deref(⟪_OffIDimₒ, -1ₒ, _OffKolorₒ, 1ₒ⟫(__cart_reduce_arg0))
+                         then ·⟪_OffIDimₒ, -1ₒ, _OffKolorₒ, 1ₒ⟫(__cart_reduce_arg0)
+                         else 0.0) + (if   can_deref(⟪_OffIDimₒ, -1ₒ, _OffKolorₒ, 2ₒ⟫(__cart_reduce_arg0))
+                                      then ·⟪_OffIDimₒ, -1ₒ, _OffKolorₒ, 2ₒ⟫(__cart_reduce_arg0)
+                                      else 0.0), c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 1ₒ[ ⟩)(
+           zavgS
+         );
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER COMMON TRANSFORMS BEFORE INFER_DOMAIN ===
+============================================================
+__field_operator_compute_zavgS(pp, S_M, out) {
+  out @ c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩
+       ← as_fieldop(
+           λ(__arg0_, __arg1_) → ·__arg0_ × ·__arg1_, c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩
+         )(S_M,
+           as_fieldop(
+             λ(__arg0, __arg1) → ·__arg0 × ·__arg1, c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩
+           )(0.5,
+             as_fieldop(
+               λ(__arg0, __arg1) → ·__arg0 + ·__arg1, c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩
+             )((λ(__cwcda_field_a, __cwcda_field_b) → 
+                  concat_where(c⟨ Kolorₕ: [-∞, 0ₒ[ ⟩,
+                               __cwcda_field_a,
+                               concat_where(c⟨ Kolorₕ: [1ₒ, ∞[ ⟩, __cwcda_field_a, __cwcda_field_b)))(
+                 (λ(__cwcda_field_a, __cwcda_field_b) → 
+                    concat_where(c⟨ Kolorₕ: [-∞, 1ₒ[ ⟩,
+                                 __cwcda_field_a,
+                                 concat_where(c⟨ Kolorₕ: [2ₒ, ∞[ ⟩, __cwcda_field_a, __cwcda_field_b)))(
+                   as_fieldop(λ(__cart_unroll_it) → ·⟪_OffJDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(__cart_unroll_it),
+                              c⟨ IDimₕ: [0, 13[, JDimₕ: [0, 11[, Kolorₕ: [0, 3[ ⟩)(pp),
+                   as_fieldop(λ(__cart_unroll_it) → ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -1ₒ⟫(__cart_unroll_it),
+                              c⟨ IDimₕ: [0, 13[, JDimₕ: [0, 11[, Kolorₕ: [1, 2[ ⟩)(pp)
+                 ),
+                 as_fieldop(
+                   λ(__cart_unroll_it) → ·__cart_unroll_it, c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0, 1[ ⟩
+                 )(pp)
+               ), (λ(__cwcda_field_a, __cwcda_field_b) → 
+                     concat_where(c⟨ Kolorₕ: [-∞, 0ₒ[ ⟩,
+                                  __cwcda_field_a,
+                                  concat_where(c⟨ Kolorₕ: [1ₒ, ∞[ ⟩, __cwcda_field_a, __cwcda_field_b)))(
+                    (λ(__cwcda_field_a, __cwcda_field_b) → 
+                       concat_where(c⟨ Kolorₕ: [-∞, 1ₒ[ ⟩,
+                                    __cwcda_field_a,
+                                    concat_where(c⟨ Kolorₕ: [2ₒ, ∞[ ⟩, __cwcda_field_a, __cwcda_field_b)))(
+                      as_fieldop(λ(__cart_unroll_it) → ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(__cart_unroll_it),
+                                 c⟨ IDimₕ: [0, 13[, JDimₕ: [0, 11[, Kolorₕ: [0, 3[ ⟩)(pp),
+                      as_fieldop(λ(__cart_unroll_it) → ·⟪_OffKolorₒ, -1ₒ⟫(__cart_unroll_it),
+                                 c⟨ IDimₕ: [0, 13[, JDimₕ: [0, 11[, Kolorₕ: [1, 2[ ⟩)(pp)
+                    ), as_fieldop(λ(__cart_unroll_it) → ·⟪_OffJDimₒ, 1ₒ⟫(__cart_unroll_it),
+                                  c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0, 1[ ⟩)(pp)
+                  ))));
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER TRANSFORM AS FIELDOP ===
+============================================================
+__field_operator_compute_zavgS(pp, S_M, out) {
+  out @ c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩
+       ← as_fieldop(
+           λ(__arg0_, __arg1_) → ·__arg0_ × ·__arg1_, c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩
+         )(S_M,
+           as_fieldop(
+             λ(__arg0, __arg1) → ·__arg0 × ·__arg1, c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩
+           )(0.5,
+             as_fieldop(
+               λ(__arg0, __arg1) → ·__arg0 + ·__arg1, c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩
+             )((λ(__cwcda_field_a, __cwcda_field_b) → 
+                  as_fieldop(
+                    λ(__tcw_pos, __tcw_arg0, __tcw_arg1) → 
+                      (λ() → if -∞ <= (·__tcw_pos)[0] ∧ (·__tcw_pos)[0] < 0 then ·__tcw_arg0 else ·__tcw_arg1)(),
+                    c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩
+                  )({index(Kolorₕ)},
+                    __cwcda_field_a,
+                    as_fieldop(
+                      λ(__tcw_pos, __tcw_arg0, __tcw_arg1) → 
+                        (λ() → if 1 <= (·__tcw_pos)[0] ∧ (·__tcw_pos)[0] < ∞ then ·__tcw_arg0 else ·__tcw_arg1)(),
+                      c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0, 3ₒ[ ⟩
+                    )({index(Kolorₕ)}, __cwcda_field_a, __cwcda_field_b)))(
+                 (λ(__cwcda_field_a, __cwcda_field_b) → 
+                    as_fieldop(
+                      λ(__tcw_pos, __tcw_arg0, __tcw_arg1) → 
+                        (λ() → if -∞ <= (·__tcw_pos)[0] ∧ (·__tcw_pos)[0] < 1 then ·__tcw_arg0 else ·__tcw_arg1)(),
+                      c⟨ IDimₕ: [0, 13[, JDimₕ: [0, 11[, Kolorₕ: [0, 3[ ⟩
+                    )({index(Kolorₕ)},
+                      __cwcda_field_a,
+                      as_fieldop(
+                        λ(__tcw_pos, __tcw_arg0, __tcw_arg1) → 
+                          (λ() → if 2 <= (·__tcw_pos)[0] ∧ (·__tcw_pos)[0] < ∞ then ·__tcw_arg0 else ·__tcw_arg1)(),
+                        c⟨ IDimₕ: [0, 13[, JDimₕ: [0, 11[, Kolorₕ: [1, 3[ ⟩
+                      )({index(Kolorₕ)}, __cwcda_field_a, __cwcda_field_b)))(
+                   as_fieldop(λ(__cart_unroll_it) → ·⟪_OffJDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(__cart_unroll_it),
+                              c⟨ IDimₕ: [0, 13[, JDimₕ: [0, 11[, Kolorₕ: [0, 3[ ⟩)(pp),
+                   as_fieldop(λ(__cart_unroll_it) → ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -1ₒ⟫(__cart_unroll_it),
+                              c⟨ IDimₕ: [0, 13[, JDimₕ: [0, 11[, Kolorₕ: [1, 2[ ⟩)(pp)
+                 ),
+                 as_fieldop(
+                   λ(__cart_unroll_it) → ·__cart_unroll_it, c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0, 1[ ⟩
+                 )(pp)
+               ),
+               (λ(__cwcda_field_a, __cwcda_field_b) → 
+                  as_fieldop(
+                    λ(__tcw_pos, __tcw_arg0, __tcw_arg1) → 
+                      (λ() → if -∞ <= (·__tcw_pos)[0] ∧ (·__tcw_pos)[0] < 0 then ·__tcw_arg0 else ·__tcw_arg1)(),
+                    c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩
+                  )({index(Kolorₕ)},
+                    __cwcda_field_a,
+                    as_fieldop(
+                      λ(__tcw_pos, __tcw_arg0, __tcw_arg1) → 
+                        (λ() → if 1 <= (·__tcw_pos)[0] ∧ (·__tcw_pos)[0] < ∞ then ·__tcw_arg0 else ·__tcw_arg1)(),
+                      c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0, 3ₒ[ ⟩
+                    )({index(Kolorₕ)}, __cwcda_field_a, __cwcda_field_b)))(
+                 (λ(__cwcda_field_a, __cwcda_field_b) → 
+                    as_fieldop(
+                      λ(__tcw_pos, __tcw_arg0, __tcw_arg1) → 
+                        (λ() → if -∞ <= (·__tcw_pos)[0] ∧ (·__tcw_pos)[0] < 1 then ·__tcw_arg0 else ·__tcw_arg1)(),
+                      c⟨ IDimₕ: [0, 13[, JDimₕ: [0, 11[, Kolorₕ: [0, 3[ ⟩
+                    )({index(Kolorₕ)},
+                      __cwcda_field_a,
+                      as_fieldop(
+                        λ(__tcw_pos, __tcw_arg0, __tcw_arg1) → 
+                          (λ() → if 2 <= (·__tcw_pos)[0] ∧ (·__tcw_pos)[0] < ∞ then ·__tcw_arg0 else ·__tcw_arg1)(),
+                        c⟨ IDimₕ: [0, 13[, JDimₕ: [0, 11[, Kolorₕ: [1, 3[ ⟩
+                      )({index(Kolorₕ)}, __cwcda_field_a, __cwcda_field_b)))(
+                   as_fieldop(λ(__cart_unroll_it) → ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(__cart_unroll_it),
+                              c⟨ IDimₕ: [0, 13[, JDimₕ: [0, 11[, Kolorₕ: [0, 3[ ⟩)(pp),
+                   as_fieldop(λ(__cart_unroll_it) → ·⟪_OffKolorₒ, -1ₒ⟫(__cart_unroll_it),
+                              c⟨ IDimₕ: [0, 13[, JDimₕ: [0, 11[, Kolorₕ: [1, 2[ ⟩)(pp)
+                 ), as_fieldop(λ(__cart_unroll_it) → ·⟪_OffJDimₒ, 1ₒ⟫(__cart_unroll_it),
+                               c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0, 1[ ⟩)(pp)
+               ))));
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER COMMON TRANSFORMS ===
+============================================================
+__field_operator_compute_neighbor_sum_unweighted(zavgS, out) {
+  out @ c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 1ₒ[ ⟩
+       ← as_fieldop(
+           λ(__cart_reduce_arg0) → 
+             (λ(_cs_0, _cs_1, _cs_2, _cs_3, _cs_4) → 
+                (if can_deref(__cart_reduce_arg0) then ·__cart_reduce_arg0 else 0.0)
+                + (if can_deref(_cs_4) then ·_cs_4 else 0.0) + (if can_deref(_cs_3) then ·_cs_3 else 0.0)
+                + (if can_deref(_cs_2) then ·_cs_2 else 0.0) + (if can_deref(_cs_1) then ·_cs_1 else 0.0)
+                + (if can_deref(_cs_0) then ·_cs_0 else 0.0))(⟪_OffIDimₒ, -1ₒ, _OffKolorₒ, 2ₒ⟫(__cart_reduce_arg0),
+                                                              ⟪_OffIDimₒ, -1ₒ, _OffKolorₒ, 1ₒ⟫(__cart_reduce_arg0),
+                                                              ⟪_OffJDimₒ, -1ₒ⟫(__cart_reduce_arg0),
+                                                              ⟪_OffJDimₒ, -1ₒ, _OffKolorₒ, 2ₒ⟫(__cart_reduce_arg0),
+                                                              ⟪_OffKolorₒ, 1ₒ⟫(__cart_reduce_arg0)),
+           c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 1ₒ[ ⟩
+         )(zavgS);
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER UNROLLING REDUCE ===
+============================================================
+__field_operator_compute_neighbor_sum_unweighted(zavgS, out) {
+  out @ c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 1ₒ[ ⟩
+       ← as_fieldop(
+           λ(__cart_reduce_arg0) → 
+             (λ(_cs_0, _cs_1, _cs_2, _cs_3, _cs_4) → 
+                (if can_deref(__cart_reduce_arg0) then ·__cart_reduce_arg0 else 0.0)
+                + (if can_deref(_cs_4) then ·_cs_4 else 0.0) + (if can_deref(_cs_3) then ·_cs_3 else 0.0)
+                + (if can_deref(_cs_2) then ·_cs_2 else 0.0) + (if can_deref(_cs_1) then ·_cs_1 else 0.0)
+                + (if can_deref(_cs_0) then ·_cs_0 else 0.0))(⟪_OffIDimₒ, -1ₒ, _OffKolorₒ, 2ₒ⟫(__cart_reduce_arg0),
+                                                              ⟪_OffIDimₒ, -1ₒ, _OffKolorₒ, 1ₒ⟫(__cart_reduce_arg0),
+                                                              ⟪_OffJDimₒ, -1ₒ⟫(__cart_reduce_arg0),
+                                                              ⟪_OffJDimₒ, -1ₒ, _OffKolorₒ, 2ₒ⟫(__cart_reduce_arg0),
+                                                              ⟪_OffKolorₒ, 1ₒ⟫(__cart_reduce_arg0)),
+           c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 1ₒ[ ⟩
+         )(zavgS);
+}
+============================================================
+
+
+============================================================
+=== GTIR END ===
+============================================================
+__field_operator_compute_neighbor_sum_unweighted(zavgS, out) {
+  out @ c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 1ₒ[ ⟩
+       ← as_fieldop(
+           λ(__cart_reduce_arg0) → 
+             (λ(_cs_0, _cs_1, _cs_2, _cs_3, _cs_4) → 
+                (if True then ·__cart_reduce_arg0 else 0.0) + (if True then ·_cs_4 else 0.0)
+                + (if True then ·_cs_3 else 0.0) + (if True then ·_cs_2 else 0.0) + (if True then ·_cs_1 else 0.0)
+                + (if True then ·_cs_0 else 0.0))(⟪_OffIDimₒ, -1ₒ, _OffKolorₒ, 2ₒ⟫(__cart_reduce_arg0),
+                                                  ⟪_OffIDimₒ, -1ₒ, _OffKolorₒ, 1ₒ⟫(__cart_reduce_arg0),
+                                                  ⟪_OffJDimₒ, -1ₒ⟫(__cart_reduce_arg0),
+                                                  ⟪_OffJDimₒ, -1ₒ, _OffKolorₒ, 2ₒ⟫(__cart_reduce_arg0),
+                                                  ⟪_OffKolorₒ, 1ₒ⟫(__cart_reduce_arg0)),
+           c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 1ₒ[ ⟩
+         )(zavgS);
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER INLINING LIFTS AND LAMBDAS ===
+============================================================
+__field_operator_compute_zavgS(pp, S_M, out) {
+  out @ c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩
+       ← as_fieldop(
+           λ(S_M, __iasfop_30, pp) → 
+             (λ(_cs_14, _cs_16) → 
+                ((if   _cs_16
+                  then if   True ∧ _cs_14 < 1
+                       then ·⟪_OffJDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp)
+                       else if   2 <= _cs_14 ∧ True
+                            then ·⟪_OffJDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp)
+                            else ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -1ₒ⟫(pp)
+                  else if 1 <= _cs_14 ∧ True then if   True ∧ _cs_14 < 1
+                                                  then ·⟪_OffJDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp)
+                                                  else if   2 <= _cs_14 ∧ True
+                                                       then ·⟪_OffJDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp)
+                                                       else ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -1ₒ⟫(pp) else ·pp)
+                 + (if   _cs_16
+                    then if   True ∧ _cs_14 < 1
+                         then ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp)
+                         else if 2 <= _cs_14 ∧ True then ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp) else ·⟪_OffKolorₒ, -1ₒ⟫(pp)
+                    else if   1 <= _cs_14 ∧ True
+                         then if   True ∧ _cs_14 < 1
+                              then ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp)
+                              else if 2 <= _cs_14 ∧ True then ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp) else ·⟪_OffKolorₒ, -1ₒ⟫(pp)
+                         else ·⟪_OffJDimₒ, 1ₒ⟫(pp))) × 0.5 × ·S_M)(·__iasfop_30, True ∧ ·__iasfop_30 < 0),
+           c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩
+         )(S_M, index(Kolorₕ), pp);
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER COMMON TRANSFORMS ===
+============================================================
+__field_operator_compute_zavgS(pp, S_M, out) {
+  out @ c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩
+       ← as_fieldop(
+           λ(S_M, __iasfop_30, pp) → 
+             (λ(_cs_17) → 
+                (λ(_cs_16) → 
+                   ((if   _cs_16
+                     then if   True ∧ _cs_17 < 1
+                          then ·⟪_OffJDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp)
+                          else if   2 <= _cs_17 ∧ True
+                               then ·⟪_OffJDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp)
+                               else ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -1ₒ⟫(pp)
+                     else if 1 <= _cs_17 ∧ True then if   True ∧ _cs_17 < 1
+                                                     then ·⟪_OffJDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp)
+                                                     else if   2 <= _cs_17 ∧ True
+                                                          then ·⟪_OffJDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp)
+                                                          else ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -1ₒ⟫(pp) else ·pp)
+                    + (if   _cs_16
+                       then if   True ∧ _cs_17 < 1
+                            then ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp)
+                            else if 2 <= _cs_17 ∧ True then ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp) else ·⟪_OffKolorₒ, -1ₒ⟫(pp)
+                       else if   1 <= _cs_17 ∧ True
+                            then if   True ∧ _cs_17 < 1
+                                 then ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp)
+                                 else if 2 <= _cs_17 ∧ True then ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp) else ·⟪_OffKolorₒ, -1ₒ⟫(pp)
+                            else ·⟪_OffJDimₒ, 1ₒ⟫(pp))) × 0.5 × ·S_M)(True ∧ _cs_17 < 0))(·__iasfop_30),
+           c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩
+         )(S_M, index(Kolorₕ), pp);
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER UNROLLING REDUCE ===
+============================================================
+__field_operator_compute_zavgS(pp, S_M, out) {
+  out @ c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩
+       ← as_fieldop(
+           λ(S_M, __iasfop_30, pp) → 
+             (λ(_cs_17) → 
+                (λ(_cs_16) → 
+                   ((if   _cs_16
+                     then if   True ∧ _cs_17 < 1
+                          then ·⟪_OffJDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp)
+                          else if   2 <= _cs_17 ∧ True
+                               then ·⟪_OffJDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp)
+                               else ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -1ₒ⟫(pp)
+                     else if 1 <= _cs_17 ∧ True then if   True ∧ _cs_17 < 1
+                                                     then ·⟪_OffJDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp)
+                                                     else if   2 <= _cs_17 ∧ True
+                                                          then ·⟪_OffJDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp)
+                                                          else ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -1ₒ⟫(pp) else ·pp)
+                    + (if   _cs_16
+                       then if   True ∧ _cs_17 < 1
+                            then ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp)
+                            else if 2 <= _cs_17 ∧ True then ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp) else ·⟪_OffKolorₒ, -1ₒ⟫(pp)
+                       else if   1 <= _cs_17 ∧ True
+                            then if   True ∧ _cs_17 < 1
+                                 then ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp)
+                                 else if 2 <= _cs_17 ∧ True then ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp) else ·⟪_OffKolorₒ, -1ₒ⟫(pp)
+                            else ·⟪_OffJDimₒ, 1ₒ⟫(pp))) × 0.5 × ·S_M)(True ∧ _cs_17 < 0))(·__iasfop_30),
+           c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩
+         )(S_M, index(Kolorₕ), pp);
+}
+============================================================
+
+
+============================================================
+=== GTIR END ===
+============================================================
+__field_operator_compute_zavgS(pp, S_M, out) {
+  out @ c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩
+       ← as_fieldop(
+           λ(S_M, __iasfop_30, pp) → 
+             (λ(_cs_17) → 
+                (λ(_cs_16) → 
+                   ((if   _cs_16
+                     then if   True ∧ _cs_17 < 1
+                          then ·⟪_OffJDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp)
+                          else if   2 <= _cs_17 ∧ True
+                               then ·⟪_OffJDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp)
+                               else ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -1ₒ⟫(pp)
+                     else if 1 <= _cs_17 ∧ True then if   True ∧ _cs_17 < 1
+                                                     then ·⟪_OffJDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp)
+                                                     else if   2 <= _cs_17 ∧ True
+                                                          then ·⟪_OffJDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp)
+                                                          else ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -1ₒ⟫(pp) else ·pp)
+                    + (if   _cs_16
+                       then if   True ∧ _cs_17 < 1
+                            then ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp)
+                            else if 2 <= _cs_17 ∧ True then ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp) else ·⟪_OffKolorₒ, -1ₒ⟫(pp)
+                       else if   1 <= _cs_17 ∧ True
+                            then if   True ∧ _cs_17 < 1
+                                 then ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp)
+                                 else if 2 <= _cs_17 ∧ True then ·⟪_OffIDimₒ, 1ₒ, _OffKolorₒ, -2ₒ⟫(pp) else ·⟪_OffKolorₒ, -1ₒ⟫(pp)
+                            else ·⟪_OffJDimₒ, 1ₒ⟫(pp))) × 0.5 × ·S_M)(True ∧ _cs_17 < 0))(·__iasfop_30),
+           c⟨ IDimₕ: [0ₒ, 13ₒ[, JDimₕ: [0ₒ, 11ₒ[, Kolorₕ: [0ₒ, 3ₒ[ ⟩
+         )(S_M, index(Kolorₕ), pp);
+}
+============================================================
+

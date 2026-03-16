@@ -125,8 +125,17 @@ class UnrollReduce(PreserveLocationVisitor, NodeTranslator):
             neighbor_args = list(_get_neighbors_args(node.args))
             if neighbor_args:
                 offset_tag, it = neighbor_args[0].args
-                can_deref = im.can_deref(im.shift(offset_tag, offset)(it))
-                step_fun = im.if_(can_deref, step_fun, acc)
+                is_cartesian_offset = (
+                    isinstance(offset_tag, itir.OffsetLiteral)
+                    and isinstance(offset_tag.value, str)
+                    and (
+                        offset_tag.value.startswith("_Off")
+                        or offset_tag.value in {"IDim", "JDim", "Kolor"}
+                    )
+                )
+                if not is_cartesian_offset:
+                    can_deref = im.can_deref(im.shift(offset_tag, offset)(it))
+                    step_fun = im.if_(can_deref, step_fun, acc)
 
         step_fun = im.lambda_(acc, offset)(step_fun)
         expr = init

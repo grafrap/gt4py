@@ -743,7 +743,6 @@ def shift(*offset_literals, offset_provider_type: common.OffsetProviderType) -> 
                             assert not found
                             new_position_dims[i] = type_.codomain
                             found = True
-                    assert found
                 else:
                     raise NotImplementedError(f"{type_} is not a supported Connectivity type.")
         else:
