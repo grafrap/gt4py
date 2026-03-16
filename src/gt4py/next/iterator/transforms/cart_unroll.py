@@ -165,6 +165,18 @@ def _compute_shift_guard_domain(
     return im.domain(common.GridType.CARTESIAN, dim_ranges)
 
 
+def _concat_where_condition_from_domain(domain_expr: ir.Expr) -> ir.Expr:
+    if cpm.is_call_to(domain_expr, "cartesian_domain") and len(domain_expr.args) > 1:
+        axis_domains = [
+            im.call("cartesian_domain")(copy.deepcopy(range_expr)) for range_expr in domain_expr.args
+        ]
+        cond = axis_domains[0]
+        for axis_domain in axis_domains[1:]:
+            cond = im.and_(cond, axis_domain)
+        return cond
+    return domain_expr
+
+
 @dataclasses.dataclass
 class CartUnroll(NodeTranslator):
 
@@ -447,30 +459,55 @@ class CartUnroll(NodeTranslator):
                     param_names.append(local_name)
                     call_args.append(bound_arg)
 
-                acc = copy.deepcopy(widened_init)
-                for idx in range(conn_size):
-                    elem = CartUnroll._local_list_element_expr(
-                        stencil.expr,
-                        idx,
-                        bindings,
-                        _neutral_element_for_reduce_op(red_op, widened_init),
-                        domain_bounds,
-                    )
-                    if elem is None:
-                        break
-                    acc = im.call(copy.deepcopy(red_op))(acc, elem)
-                else:
-                    return im.as_fieldop(im.lambda_(*param_names)(acc), domain)(*call_args)
+                prefer_field_level_neighbor_fallback = False
+                if len(bindings) == 1:
+                    only_binding = next(iter(bindings.values()))
+                    if only_binding.get("kind") == "neighbors":
+                        prefer_field_level_neighbor_fallback = True
+                    elif (
+                        only_binding.get("kind") == "list"
+                        and cpm.is_call_to(stencil.expr, "neighbors")
+                        and len(stencil.expr.args) == 2
+                        and isinstance(stencil.expr.args[0], ir.OffsetLiteral)
+                    ):
+                        prefer_field_level_neighbor_fallback = True
+
+                if not prefer_field_level_neighbor_fallback:
+                    acc = copy.deepcopy(widened_init)
+                    for idx in range(conn_size):
+                        elem = CartUnroll._local_list_element_expr(
+                            stencil.expr,
+                            idx,
+                            bindings,
+                            _neutral_element_for_reduce_op(red_op, widened_init),
+                            domain_bounds,
+                        )
+                        if elem is None:
+                            break
+                        acc = im.call(copy.deepcopy(red_op))(acc, elem)
+                    else:
+                        return im.as_fieldop(im.lambda_(*param_names)(acc), domain)(*call_args)
 
                 # Fallback for neighbor-only reductions: build field-level guarded sum using concat_where.
                 if len(bindings) == 1:
                     only_binding = next(iter(bindings.values()))
+                    fallback_conn: str | None = None
+                    if only_binding.get("kind") == "neighbors" and isinstance(only_binding.get("conn"), str):
+                        fallback_conn = only_binding["conn"]
+                    elif (
+                        only_binding.get("kind") == "list"
+                        and cpm.is_call_to(stencil.expr, "neighbors")
+                        and len(stencil.expr.args) == 2
+                        and isinstance(stencil.expr.args[0], ir.OffsetLiteral)
+                        and isinstance(stencil.expr.args[0].value, str)
+                    ):
+                        fallback_conn = stencil.expr.args[0].value
+
                     if (
-                        only_binding.get("kind") == "neighbors"
-                        and isinstance(only_binding.get("conn"), str)
+                        fallback_conn is not None
                         and len(call_args) == 1
                     ):
-                        conn = only_binding["conn"]
+                        conn = fallback_conn
                         input_field = copy.deepcopy(call_args[0])
                         acc_field = im.as_fieldop(
                             im.lambda_("__acc_init")(im.deref("__acc_init")),
@@ -499,7 +536,11 @@ class CartUnroll(NodeTranslator):
                                 else None
                             )
                             if guard_domain is not None:
-                                elem_field = im.concat_where(guard_domain, shifted_field, neutral_field)
+                                elem_field = im.concat_where(
+                                    _concat_where_condition_from_domain(guard_domain),
+                                    shifted_field,
+                                    neutral_field,
+                                )
                             else:
                                 elem_field = shifted_field
 
@@ -749,6 +790,31 @@ class CartUnroll(NodeTranslator):
                         out = copy.deepcopy(bounds[tuple_index.value])
                         _debug("inlined tuple_get(get_domain_range(...))", out)
                         return out
+
+        # if cpm.is_call_to(new_node, "cartesian_domain") and len(new_node.args) == 1:
+        #     nr = new_node.args[0]
+        #     if cpm.is_call_to(nr, "named_range") and len(nr.args) == 3:
+        #         axis_expr, _, _ = nr.args
+        #         axis_name = _axis_name(axis_expr)
+        #         if axis_name in {"Edge", "Vertex", "Cell"}:
+        #             idim_bounds = _cartesian_axis_bounds("IDim")
+        #             jdim_bounds = _cartesian_axis_bounds("JDim")
+        #             kolor_bounds = _entity_kolor_bounds(axis_name)
+        #             if (
+        #                 idim_bounds is not None
+        #                 and jdim_bounds is not None
+        #                 and kolor_bounds is not None
+        #             ):
+        #                 IDim = common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL)
+        #                 JDim = common.Dimension("JDim", kind=common.DimensionKind.HORIZONTAL)
+        #                 Kolor = common.Dimension("Kolor", kind=common.DimensionKind.HORIZONTAL)
+        #                 replacement_domain = im.call("cartesian_domain")(
+        #                     im.named_range(IDim, *idim_bounds),
+        #                     im.named_range(JDim, *jdim_bounds),
+        #                     im.named_range(Kolor, *kolor_bounds),
+        #                 )
+        #                 _debug("expanded entity cartesian_domain", replacement_domain)
+        #                 return replacement_domain
 
         if cpm.is_call_to(new_node, "unstructured_domain") and len(new_node.args) == 1:
             nr = new_node.args[0]

@@ -29,6 +29,16 @@ def import_from_path(
         The loaded module.
     """
     module_name = module_file.name.split(".")[0]
+    qualified_module_name = module_name
+    if add_to_sys_modules:
+        if sys_modules_prefix and not sys_modules_prefix.endswith("."):
+            sys_modules_prefix += "."
+        qualified_module_name = f"{sys_modules_prefix}{module_name}" if sys_modules_prefix else module_name
+
+        # Reuse a previously imported compiled extension instead of re-executing it.
+        # Nanobind-backed modules can segfault when imported multiple times in-process.
+        if qualified_module_name in sys.modules:
+            return sys.modules[qualified_module_name]
 
     error_msg = f"Could not load module named {module_name} from {module_file}"
     spec = importlib.util.spec_from_file_location(module_name, module_file)
@@ -41,9 +51,7 @@ def import_from_path(
         raise ModuleNotFoundError(error_msg) from ex
 
     if add_to_sys_modules:
-        if not sys_modules_prefix.endswith("."):
-            sys_modules_prefix += "."
-        sys.modules[sys_modules_prefix + module_name] = module
+        sys.modules[qualified_module_name] = module
     elif sys_modules_prefix:
         raise ValueError("Cannot use 'sys_modules_prefix' if 'add_to_sys_modules' is False")
 

@@ -38,6 +38,7 @@ from gt4py.next.modules.translator import (
     IDim,
     JDim,
     Kolor,
+    build_structured_sign_from_unstructured,
     build_index_map_from_lonlat_e2v,
     pack_edge_field_to_structured,
     pack_vertex_field,
@@ -283,6 +284,7 @@ def test_ffront_nabla_parallelogram_grid(exec_alloc_descriptor):
         v2e = _read_v2e(ds)
         lonlat = _read_lonlat(ds)
         remap_sizes = load_structured_remap_sizes_from_netcdf(mesh_nc)
+        dual_volumes = _first_present(ds, ["dual_area"])
 
         print(f"remap sies: ",remap_sizes)
 
@@ -291,6 +293,7 @@ def test_ffront_nabla_parallelogram_grid(exec_alloc_descriptor):
             e2v=e2v,
             v2e=v2e,
             lonlat_deg=lonlat,
+            dual_volumes=dual_volumes,
         )
 
         assert setup.nodes_size == remap_sizes.vertex_size
@@ -306,7 +309,14 @@ def test_ffront_nabla_parallelogram_grid(exec_alloc_descriptor):
 
     pp_struct_np = pack_vertex_field_to_structured(setup.input_field.asnumpy(), index_map)
     s_m_struct_np = pack_edge_field_to_structured(setup.S_fields[0].asnumpy(), index_map)
-    sign_struct_np = pack_vertex_field(setup.sign_field.asnumpy(), index_map)
+    sign_struct_np = np.stack(
+        build_structured_sign_from_unstructured(
+            setup.sign_field.asnumpy(),
+            setup.nodes2edge_connectivity.asnumpy(),
+            index_map,
+        ),
+        axis=-1,
+    )
     assert sign_struct_np.ndim == 4
     assert sign_struct_np.shape[2] == 1
     assert sign_struct_np.shape[3] == 6
@@ -375,7 +385,11 @@ def test_ffront_nabla_parallelogram_grid(exec_alloc_descriptor):
     pnabla_myy_np = unpack_vertex_field_to_unstructured(pnabla_myy_struct.asnumpy(), index_map)
     print(pnabla_mxx_np)
     print(pnabla_myy_np)
-    # TODO this check is not sensitive enough, need to implement a proper numpy reference!
+
+    # compare to numpy reference
+
+
+    # # TODO this check is not sensitive enough, need to implement a proper numpy reference!
     assert_close(-3.5455427772566003e-003, np.min(pnabla_mxx_np))
     assert_close(3.5455427772565435e-003, np.max(pnabla_mxx_np))
     assert_close(-3.3540113705465301e-003, np.min(pnabla_myy_np))
@@ -410,7 +424,14 @@ def _prepare_parallelogram_structured_case(exec_alloc_descriptor):
 
     pp_struct_np = pack_vertex_field_to_structured(setup.input_field.asnumpy(), index_map)
     s_m_struct_np = pack_edge_field_to_structured(setup.S_fields[0].asnumpy(), index_map)
-    sign_struct_np = pack_vertex_field(setup.sign_field.asnumpy(), index_map)
+    sign_struct_np = np.stack(
+        build_structured_sign_from_unstructured(
+            setup.sign_field.asnumpy(),
+            setup.nodes2edge_connectivity.asnumpy(),
+            index_map,
+        ),
+        axis=-1,
+    )
     vol_struct_np = pack_vertex_field_to_structured(setup.vol_field.asnumpy(), index_map)
 
     pp_struct = gtx.as_field([IDim, JDim, Kolor], pp_struct_np, allocator=exec_alloc_descriptor.allocator)
