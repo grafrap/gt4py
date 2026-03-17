@@ -35,9 +35,6 @@ def _apply_shift_chain(arg: ir.Expr, shift_spec: tuple[ir.OffsetLiteral, ...]) -
     return im.call(im.call("shift")(*tuple(normalized)))(arg)
 
 
-
-
-
 def _build_concat_where_from_branches(arg: ir.Expr, branches):
     # branches: ((cond_or_none, shift_spec), ...)
     cond, shift_spec = branches[0]
@@ -63,13 +60,27 @@ def _make_lifted_guarded_shift(
     neutral_element: ir.Expr,
     domain: ir.Expr | None = None,
 ) -> ir.Expr:
-    it_name = "__cart_unroll_guard_it"
-    return im.as_fieldop(
-        im.lambda_(it_name)(
-            _bounded_shifted_deref(im.ref(it_name), shift_spec, copy.deepcopy(neutral_element))
-        ),
-        domain,
-    )(copy.deepcopy(arg))
+    shifted_field = _make_lifted_deref_shift(arg, shift_spec, domain)
+    valid_domain = _compute_shift_guard_domain(shift_spec, domain) if domain else None
+    
+    if valid_domain is None:
+        return shifted_field
+        
+    cond = _concat_where_condition_from_domain(valid_domain)
+    
+    # Implementing your suggestion: if the neutral element is 0.0, use field - field 
+    # to enforce identical typing for the boundary fallback, but wrapped in as_fieldop
+    is_zero = isinstance(neutral_element, ir.Literal) and neutral_element.value in {"0", "0.0"}
+    if is_zero:
+        fallback_field = im.as_fieldop(
+            im.lambda_("__x")(im.minus(im.deref("__x"), im.deref("__x"))), domain
+        )(copy.deepcopy(shifted_field))
+    else:
+        fallback_field = im.as_fieldop(
+            im.lambda_("__x")(copy.deepcopy(neutral_element)), domain
+        )(copy.deepcopy(shifted_field))
+        
+    return im.concat_where(cond, shifted_field, fallback_field)
 
 
 def _neutral_element_for_reduce_op(red_op: ir.Expr, red_init: ir.Expr) -> ir.Expr:
@@ -439,6 +450,41 @@ class CartUnroll(NodeTranslator):
         ):
             widened_init = copy.deepcopy(neutral_element)
 
+        # Handle simple neighbor reductions (e.g. neighbor_sum) via fields cleanly bypassing the list_get fallback completely
+        if cpm.is_call_to(list_expr, "neighbors") and len(list_expr.args) == 2:
+            conn_expr = list_expr.args[0]
+            if isinstance(conn_expr, ir.OffsetLiteral) and isinstance(conn_expr.value, str):
+                conn = conn_expr.value
+                input_field = copy.deepcopy(list_expr.args[1])
+                
+                acc_field = im.as_fieldop(
+                    im.lambda_("__acc_init")(im.deref("__acc_init")),
+                    domain,
+                )(im.as_fieldop(im.lambda_("__x")(copy.deepcopy(widened_init)), domain)(input_field))
+
+                for idx in range(conn_size):
+                    key = (ir.OffsetLiteral(value=conn), ir.OffsetLiteral(value=idx))
+                    if key not in map_dict:
+                        break
+                    entry = map_dict[key]
+                    if entry["kind"] != "shift":
+                        break
+                        
+                    shift_spec = entry["shifts"]
+                    elem_field = _make_lifted_guarded_shift(
+                        input_field,
+                        shift_spec,
+                        neutral_element,
+                        domain,
+                    )
+                    
+                    acc_field = im.as_fieldop(
+                        im.lambda_("__a", "__b")(im.call(copy.deepcopy(red_op))(im.deref("__a"), im.deref("__b"))),
+                        domain,
+                    )(acc_field, elem_field)
+                else:
+                    return acc_field
+
         if cpm.is_applied_as_fieldop(list_expr):
             stencil = list_expr.fun.args[0]
             if isinstance(stencil, ir.Lambda):
@@ -710,11 +756,6 @@ class CartUnroll(NodeTranslator):
                     out = _build_concat_where_from_branches(arg, entry["branches"])
                     _debug("applied concat_where rewrite", out)
                     return out
-                    # (cond0, s0), (cond1, s1), (_, s2) = entry["branches"]
-                    # b0 = _apply_shift_chain(arg, s0)
-                    # b1 = _apply_shift_chain(arg, s1)
-                    # b2 = _apply_shift_chain(arg, s2)
-                    # return im.concat_where(cond0, b0, im.concat_where(cond1, b1, b2))
         
         # replace Field[Edge] with Field[IDim, JDim, Kolor]
         # i.e. replace get_domain_range(out, Edgeₕ) by the equivalent in IDim, JDim, Kolor
@@ -771,7 +812,6 @@ class CartUnroll(NodeTranslator):
                     _debug("inlined get_domain_range", out)
                     return out
 
-        # if cpm.is_call_to(new_node, "get_domain_range") and new_node.args[1] == ir.OffsetLiteral(value="Edgeₕ"):
         def _extract_field_from_get_domain_range(expr: ir.Expr, expected_axis: str) -> ir.Expr | None:
         # Match tuple_get(k, get_domain_range(field, Axis))
             if not cpm.is_call_to(expr, "tuple_get") or len(expr.args) != 2:
@@ -897,5 +937,3 @@ class RewriteCartesianCanDeref(NodeTranslator):
                 return im.literal("True", "bool")
 
         return new_node
-
-# dict V2V[0] -> cart, ...
