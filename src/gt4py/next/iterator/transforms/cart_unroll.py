@@ -57,6 +57,21 @@ def _make_lifted_deref_shift(
     )(copy.deepcopy(arg))
 
 
+def _make_lifted_guarded_shift(
+    arg: ir.Expr,
+    shift_spec: tuple[ir.OffsetLiteral, ...],
+    neutral_element: ir.Expr,
+    domain: ir.Expr | None = None,
+) -> ir.Expr:
+    it_name = "__cart_unroll_guard_it"
+    return im.as_fieldop(
+        im.lambda_(it_name)(
+            _bounded_shifted_deref(im.ref(it_name), shift_spec, copy.deepcopy(neutral_element))
+        ),
+        domain,
+    )(copy.deepcopy(arg))
+
+
 def _neutral_element_for_reduce_op(red_op: ir.Expr, red_init: ir.Expr) -> ir.Expr:
     op_name = red_op.id if isinstance(red_op, ir.SymRef) else None
 
@@ -532,21 +547,12 @@ class CartUnroll(NodeTranslator):
                                 break
 
                             shift_spec = entry["shifts"]
-                            shifted_field = _make_lifted_deref_shift(input_field, shift_spec, domain)
-
-                            guard_domain = (
-                                _compute_shift_guard_domain(shift_spec, domain)
-                                if domain is not None
-                                else None
+                            elem_field = _make_lifted_guarded_shift(
+                                input_field,
+                                shift_spec,
+                                neutral_element,
+                                domain,
                             )
-                            if guard_domain is not None:
-                                elem_field = im.concat_where(
-                                    _concat_where_condition_from_domain(guard_domain),
-                                    shifted_field,
-                                    neutral_field,
-                                )
-                            else:
-                                elem_field = shifted_field
 
                             acc_field = im.as_fieldop(
                                 im.lambda_("__a", "__b")(im.call(copy.deepcopy(red_op))(im.deref("__a"), im.deref("__b"))),

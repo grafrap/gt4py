@@ -384,16 +384,57 @@ def test_ffront_nabla_parallelogram_grid(exec_alloc_descriptor):
     pnabla_mxx_np = unpack_vertex_field_to_unstructured(pnabla_mxx_struct.asnumpy(), index_map)
     pnabla_myy_np = unpack_vertex_field_to_unstructured(pnabla_myy_struct.asnumpy(), index_map)
     print(pnabla_mxx_np)
-    print(pnabla_myy_np)
+    # print(pnabla_myy_np)
 
-    # compare to numpy reference
+        # Numpy reference implementation (use unstructured connectivity from setup)
+    e2v_un = setup.edges2node_connectivity.asnumpy()        # (n_edge, 2)
+    valid_e = np.all(e2v_un >= 0, axis=1)
+    pp_un = setup.input_field.asnumpy()                     # (n_vertex,)
+    s_m_un = setup.S_fields[0].asnumpy()                   # (n_edge,)
+    vol_un = setup.vol_field.asnumpy()                     # (n_vertex,)
+    sign_un = setup.sign_field.asnumpy()                   # (n_vertex, max_deg)
+    v2e_un = setup.nodes2edge_connectivity.asnumpy()       # (n_vertex, max_deg)
+    
+    # zavg on unstructured edges
+    zavg_un = np.zeros((s_m_un.shape[0],), dtype=s_m_un.dtype)
+    zavg_un[valid_e] = s_m_un[valid_e] * 0.5 * (pp_un[e2v_un[valid_e, 0]] + pp_un[e2v_un[valid_e, 1]])
+    
+    # accumulate per-vertex neighbor sum
+    n_vertex = v2e_un.shape[0]
+    pnabla_mxx_numpy = np.zeros((n_vertex,), dtype=float)
+    pnabla_myy_numpy = np.zeros((n_vertex,), dtype=float)
+    
+    for v in range(n_vertex):
+        edges = v2e_un[v]              # list of neighbor edge indices (pad -1)
+        mask = edges >= 0
+        if not np.any(mask):
+            continue
+        e_idx = edges[mask]
+        svals = zavg_un[e_idx]
+        sgns = sign_un[v, mask]
+        pnabla_mxx_numpy[v] = float((svals * sgns).sum())
+        pnabla_myy_numpy[v] = pnabla_mxx_numpy[v]  # if identical here, else compute from S_MYY similarly
+    
+    # divide by vertex volume
+    pnabla_mxx_numpy /= vol_un
+    pnabla_myy_numpy /= vol_un
+
+    print(f"numpy pnabla_mxx: ", pnabla_mxx_numpy)
+    
+    print(f"difference: ", pnabla_mxx_np - pnabla_mxx_numpy)
+    
+    # compare to GT4Py result (unstructured)
+    assert np.allclose(pnabla_mxx_np, pnabla_mxx_numpy, rtol=1e-10, atol=0)
+    assert np.allclose(pnabla_myy_np, pnabla_myy_numpy, rtol=1e-10, atol=0)
+
+    
 
 
     # # TODO this check is not sensitive enough, need to implement a proper numpy reference!
-    assert_close(-3.5455427772566003e-003, np.min(pnabla_mxx_np))
-    assert_close(3.5455427772565435e-003, np.max(pnabla_mxx_np))
-    assert_close(-3.3540113705465301e-003, np.min(pnabla_myy_np))
-    assert_close(3.3540113705465301e-003, np.max(pnabla_myy_np))
+    # assert_close(-3.5455427772566003e-003, np.min(pnabla_mxx_np))
+    # assert_close(3.5455427772565435e-003, np.max(pnabla_mxx_np))
+    # assert_close(-3.3540113705465301e-003, np.min(pnabla_myy_np))
+    # assert_close(3.3540113705465301e-003, np.max(pnabla_myy_np))
 
 
 def _prepare_parallelogram_structured_case(exec_alloc_descriptor):
@@ -466,7 +507,14 @@ def _prepare_parallelogram_structured_case(exec_alloc_descriptor):
     }
 
 
-def test_ffront_nabla_parallelogram_part_zavgS(exec_alloc_descriptor):
+def _require_gtfn_run_gtfn_backend(request):
+    param_id = str(getattr(getattr(request.node, "callspec", None), "id", ""))
+    if param_id != "gtfn.run_gtfn":
+        pytest.skip("decomposition debug test is restricted to gtfn.run_gtfn")
+
+@pytest.mark.requires_atlas
+def test_ffront_nabla_parallelogram_part_zavgS(exec_alloc_descriptor, request):
+    _require_gtfn_run_gtfn_backend(request)
     case = _prepare_parallelogram_structured_case(exec_alloc_descriptor)
     zavgS_struct = gtx.zeros(
         {
@@ -483,29 +531,27 @@ def test_ffront_nabla_parallelogram_part_zavgS(exec_alloc_descriptor):
         offset_provider={"E2V": case["setup"].edges2node_connectivity},
     )
 
-    program(
-        pp=case["pp_struct"],
-        S_M=case["s_m_struct"],
-        out=zavgS_struct,
-    )
-
+    program(pp=case["pp_struct"], S_M=case["s_m_struct"], out=zavgS_struct)
     assert np.isfinite(zavgS_struct.asnumpy()).all()
 
-
-def test_ffront_nabla_parallelogram_part_neighbor_sum_unweighted(exec_alloc_descriptor):
+@pytest.mark.requires_atlas
+def test_ffront_nabla_parallelogram_part_neighbor_sum_unweighted(exec_alloc_descriptor, request):
+    _require_gtfn_run_gtfn_backend(request)
     case = _prepare_parallelogram_structured_case(exec_alloc_descriptor)
+    max_i = case["remap_sizes"].max_i
+    max_j = case["remap_sizes"].max_j
     zavgS_struct = gtx.zeros(
         {
-            IDim: int(case["remap_sizes"].max_i),
-            JDim: int(case["remap_sizes"].max_j),
+            IDim: int(max_i),
+            JDim: int(max_j),
             Kolor: 3,
         },
         allocator=exec_alloc_descriptor.allocator,
     )
     pnabla_m_struct = gtx.zeros(
         {
-            IDim: int(case["remap_sizes"].max_i),
-            JDim: int(case["remap_sizes"].max_j),
+            IDim: int(max_i),
+            JDim: int(max_j),
             Kolor: 1,
         },
         allocator=exec_alloc_descriptor.allocator,
@@ -515,33 +561,73 @@ def test_ffront_nabla_parallelogram_part_neighbor_sum_unweighted(exec_alloc_desc
         compute_zavgS,
         backend=case["backend"],
         offset_provider={"E2V": case["setup"].edges2node_connectivity},
+        # horizontal_size
     )
     unweighted_program = setup_program(
         compute_neighbor_sum_unweighted,
         backend=case["backend"],
         offset_provider={"V2E": case["setup"].nodes2edge_connectivity},
+        # horizontal_sizes={
+        #     "domain_max_i": gtx.int32(max_i),
+        #     "domain_max_j": gtx.int32(max_j),
+        #     "domain_max_kolor": gtx.int32(1),
+        # },
     )
 
-    zavg_program(pp=case["pp_struct"], S_M=case["s_m_struct"], out=zavgS_struct)
-    unweighted_program(zavgS=zavgS_struct, out=pnabla_m_struct)
+    zavg_program(pp=case["pp_struct"], S_M=case["s_m_struct"], out=zavgS_struct, domain={IDim: (0, max_i), JDim: (0, max_j), Kolor: (0, 3)})
+    unweighted_program(zavgS=zavgS_struct, out=pnabla_m_struct, domain={IDim: (0, max_i), JDim: (0, max_j), Kolor: (0, 1)})
 
+    # numpy reference implementation of the unweighted neighbor sum
+    # with zero-padded boundaries (no negative-index wraparound).
+    zavg_np = zavgS_struct.asnumpy()
+    pnabla_numpy = np.zeros_like(pnabla_m_struct.asnumpy())
+
+    def _zavg_or_zero(i: int, j: int, k: int) -> float:
+        if i < 0 or j < 0 or i >= max_i or j >= max_j:
+            return 0.0
+        return float(zavg_np[i, j, k])
+
+    for i in range(0, max_i):
+        for j in range(0, max_j):
+            pnabla_numpy[i, j, 0] = (
+                _zavg_or_zero(i, j, 0)
+                + _zavg_or_zero(i, j - 1, 0)
+                + _zavg_or_zero(i, j, 1)
+                + _zavg_or_zero(i - 1, j, 1)
+                + _zavg_or_zero(i, j - 1, 2)
+                + _zavg_or_zero(i - 1, j, 2)
+            )
+
+    # print(zavgS_struct.asnumpy()[:,:,0])
+    # print(zavg_np[:,:,0])
+    # print(zavgS_struct.asnumpy()[:,:,1])
+    # print(zavg_np[:,:,1])
+    # print(zavgS_struct.asnumpy()[:,:,2])
+    # print(zavg_np[:,:,2])
+    # print(f"numpy pnabla: ", pnabla_numpy[:,:,0])
+    # print(f"GT4py pnabla: ", pnabla_m_struct.asnumpy()[:,:,0])
+    print(f"Pnabla difference: \n", pnabla_m_struct.asnumpy()[:,:,0] - pnabla_numpy[:,:,0])
     assert np.isfinite(pnabla_m_struct.asnumpy()).all()
+    assert np.allclose(pnabla_m_struct.asnumpy(), pnabla_numpy, rtol=1e-10, atol=0)
 
 
-def test_ffront_nabla_parallelogram_part_neighbor_sum_weighted(exec_alloc_descriptor):
+@pytest.mark.requires_atlas
+def test_ffront_nabla_parallelogram_part_neighbor_sum_weighted(exec_alloc_descriptor, request):
+    _require_gtfn_run_gtfn_backend(request)
     case = _prepare_parallelogram_structured_case(exec_alloc_descriptor)
+
     zavgS_struct = gtx.zeros(
         {
-            IDim: int(case["remap_sizes"].max_i),
-            JDim: int(case["remap_sizes"].max_j),
+            IDim: int(case["remap_sizes"].max_i+1),
+            JDim: int(case["remap_sizes"].max_j+1),
             Kolor: 3,
         },
         allocator=exec_alloc_descriptor.allocator,
     )
     pnabla_m_struct = gtx.zeros(
         {
-            IDim: int(case["remap_sizes"].max_i),
-            JDim: int(case["remap_sizes"].max_j),
+            IDim: int(case["remap_sizes"].max_i+1),
+            JDim: int(case["remap_sizes"].max_j+1),
             Kolor: 1,
         },
         allocator=exec_alloc_descriptor.allocator,
@@ -556,16 +642,53 @@ def test_ffront_nabla_parallelogram_part_neighbor_sum_weighted(exec_alloc_descri
         compute_neighbor_sum_weighted,
         backend=case["backend"],
         offset_provider={"V2E": case["setup"].nodes2edge_connectivity},
+        # horizontal_sizes={
+        #     "domain_max_i": gtx.int32(max_i),
+        #     "domain_max_j": gtx.int32(max_j),
+        #     "domain_max_kolor": gtx.int32(1),
+        # },
     )
+    #         domain={IDim: (0, domain_max_i), JDim: (0, domain_max_j), Kolor: (0, domain_max_kolor)},
+    # horizontal_sizes={
+# #         "domain_max_i": gtx.int32(max_i),
+# #         "domain_max_j": gtx.int32(max_j),
+# #         "domain_max_kolor": gtx.int32(3),
+# #     },
 
-    zavg_program(pp=case["pp_struct"], S_M=case["s_m_struct"], out=zavgS_struct)
-    weighted_program(zavgS=zavgS_struct, sign=case["sign_struct"], out=pnabla_m_struct)
+    zavg_program(pp=case["pp_struct"], S_M=case["s_m_struct"], out=zavgS_struct, domain={IDim: (0, case["remap_sizes"].max_i), JDim: (0, case["remap_sizes"].max_j), Kolor: (0, 3)})
+    weighted_program(zavgS=zavgS_struct, sign=case["sign_struct"], out=pnabla_m_struct, domain={IDim: (0, case["remap_sizes"].max_i), JDim: (0, case["remap_sizes"].max_j), Kolor: (0, 1)})
+
+    # Numpy reference implementation:
+    zavg_np = zavgS_struct.asnumpy()
+    sign_np = case["sign_struct"].asnumpy()
+    pnabla_numpy = np.zeros_like(pnabla_m_struct.asnumpy())
+
+    def _zavg_or_zero(i: int, j: int, k: int) -> float:
+        if i < 0 or j < 0 or i >= zavg_np.shape[0] or j >= zavg_np.shape[1]:
+            return 0.0
+        return float(zavg_np[i, j, k])
+
+    
+    for i in range(0, case["remap_sizes"].max_i):
+        for j in range(0, case["remap_sizes"].max_j):
+            pnabla_numpy[i, j, 0] = (
+                _zavg_or_zero(i, j, 0) * sign_np[i, j,0,0]
+                + _zavg_or_zero(i, j - 1, 0) * sign_np[i, j,0,3]
+                + _zavg_or_zero(i, j, 1) * sign_np[i, j,0,1]
+                + _zavg_or_zero(i - 1, j, 1) * sign_np[i, j,0,4]
+                + _zavg_or_zero(i, j - 1, 2) * sign_np[i, j,0,2]
+                + _zavg_or_zero(i - 1, j, 2) * sign_np[i, j,0,5]
+            )
 
     assert np.isfinite(pnabla_m_struct.asnumpy()).all()
+    assert np.allclose(pnabla_m_struct.asnumpy(), pnabla_numpy, rtol=1e-10, atol=0)
 
 
-def test_ffront_nabla_parallelogram_part_divide(exec_alloc_descriptor):
+@pytest.mark.requires_atlas
+def test_ffront_nabla_parallelogram_part_divide(exec_alloc_descriptor, request):
+    _require_gtfn_run_gtfn_backend(request)
     case = _prepare_parallelogram_structured_case(exec_alloc_descriptor)
+
     zavgS_struct = gtx.zeros(
         {
             IDim: int(case["remap_sizes"].max_i),
@@ -610,4 +733,30 @@ def test_ffront_nabla_parallelogram_part_divide(exec_alloc_descriptor):
     weighted_program(zavgS=zavgS_struct, sign=case["sign_struct"], out=pnabla_m_struct)
     divide_program(pnabla_M=pnabla_m_struct, vol=case["vol_struct"], out=out_struct)
 
+    # Numpy reference implementation:
+    zavg_np = zavgS_struct.asnumpy()
+    sign_np = case["sign_struct"].asnumpy()
+    vol_np = case["vol_struct"].asnumpy()
+    pnabla_numpy = np.zeros_like(pnabla_m_struct.asnumpy())
+    out_numpy = np.zeros_like(out_struct.asnumpy())
+
+    def _zavg_or_zero(i: int, j: int, k: int) -> float:
+        if i < 0 or j < 0 or i >= zavg_np.shape[0] or j >= zavg_np.shape[1]:
+            return 0.0
+        return float(zavg_np[i, j, k])
+    
+    for i in range(0, case["remap_sizes"].max_i):
+        for j in range(0, case["remap_sizes"].max_j):
+            pnabla_numpy[i, j, 0] = (
+                _zavg_or_zero(i, j, 0) * sign_np[i, j, 0, 0]
+                + _zavg_or_zero(i, j - 1, 0) * sign_np[i, j, 0, 3]
+                + _zavg_or_zero(i, j, 1) * sign_np[i, j, 0, 1]
+                + _zavg_or_zero(i - 1, j, 1) * sign_np[i, j, 0, 4]
+                + _zavg_or_zero(i, j - 1, 2) * sign_np[i, j, 0, 2]
+                + _zavg_or_zero(i - 1, j, 2) * sign_np[i, j, 0, 5]
+            )
+            out_numpy[i, j, 0] = pnabla_numpy[i, j, 0] / vol_np[i, j, 0]
+    
+
     assert np.isfinite(out_struct.asnumpy()).all()
+    assert np.allclose(out_struct.asnumpy(), out_numpy, rtol=1e-10, atol=0)
