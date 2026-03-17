@@ -133,6 +133,10 @@ def _compute_shift_guard_domain(
     new_ranges: dict[str, tuple[ir.Expr, ir.Expr, ir.Expr]] = {}
     needs_restriction = False
     for axis_name, (axis_lit, lo, hi) in domain_ranges.items():
+        if axis_name == "Kolor":
+            new_ranges[axis_name] = (axis_lit, copy.deepcopy(lo), copy.deepcopy(hi))
+            continue
+
         offset = shifts_by_dim.get(axis_name, 0)
         if offset < 0:
             # Need index >= -offset to keep shifted index in bounds (>= 0)
@@ -719,10 +723,12 @@ class CartUnroll(NodeTranslator):
                     if isinstance(symbolic_size, int):
                         return ir.OffsetLiteral(value=symbolic_size)
                     if isinstance(symbolic_size, str):
+                        if symbolic_size in program_param_ids:
+                            return im.ref(symbolic_size)
                         try:
                             return ir.OffsetLiteral(value=int(symbolic_size))
                         except ValueError:
-                            return ir.OffsetLiteral(value=symbolic_size)
+                            return im.ref(symbolic_size)
                     return im.ensure_expr(symbolic_size)
             return None
 
@@ -791,30 +797,30 @@ class CartUnroll(NodeTranslator):
                         _debug("inlined tuple_get(get_domain_range(...))", out)
                         return out
 
-        # if cpm.is_call_to(new_node, "cartesian_domain") and len(new_node.args) == 1:
-        #     nr = new_node.args[0]
-        #     if cpm.is_call_to(nr, "named_range") and len(nr.args) == 3:
-        #         axis_expr, _, _ = nr.args
-        #         axis_name = _axis_name(axis_expr)
-        #         if axis_name in {"Edge", "Vertex", "Cell"}:
-        #             idim_bounds = _cartesian_axis_bounds("IDim")
-        #             jdim_bounds = _cartesian_axis_bounds("JDim")
-        #             kolor_bounds = _entity_kolor_bounds(axis_name)
-        #             if (
-        #                 idim_bounds is not None
-        #                 and jdim_bounds is not None
-        #                 and kolor_bounds is not None
-        #             ):
-        #                 IDim = common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL)
-        #                 JDim = common.Dimension("JDim", kind=common.DimensionKind.HORIZONTAL)
-        #                 Kolor = common.Dimension("Kolor", kind=common.DimensionKind.HORIZONTAL)
-        #                 replacement_domain = im.call("cartesian_domain")(
-        #                     im.named_range(IDim, *idim_bounds),
-        #                     im.named_range(JDim, *jdim_bounds),
-        #                     im.named_range(Kolor, *kolor_bounds),
-        #                 )
-        #                 _debug("expanded entity cartesian_domain", replacement_domain)
-        #                 return replacement_domain
+        if cpm.is_call_to(new_node, "cartesian_domain") and len(new_node.args) == 1:
+            nr = new_node.args[0]
+            if cpm.is_call_to(nr, "named_range") and len(nr.args) == 3:
+                axis_expr, _, _ = nr.args
+                axis_name = _axis_name(axis_expr)
+                if axis_name in {"Edge", "Vertex", "Cell"}:
+                    idim_bounds = _cartesian_axis_bounds("IDim")
+                    jdim_bounds = _cartesian_axis_bounds("JDim")
+                    kolor_bounds = _entity_kolor_bounds(axis_name)
+                    if (
+                        idim_bounds is not None
+                        and jdim_bounds is not None
+                        and kolor_bounds is not None
+                    ):
+                        IDim = common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL)
+                        JDim = common.Dimension("JDim", kind=common.DimensionKind.HORIZONTAL)
+                        Kolor = common.Dimension("Kolor", kind=common.DimensionKind.HORIZONTAL)
+                        replacement_domain = im.call("cartesian_domain")(
+                            im.named_range(IDim, *idim_bounds),
+                            im.named_range(JDim, *jdim_bounds),
+                            im.named_range(Kolor, *kolor_bounds),
+                        )
+                        _debug("expanded entity cartesian_domain", replacement_domain)
+                        return replacement_domain
 
         if cpm.is_call_to(new_node, "unstructured_domain") and len(new_node.args) == 1:
             nr = new_node.args[0]

@@ -591,15 +591,15 @@ def build_structured_sign_from_unstructured(
                 if ie == i and je == j:
                     signs[0][i, j, 0] = sign_val # East
                 elif ie == i and je == j - 1:
-                    signs[1][i, j, 0] = sign_val # West
+                    signs[3][i, j, 0] = sign_val # West
             elif ke == 1:
                 if ie == i and je == j:
-                    signs[2][i, j, 0] = sign_val # NE
+                    signs[1][i, j, 0] = sign_val # NE
                 elif ie == i - 1 and je == j:
-                    signs[3][i, j, 0] = sign_val # SW
+                    signs[4][i, j, 0] = sign_val # SW
             elif ke == 2:
                 if ie == i and je == j - 1:
-                    signs[4][i, j, 0] = sign_val # NW
+                    signs[2][i, j, 0] = sign_val # NW
                 elif ie == i - 1 and je == j:
                     signs[5][i, j, 0] = sign_val # SE
 
