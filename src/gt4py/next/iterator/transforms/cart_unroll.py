@@ -54,6 +54,20 @@ def _make_lifted_deref_shift(
     )(copy.deepcopy(arg))
 
 
+def _build_guarded_field_concat_where(
+    arg: ir.Expr, branches: tuple, domain: ir.Expr | None, neutral_element: ir.Expr
+) -> ir.Expr:
+    cond, shift_spec = branches[0]
+    expr = _make_lifted_guarded_shift(arg, shift_spec, neutral_element, domain)
+    if len(branches) == 1 or cond is None:
+        return expr
+    return im.concat_where(
+        copy.deepcopy(cond),
+        expr,
+        _build_guarded_field_concat_where(arg, branches[1:], domain, neutral_element),
+    )
+
+
 def _make_lifted_guarded_shift(
     arg: ir.Expr,
     shift_spec: tuple[ir.OffsetLiteral, ...],
@@ -68,17 +82,16 @@ def _make_lifted_guarded_shift(
         
     cond = _concat_where_condition_from_domain(valid_domain)
     
-    # Implementing your suggestion: if the neutral element is 0.0, use field - field 
-    # to enforce identical typing for the boundary fallback, but wrapped in as_fieldop
     is_zero = isinstance(neutral_element, ir.Literal) and neutral_element.value in {"0", "0.0"}
     if is_zero:
+        # Compute safe 0.0 using the unshifted field elements to avoid segfaults
         fallback_field = im.as_fieldop(
             im.lambda_("__x")(im.minus(im.deref("__x"), im.deref("__x"))), domain
-        )(copy.deepcopy(shifted_field))
+        )(copy.deepcopy(arg))
     else:
         fallback_field = im.as_fieldop(
             im.lambda_("__x")(copy.deepcopy(neutral_element)), domain
-        )(copy.deepcopy(shifted_field))
+        )(copy.deepcopy(arg))
         
     return im.concat_where(cond, shifted_field, fallback_field)
 
@@ -398,6 +411,53 @@ class CartUnroll(NodeTranslator):
 
         return None
 
+    @classmethod
+    def _eval_list_field_at_idx(
+        cls, 
+        expr: ir.Expr, 
+        idx: int, 
+        domain: ir.Expr | None, 
+        neutral_element: ir.Expr
+    ) -> ir.Expr | None:
+        if cpm.is_applied_as_fieldop(expr):
+            stencil = expr.fun.args[0]
+            if isinstance(stencil, ir.Lambda):
+                # Is it neighbors?
+                if cpm.is_call_to(stencil.expr, "neighbors") and len(stencil.expr.args) == 2:
+                    conn_expr = stencil.expr.args[0]
+                    if isinstance(conn_expr, ir.OffsetLiteral) and isinstance(conn_expr.value, str):
+                        conn = conn_expr.value
+                        field_expr = expr.args[0]
+                        key = (ir.OffsetLiteral(value=conn), ir.OffsetLiteral(value=idx))
+                        if key not in map_dict:
+                            return None
+                        entry = map_dict[key]
+                        if entry["kind"] == "shift":
+                            return _make_lifted_guarded_shift(field_expr, entry["shifts"], neutral_element, domain)
+                        if entry["kind"] == "concat_where":
+                            return _build_guarded_field_concat_where(field_expr, entry["branches"], domain, neutral_element)
+
+                # Is it map_ ?
+                if isinstance(stencil.expr, ir.FunCall) and cpm.is_call_to(stencil.expr.fun, "map_"):
+                    mapped_op = stencil.expr.fun.args[0]
+                    new_args = []
+                    for arg in expr.args:
+                        inner_elem = cls._eval_list_field_at_idx(arg, idx, domain, neutral_element)
+                        if inner_elem is None:
+                            return None
+                        new_args.append(inner_elem)
+                    
+                    param_names = [f"__cart_eval_arg{i}" for i in range(len(new_args))]
+                    deref_args = [im.deref(p) for p in param_names]
+                    scalar_op_call = im.call(copy.deepcopy(mapped_op))(*deref_args)
+                    return im.as_fieldop(im.lambda_(*param_names)(scalar_op_call), domain)(*new_args)
+
+        # Fallback: list_get(idx, expr)
+        return im.as_fieldop(
+            im.lambda_("__cart_lst")(im.list_get(im.literal(str(idx), "int32"), im.deref("__cart_lst"))),
+            domain
+        )(copy.deepcopy(expr))
+
     @staticmethod
     def _build_generic_unrolled_reduce_expr(
         red_op: ir.Expr,
@@ -406,21 +466,6 @@ class CartUnroll(NodeTranslator):
         conn_size: int,
         domain: ir.Expr | None,
     ) -> ir.Expr:
-        domain_bounds: dict[str, tuple[ir.Expr, ir.Expr]] = {}
-        if cpm.is_call_to(domain, "cartesian_domain"):
-            for range_expr in domain.args:
-                if (
-                    cpm.is_call_to(range_expr, "named_range")
-                    and len(range_expr.args) == 3
-                    and isinstance(range_expr.args[0], ir.AxisLiteral)
-                ):
-                    axis_name = range_expr.args[0].value
-                    if axis_name in {"IDim", "JDim"}:
-                        domain_bounds[axis_name] = (
-                            copy.deepcopy(range_expr.args[1]),
-                            copy.deepcopy(range_expr.args[2]),
-                        )
-
         widened_init = copy.deepcopy(red_init)
         if isinstance(red_init, ir.Literal) and isinstance(red_init.type, ts.ScalarType):
             if red_init.type.kind in {
@@ -450,174 +495,29 @@ class CartUnroll(NodeTranslator):
         ):
             widened_init = copy.deepcopy(neutral_element)
 
-        # Handle simple neighbor reductions (e.g. neighbor_sum) via fields cleanly bypassing the list_get fallback completely
-        if cpm.is_call_to(list_expr, "neighbors") and len(list_expr.args) == 2:
-            conn_expr = list_expr.args[0]
-            if isinstance(conn_expr, ir.OffsetLiteral) and isinstance(conn_expr.value, str):
-                conn = conn_expr.value
-                input_field = copy.deepcopy(list_expr.args[1])
-                
-                acc_field = im.as_fieldop(
-                    im.lambda_("__acc_init")(im.deref("__acc_init")),
-                    domain,
-                )(im.as_fieldop(im.lambda_("__x")(copy.deepcopy(widened_init)), domain)(input_field))
+        def _extract_base_field(node: ir.Expr) -> ir.Expr:
+            if cpm.is_applied_as_fieldop(node):
+                return _extract_base_field(node.args[0])
+            return node
+            
+        base_field = copy.deepcopy(_extract_base_field(list_expr))
+        
+        acc_field = im.as_fieldop(
+            im.lambda_("__acc_init")(im.deref("__acc_init")),
+            domain,
+        )(im.as_fieldop(im.lambda_("__x")(copy.deepcopy(widened_init)), domain)(base_field))
 
-                for idx in range(conn_size):
-                    key = (ir.OffsetLiteral(value=conn), ir.OffsetLiteral(value=idx))
-                    if key not in map_dict:
-                        break
-                    entry = map_dict[key]
-                    if entry["kind"] != "shift":
-                        break
-                        
-                    shift_spec = entry["shifts"]
-                    elem_field = _make_lifted_guarded_shift(
-                        input_field,
-                        shift_spec,
-                        neutral_element,
-                        domain,
-                    )
-                    
-                    acc_field = im.as_fieldop(
-                        im.lambda_("__a", "__b")(im.call(copy.deepcopy(red_op))(im.deref("__a"), im.deref("__b"))),
-                        domain,
-                    )(acc_field, elem_field)
-                else:
-                    return acc_field
-
-        if cpm.is_applied_as_fieldop(list_expr):
-            stencil = list_expr.fun.args[0]
-            if isinstance(stencil, ir.Lambda):
-                param_names: list[str] = []
-                call_args: list[ir.Expr] = []
-                bindings: dict[str, dict[str, ir.Expr | str]] = {}
-
-                for i, (param, arg_expr) in enumerate(zip(stencil.params, list_expr.args, strict=True)):
-                    local_name = f"__cart_reduce_arg{i}"
-                    local_ref = im.ref(local_name)
-                    bound_arg = copy.deepcopy(arg_expr)
-
-                    if cpm.is_applied_as_fieldop(bound_arg):
-                        bound_stencil = bound_arg.fun.args[0]
-                        if (
-                            isinstance(bound_stencil, ir.Lambda)
-                            and len(bound_stencil.params) == 1
-                            and cpm.is_call_to(bound_stencil.expr, "neighbors")
-                            and len(bound_stencil.expr.args) == 2
-                            and isinstance(bound_stencil.expr.args[0], ir.OffsetLiteral)
-                            and isinstance(bound_stencil.expr.args[1], ir.SymRef)
-                            and bound_stencil.expr.args[1].id == bound_stencil.params[0].id
-                            and len(bound_arg.args) == 1
-                        ):
-                            conn = bound_stencil.expr.args[0].value
-                            if isinstance(conn, str):
-                                bindings[str(param.id)] = {
-                                    "kind": "neighbors",
-                                    "conn": conn,
-                                    "ref": local_ref,
-                                }
-                                param_names.append(local_name)
-                                call_args.append(copy.deepcopy(bound_arg.args[0]))
-                                continue
-
-                    bindings[str(param.id)] = {"kind": "list", "ref": local_ref}
-                    param_names.append(local_name)
-                    call_args.append(bound_arg)
-
-                prefer_field_level_neighbor_fallback = False
-                if len(bindings) == 1:
-                    only_binding = next(iter(bindings.values()))
-                    if only_binding.get("kind") == "neighbors":
-                        prefer_field_level_neighbor_fallback = True
-                    elif (
-                        only_binding.get("kind") == "list"
-                        and cpm.is_call_to(stencil.expr, "neighbors")
-                        and len(stencil.expr.args) == 2
-                        and isinstance(stencil.expr.args[0], ir.OffsetLiteral)
-                    ):
-                        prefer_field_level_neighbor_fallback = True
-
-                if not prefer_field_level_neighbor_fallback:
-                    acc = copy.deepcopy(widened_init)
-                    for idx in range(conn_size):
-                        elem = CartUnroll._local_list_element_expr(
-                            stencil.expr,
-                            idx,
-                            bindings,
-                            _neutral_element_for_reduce_op(red_op, widened_init),
-                            domain_bounds,
-                        )
-                        if elem is None:
-                            break
-                        acc = im.call(copy.deepcopy(red_op))(acc, elem)
-                    else:
-                        return im.as_fieldop(im.lambda_(*param_names)(acc), domain)(*call_args)
-
-                # Fallback for neighbor-only reductions: build field-level guarded sum using concat_where.
-                if len(bindings) == 1:
-                    only_binding = next(iter(bindings.values()))
-                    fallback_conn: str | None = None
-                    if only_binding.get("kind") == "neighbors" and isinstance(only_binding.get("conn"), str):
-                        fallback_conn = only_binding["conn"]
-                    elif (
-                        only_binding.get("kind") == "list"
-                        and cpm.is_call_to(stencil.expr, "neighbors")
-                        and len(stencil.expr.args) == 2
-                        and isinstance(stencil.expr.args[0], ir.OffsetLiteral)
-                        and isinstance(stencil.expr.args[0].value, str)
-                    ):
-                        fallback_conn = stencil.expr.args[0].value
-
-                    if (
-                        fallback_conn is not None
-                        and len(call_args) == 1
-                    ):
-                        conn = fallback_conn
-                        input_field = copy.deepcopy(call_args[0])
-                        acc_field = im.as_fieldop(
-                            im.lambda_("__acc_init")(im.deref("__acc_init")),
-                            domain,
-                        )(im.as_fieldop(im.lambda_("__x")(copy.deepcopy(widened_init)), domain)(input_field))
-
-                        neutral_field = im.as_fieldop(
-                            im.lambda_("__x")(copy.deepcopy(neutral_element)),
-                            domain,
-                        )(input_field)
-
-                        for idx in range(conn_size):
-                            key = (ir.OffsetLiteral(value=conn), ir.OffsetLiteral(value=idx))
-                            if key not in map_dict:
-                                break
-                            entry = map_dict[key]
-                            if entry["kind"] != "shift":
-                                break
-
-                            shift_spec = entry["shifts"]
-                            elem_field = _make_lifted_guarded_shift(
-                                input_field,
-                                shift_spec,
-                                neutral_element,
-                                domain,
-                            )
-
-                            acc_field = im.as_fieldop(
-                                im.lambda_("__a", "__b")(im.call(copy.deepcopy(red_op))(im.deref("__a"), im.deref("__b"))),
-                                domain,
-                            )(acc_field, elem_field)
-                        else:
-                            return acc_field
-
-        lst_name = "__cart_reduce_lst"
-        lst_ref = im.ref(lst_name)
-        lst_val = im.deref(lst_ref)
-
-        acc = copy.deepcopy(widened_init)
         for idx in range(conn_size):
-            elem = im.list_get(im.literal(str(idx), "int32"), lst_val)
-            acc = im.call(copy.deepcopy(red_op))(acc, elem)
-
-        return im.as_fieldop(im.lambda_(lst_name)(acc), domain)(copy.deepcopy(list_expr))
-
+            elem_field = CartUnroll._eval_list_field_at_idx(list_expr, idx, domain, neutral_element)
+            if elem_field is None:
+                break
+                
+            acc_field = im.as_fieldop(
+                im.lambda_("__a", "__b")(im.call(copy.deepcopy(red_op))(im.deref("__a"), im.deref("__b"))),
+                domain,
+            )(acc_field, elem_field)
+            
+        return acc_field
 
     @classmethod
     def apply(
@@ -918,22 +818,4 @@ class CartUnroll(NodeTranslator):
                 _debug("domain rewrite skipped: not a named_range with 3 args")
         else:
             _debug("domain rewrite skipped: not a single-range unstructured_domain")
-        return new_node
-
-
-@dataclasses.dataclass
-class RewriteCartesianCanDeref(NodeTranslator):
-    @classmethod
-    def apply(cls, node: ir.Node) -> ir.Node:
-        return cls().visit(node)
-
-    def visit_FunCall(self, node: ir.FunCall, **kwargs) -> ir.Expr:
-        new_node = self.generic_visit(node, **kwargs)
-
-        if cpm.is_call_to(new_node, "can_deref") and len(new_node.args) == 1:
-            arg = new_node.args[0]
-
-            if isinstance(arg, ir.SymRef):
-                return im.literal("True", "bool")
-
         return new_node
