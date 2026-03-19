@@ -245,7 +245,10 @@ def apply_common_transforms(
         ir, offset_provider_type=offset_provider_type, uids=uids
     )  # domain inference does not support dynamic offsets yet
 
-    ir = cart_unroll.CartUnroll.apply(ir, symbolic_domain_sizes=symbolic_domain_sizes)
+    # ir = cart_unroll.CartUnroll.apply(ir, symbolic_domain_sizes=symbolic_domain_sizes)
+    ir = cart_unroll.CartesianDomainAndTypeRemapper.apply(ir, symbolic_domain_sizes=symbolic_domain_sizes)
+    _print_ir_block("=== GTIR AFTER CARTESIAN DOMAIN AND TYPE REMAPPING ===", ir, enabled=print_ir)
+    ir = cart_unroll.CartesianReductionUnroller.apply(ir)
     ir = NormalizeShifts().visit(ir)
     _print_ir_block("=== GTIR AFTER CARTESIAN UNROLLING ===", ir, enabled=print_ir)
     ir = infer_domain_ops.InferDomainOps.apply(ir)
@@ -336,7 +339,6 @@ def apply_common_transforms(
     ir = InlineLambdas.apply(
         ir, opcount_preserving=True, force_inline_lambda_args=force_inline_lambda_args
     )
-    ir = cart_unroll.RewriteCartesianCanDeref.apply(ir)
     ir = NormalizeShifts().visit(ir)
     _print_ir_block("=== GTIR END ===", ir, enabled=print_ir)
 
