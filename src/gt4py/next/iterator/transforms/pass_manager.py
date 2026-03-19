@@ -27,6 +27,7 @@ from gt4py.next.iterator.transforms import (
     inline_lifts,
     prune_empty_concat_where,
     remove_broadcast,
+    simplify_cart_shifts,
 )
 from gt4py.next.iterator.transforms.collapse_list_get import CollapseListGet
 from gt4py.next.iterator.transforms.collapse_tuple import CollapseTuple
@@ -284,6 +285,7 @@ def apply_common_transforms(
             offset_provider_type=offset_provider_type,
         )  # type: ignore[assignment]  # always an itir.Program
         inlined = InlineScalar.apply(inlined, offset_provider_type=offset_provider_type)
+        inlined = simplify_cart_shifts.SimplifyCartesianShifts.apply(inlined)
 
         # This pass is required to run after CollapseTuple as otherwise we can not inline
         # expressions like `tuple_get(make_tuple(as_fieldop(stencil)(...)))` where stencil returns
