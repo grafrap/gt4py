@@ -45,6 +45,8 @@ from gt4py.next.modules.translator import (
     pack_vertex_field_to_structured,
     unpack_edge_field,
     unpack_vertex_field_to_unstructured,
+    pack_cell_field,
+    unpack_cell_field,
 )
 
 
@@ -812,3 +814,69 @@ def test_ffront_nabla_parallelogram_part_divide(exec_alloc_descriptor, request):
 
     assert np.isfinite(out_struct.asnumpy()).all()
     assert np.allclose(out_struct.asnumpy(), out_numpy, rtol=1e-10, atol=0)
+
+from gt4py.next.modules.structured_wrapper import setup_smart_program
+
+@pytest.mark.requires_atlas
+def test_ffront_pnabla_clean(exec_alloc_descriptor):
+    case = _prepare_parallelogram_structured_case(exec_alloc_descriptor)
+    setup = case["setup"]
+    
+    # 1. Standard Unstructured Allocation!
+    out_unstruct = gtx.zeros({Vertex: setup.nodes_size}, allocator=exec_alloc_descriptor.allocator)
+
+    # 2. Use the smart setup
+    pnabla_program = setup_smart_program(
+        compute_pnabla, 
+        setup=setup,
+        index_map=case["index_map"],
+        remap_sizes=case["remap_sizes"],
+        allocator=exec_alloc_descriptor.allocator,
+        offset_provider={"E2V": setup.edges2node_connectivity, "V2E": setup.nodes2edge_connectivity}
+    )
+
+    # 3. Call it! The wrapper intercepts, packs, runs Cartesian, and unpacks automatically.
+    pnabla_program(
+        pp=setup.input_field,
+        S_M=setup.S_fields[0],
+        sign=setup.sign_field,
+        vol=setup.vol_field,
+        out=out_unstruct  
+    )
+
+    # 4. Assert directly on the unstructured field
+    assert np.isfinite(out_unstruct.asnumpy()).all()
+
+    # 5. Implement a proper numpy reference and compare
+        # Numpy reference implementation (use unstructured connectivity from setup)
+    e2v_un = setup.edges2node_connectivity.asnumpy()        # (n_edge, 2)
+    valid_e = np.all(e2v_un >= 0, axis=1)
+    pp_un = setup.input_field.asnumpy()                     # (n_vertex,)
+    s_m_un = setup.S_fields[0].asnumpy()                   # (n_edge,)
+    vol_un = setup.vol_field.asnumpy()                     # (n_vertex,)
+    sign_un = setup.sign_field.asnumpy()                   # (n_vertex, max_deg)
+    v2e_un = setup.nodes2edge_connectivity.asnumpy()       # (n_vertex, max_deg)
+    
+    # zavg on unstructured edges
+    zavg_un = np.zeros((s_m_un.shape[0],), dtype=s_m_un.dtype)
+    zavg_un[valid_e] = s_m_un[valid_e] * 0.5 * (pp_un[e2v_un[valid_e, 0]] + pp_un[e2v_un[valid_e, 1]])
+    
+    # accumulate per-vertex neighbor sum
+    n_vertex = v2e_un.shape[0]
+    pnabla_mxx_numpy = np.zeros((n_vertex,), dtype=float)
+    pnabla_myy_numpy = np.zeros((n_vertex,), dtype=float)
+    
+    for v in range(n_vertex):
+        edges = v2e_un[v]              # list of neighbor edge indices (pad -1)
+        mask = edges >= 0
+        if not np.any(mask):
+            continue
+        e_idx = edges[mask]
+        svals = zavg_un[e_idx]
+        sgns = sign_un[v, mask]
+        pnabla_mxx_numpy[v] = float((svals * sgns).sum())
+    
+    # divide by vertex volume
+    pnabla_mxx_numpy /= vol_un
+
+    assert np.allclose(out_unstruct.asnumpy(), pnabla_mxx_numpy, rtol=1e-10, atol=0)
