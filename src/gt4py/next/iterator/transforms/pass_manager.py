@@ -254,10 +254,10 @@ def apply_common_transforms(
     ir = infer_domain_ops.InferDomainOps.apply(ir)
     ir = concat_where.canonicalize_domain_argument(ir)
     _print_ir_block("=== GTIR AFTER CANONICALIZING DOMAIN ARGUMENTS ===", ir, enabled=print_ir)
-    if cartesian_reduce_axis_ranges is None:
-        cartesian_reduce_axis_ranges = {common.Dimension("Kolor"): (0, 3)}
-    ir = UnrollCartesianReduce.apply(ir, axis_ranges=cartesian_reduce_axis_ranges)
-    _print_ir_block("=== GTIR AFTER UNROLLING CARTESIAN REDUCE ===", ir, enabled=print_ir)
+    # if cartesian_reduce_axis_ranges is None:
+    #     cartesian_reduce_axis_ranges = {common.Dimension("Kolor"): (0, 3)}
+    # ir = UnrollCartesianReduce.apply(ir, axis_ranges=cartesian_reduce_axis_ranges)
+    # _print_ir_block("=== GTIR AFTER UNROLLING CARTESIAN REDUCE ===", ir, enabled=print_ir)
     ir = infer_domain.infer_program(
         ir,
         offset_provider=offset_provider,

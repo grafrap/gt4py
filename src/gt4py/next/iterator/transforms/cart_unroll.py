@@ -77,24 +77,25 @@ def _make_lifted_guarded_shift(
     neutral_element: ir.Expr,
     domain: ir.Expr | None = None,
 ) -> ir.Expr:
-    shifted_field = _make_lifted_deref_shift(arg, shift_spec, domain)
+    # 1. Compute the valid shrunk domain FIRST
     valid_domain = _compute_shift_guard_domain(shift_spec, domain) if domain else None
+    
+    # 2. Use the SHRUNK domain to create the shifted field
+    shifted_domain = valid_domain if valid_domain is not None else domain
+    shifted_field = _make_lifted_deref_shift(arg, shift_spec, shifted_domain)
     
     if valid_domain is None:
         return shifted_field
         
     cond = _concat_where_condition_from_domain(valid_domain)
     
-    is_zero = isinstance(neutral_element, ir.Literal) and neutral_element.value in {"0", "0.0"}
-    if is_zero:
-        # Wrap safely inside as_fieldop to ensure temporaries can be accurately built without errors
-        fallback_field = im.as_fieldop(
-            im.lambda_("__x")(im.minus(im.deref("__x"), im.deref("__x"))), domain
-        )(copy.deepcopy(arg))
-    else:
-        fallback_field = im.as_fieldop(
-            im.lambda_("__x")(copy.deepcopy(neutral_element)), domain
-        )(copy.deepcopy(arg))
+    # 3. Create a 0-arity fallback field.
+    # By taking no parameters (lambda_()) and passing no arguments ()(),
+    # we broadcast the neutral element over the domain without triggering
+    # an unused iterator type-clash!
+    fallback_field = im.as_fieldop(
+        im.lambda_()(copy.deepcopy(neutral_element)), domain
+    )()
         
     return im.concat_where(cond, shifted_field, fallback_field)
 
@@ -129,11 +130,27 @@ def _build_field_concat_where_from_branches(arg: ir.Expr, branches, domain: ir.E
         cond, expr, _build_field_concat_where_from_branches(arg, branches[1:], domain)
     )
 
+def _get_axis_name(axis_expr: ir.Expr) -> str | None:
+    """Safely extracts the axis string name from either an AxisLiteral or a Dimension object."""
+    if isinstance(axis_expr, ir.AxisLiteral) and isinstance(axis_expr.value, str):
+        return axis_expr.value
+    if hasattr(axis_expr, "value") and isinstance(axis_expr.value, str):
+        return axis_expr.value
+    return None
+
+def _to_offset_literal(node: ir.Expr) -> ir.Expr:
+    """Forces integer bounds to be formatted as OffsetLiterals (with 'ₒ')."""
+    if isinstance(node, ir.OffsetLiteral):
+        return copy.deepcopy(node)
+    if hasattr(node, "value") and str(node.value).lstrip('-').isdigit():
+        return ir.OffsetLiteral(value=int(str(node.value)))
+    return copy.deepcopy(node)
 
 def _compute_shift_guard_domain(
     shift_spec: tuple[ir.OffsetLiteral, ...], full_domain: ir.Expr,
 ) -> ir.Expr | None:
-    if not cpm.is_call_to(full_domain, "cartesian_domain"): return None
+    if not cpm.is_call_to(full_domain, "cartesian_domain"): 
+        return None
 
     shifts_by_dim: dict[str, int] = {}
     for k in range(0, len(shift_spec), 2):
@@ -148,32 +165,46 @@ def _compute_shift_guard_domain(
 
     domain_ranges: dict[str, tuple[ir.Expr, ir.Expr, ir.Expr]] = {}
     for range_expr in full_domain.args:
-        if (
-            cpm.is_call_to(range_expr, "named_range")
-            and len(range_expr.args) == 3
-            and isinstance(range_expr.args[0], ir.AxisLiteral)
-        ):
-            axis_name = range_expr.args[0].value
-            domain_ranges[axis_name] = (range_expr.args[0], range_expr.args[1], range_expr.args[2])
+        if cpm.is_call_to(range_expr, "named_range") and len(range_expr.args) == 3:
+            axis_name = _get_axis_name(range_expr.args[0])
+            if axis_name is not None:
+                domain_ranges[axis_name] = (range_expr.args[0], range_expr.args[1], range_expr.args[2])
 
     new_ranges: dict[str, tuple[ir.Expr, ir.Expr, ir.Expr]] = {}
     needs_restriction = False
+    
     for axis_name, (axis_lit, lo, hi) in domain_ranges.items():
-        if axis_name == "Kolor":
-            new_ranges[axis_name] = (axis_lit, copy.deepcopy(lo), copy.deepcopy(hi))
-            continue
-        offset = shifts_by_dim.get(axis_name, 0)
-        if offset < 0:
-            new_ranges[axis_name] = (axis_lit, ir.OffsetLiteral(value=-offset), copy.deepcopy(hi))
-            needs_restriction = True
-        elif offset > 0:
-            new_hi = im.minus(copy.deepcopy(hi), ir.OffsetLiteral(value=offset))
-            new_ranges[axis_name] = (axis_lit, copy.deepcopy(lo), new_hi)
-            needs_restriction = True
-        else:
-            new_ranges[axis_name] = (axis_lit, copy.deepcopy(lo), copy.deepcopy(hi))
+        lo_off = _to_offset_literal(lo)
+        hi_off = _to_offset_literal(hi)
 
-    if not needs_restriction: return None
+        # Hard-skip Kolor: Never shrink it.
+        if axis_name == "Kolor":
+            new_ranges[axis_name] = (axis_lit, lo_off, hi_off)
+            continue
+
+        offset = shifts_by_dim.get(axis_name, 0)
+        
+        if offset < 0:
+            if isinstance(lo_off, ir.OffsetLiteral) and isinstance(lo_off.value, int):
+                new_lo = ir.OffsetLiteral(value=max(lo_off.value, -offset))
+            else:
+                new_lo = ir.OffsetLiteral(value=-offset)
+            new_ranges[axis_name] = (axis_lit, new_lo, hi_off)
+            needs_restriction = True
+            
+        elif offset > 0:
+            if isinstance(hi_off, ir.OffsetLiteral) and isinstance(hi_off.value, int):
+                new_hi = ir.OffsetLiteral(value=hi_off.value - offset)
+            else:
+                new_hi = im.minus(hi_off, ir.OffsetLiteral(value=offset))
+            new_ranges[axis_name] = (axis_lit, lo_off, new_hi)
+            needs_restriction = True
+            
+        else:
+            new_ranges[axis_name] = (axis_lit, lo_off, hi_off)
+
+    if not needs_restriction: 
+        return None
 
     dim_kind_map = {
         "IDim": common.DimensionKind.HORIZONTAL,
@@ -185,21 +216,27 @@ def _compute_shift_guard_domain(
         kind = dim_kind_map.get(axis_name, common.DimensionKind.HORIZONTAL)
         dim = common.Dimension(axis_name, kind=kind)
         dim_ranges[dim] = (lo, hi)
+        
     return im.domain(common.GridType.CARTESIAN, dim_ranges)
-
 
 def _concat_where_condition_from_domain(domain_expr: ir.Expr) -> ir.Expr:
     if cpm.is_call_to(domain_expr, "cartesian_domain") and len(domain_expr.args) > 1:
-        axis_domains = [
-            im.call("cartesian_domain")(copy.deepcopy(range_expr)) for range_expr in domain_expr.args
-        ]
+        axis_domains = []
+        for range_expr in domain_expr.args:
+            if cpm.is_call_to(range_expr, "named_range") and len(range_expr.args) == 3:
+                # Explicitly drop Kolor using the robust extractor
+                if _get_axis_name(range_expr.args[0]) == "Kolor":
+                    continue
+            axis_domains.append(im.call("cartesian_domain")(copy.deepcopy(range_expr)))
+            
+        if not axis_domains:
+            return domain_expr
+
         cond = axis_domains[0]
         for axis_domain in axis_domains[1:]:
             cond = im.and_(cond, axis_domain)
         return cond
     return domain_expr
-
-
 # =====================================================================
 # Pass 1: Domain and Type Remapping
 # =====================================================================
@@ -701,11 +738,21 @@ class CartesianReductionUnroller(NodeTranslator):
             ):
                 shift_call = stencil.expr.args[0]
                 key = tuple(shift_call.fun.args)
-                if key in map_dict and map_dict[key]["kind"] == "concat_where":
+                if key in map_dict:
+                    entry = map_dict[key]
                     rewritten_arg = self.visit(node.args[0], **kwargs)
-                    return _build_field_concat_where_from_branches(
-                        rewritten_arg, map_dict[key]["branches"], current_domain
-                    )
+                    
+                    # Provide a neutral element (0.0) as fallback for out-of-bounds accesses
+                    neutral_element = im.literal("0.0", "float64")
+                    
+                    if entry["kind"] == "concat_where":
+                        return _build_guarded_field_concat_where(
+                            rewritten_arg, entry["branches"], current_domain, neutral_element
+                        )
+                    elif entry["kind"] == "shift":
+                        return _make_lifted_guarded_shift(
+                            rewritten_arg, entry["shifts"], neutral_element, current_domain
+                        )
 
             if (reduce_inputs := self._extract_generic_reduce_inputs(node)) is not None:
                 red_op, red_init, list_expr, conn_size = reduce_inputs
