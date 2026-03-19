@@ -29,6 +29,40 @@ class StructuredRemapSizes:
     edge_size_padded: int
     cell_size: int
 
+def _read_e2v(ds):
+    raw = _first_present(ds, ["E2V", "edge_vertices", "edges2nodes", "edge_node_connectivity"])
+    arr = np.asarray(raw, dtype=np.int32)
+    if arr.ndim != 2:
+        raise ValueError("e2v dataset must be 2-D")
+    if arr.shape[1] != 2:
+        arr = arr.T
+    if arr.shape[1] != 2:
+        raise ValueError(f"e2v must have shape (n_edge, 2), got {arr.shape}")
+    return np.where(arr > 0, arr - 1, -1)
+
+
+def _read_v2e(ds):
+    raw = _first_present(
+        ds,
+        ["V2E", "vertex_edges", "nodes2edges", "node_edge_connectivity", "edges_of_vertex"],
+        required=False,
+    )
+    if raw is None:
+        return None
+    arr = np.asarray(raw, dtype=np.int32)
+    if arr.ndim != 2:
+        raise ValueError("v2e dataset must be 2-D")
+    if arr.shape[0] < arr.shape[1]:
+        arr = arr.T
+    return np.where(arr > 0, arr - 1, -1)
+
+
+def _read_lonlat(ds):
+    if "longitude_vertices" in ds and "latitude_vertices" in ds:
+        lon = ds["longitude_vertices"].values.astype(np.float64)
+        lat = ds["latitude_vertices"].values.astype(np.float64)
+        return np.stack([lon, lat], axis=1)
+    return _first_present(ds, ["lonlat", "vertex_lonlat", "node_lonlat"], required=False)
 
 def infer_structured_remap_sizes(
     *,
