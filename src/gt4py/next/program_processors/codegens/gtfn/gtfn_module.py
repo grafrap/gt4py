@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import os
+from pathlib import Path
 from typing import Any, Final, Optional
 
 import factory
@@ -228,7 +230,65 @@ class GTFNTranslationStep(
                 if isinstance(descriptor.value, (int, np.integer)):
                     resolved[name] = int(descriptor.value)
 
+        if not any(
+            key in resolved
+            for key in (
+                "i_min",
+                "i_max",
+                "j_min",
+                "j_max",
+                "max_i",
+                "max_j",
+                "domain_max_i",
+                "domain_max_j",
+                "nx",
+                "ny",
+            )
+        ):
+            resolved.update(self._resolve_symbolic_domain_sizes_from_mesh_metadata())
+
         return resolved or None
+
+    @staticmethod
+    def _resolve_symbolic_domain_sizes_from_mesh_metadata() -> dict[str, int]:
+        mesh_path = os.environ.get("GT4PY_TRANSLATOR_MESH")
+
+        if not mesh_path:
+            repo_root = Path(__file__).resolve().parents[6]
+            candidate_paths = (
+                repo_root / "../grid-generator/parallelogram_grid.nc",
+                repo_root / "grid-generator/parallelogram_grid.nc",
+                Path.cwd() / "grid-generator/parallelogram_grid.nc",
+                Path.cwd() / "parallelogram_grid.nc",
+            )
+            for candidate in candidate_paths:
+                resolved_candidate = candidate.resolve()
+                if resolved_candidate.is_file():
+                    mesh_path = str(resolved_candidate)
+                    break
+
+        if not mesh_path:
+            return {}
+
+        try:
+            from gt4py.next.modules.translator import load_structured_remap_sizes_from_netcdf
+
+            sizes = load_structured_remap_sizes_from_netcdf(mesh_path)
+        except Exception:
+            return {}
+
+        return {
+            "i_min": 0,
+            "j_min": 0,
+            "i_max": int(sizes.max_i),
+            "j_max": int(sizes.max_j),
+            "max_i": int(sizes.max_i),
+            "max_j": int(sizes.max_j),
+            "domain_max_i": int(sizes.max_i),
+            "domain_max_j": int(sizes.max_j),
+            "nx": int(sizes.nx),
+            "ny": int(sizes.ny),
+        }
 
     @staticmethod
     def _infer_kolor_extent_from_program(program: itir.Program) -> Optional[int]:

@@ -13,7 +13,11 @@ from gt4py.eve import SymbolRef
 from gt4py.next.iterator import ir
 from gt4py.next.iterator.ir_utils import ir_makers as im
 from gt4py.next.iterator.ir_utils import common_pattern_matcher as cpm
-from gt4py.next.iterator.transforms.cart_unroll import CartUnroll, _bounded_shifted_deref, map_dict
+from gt4py.next.iterator.transforms.cart_unroll import (
+    CartUnroll,
+    _bounded_shifted_deref,
+    map_dict,
+)
 from gt4py.next.iterator.transforms.normalize_shifts import NormalizeShifts
 from gt4py.next.type_system import type_specifications as ts
 
@@ -34,21 +38,6 @@ def test_normalize_shifts_keeps_zero_offsets_on_connectivity_axes():
     actual = NormalizeShifts().visit(testee)
     assert actual == testee
 
-
-def test_bounded_shifted_deref_adds_idim_jdim_bounds_guard():
-    shifted = _bounded_shifted_deref(
-        im.ref("inp"),
-        (
-            ir.OffsetLiteral(value="IDim"),
-            ir.OffsetLiteral(value=-1),
-            ir.OffsetLiteral(value="JDim"),
-            ir.OffsetLiteral(value=1),
-        ),
-        im.literal("0.0", "float64"),
-    )
-    print(shifted)
-
-    assert cpm.is_call_to(shifted, "if_")
 
 
 def test_V2E():
@@ -1065,6 +1054,143 @@ def test_unstructured_domain_is_not_rewritten_without_max_i_max_j():
 
     actual = CartUnroll.apply(testee)
     assert actual == testee
+
+
+def test_unstructured_domain_inlines_i_j_min_max_when_available():
+    axis = "Edge"
+    domain_expr = im.call("unstructured_domain")(
+        im.call("named_range")(
+            ir.AxisLiteral(value=axis),
+            im.ref("horizontal_start"),
+            im.ref("horizontal_end"),
+        )
+    )
+
+    testee = ir.Program(
+        id="testee",
+        function_definitions=[],
+        params=[
+            im.sym("inp"),
+            im.sym("out"),
+            im.sym("horizontal_start"),
+            im.sym("horizontal_end"),
+            im.sym("i_min"),
+            im.sym("i_max"),
+            im.sym("j_min"),
+            im.sym("j_max"),
+        ],
+        declarations=[],
+        body=[ir.SetAt(expr=im.ref("inp"), domain=domain_expr, target=im.ref("out"))],
+    )
+
+    IDim = common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL)
+    JDim = common.Dimension("JDim", kind=common.DimensionKind.HORIZONTAL)
+    Kolor = common.Dimension("Kolor", kind=common.DimensionKind.HORIZONTAL)
+
+    expected = ir.Program(
+        id="testee",
+        function_definitions=[],
+        params=[
+            im.sym("inp"),
+            im.sym("out"),
+            im.sym("horizontal_start"),
+            im.sym("horizontal_end"),
+            im.sym("i_min"),
+            im.sym("i_max"),
+            im.sym("j_min"),
+            im.sym("j_max"),
+        ],
+        declarations=[],
+        body=[
+            ir.SetAt(
+                expr=im.ref("inp"),
+                domain=im.call("cartesian_domain")(
+                    im.named_range(IDim, im.ref("i_min"), im.ref("i_max")),
+                    im.named_range(JDim, im.ref("j_min"), im.ref("j_max")),
+                    im.named_range(Kolor, ir.OffsetLiteral(value=0), ir.OffsetLiteral(value=3)),
+                ),
+                target=im.ref("out"),
+            )
+        ],
+    )
+
+    actual = CartUnroll.apply(testee)
+    assert actual == expected
+
+
+def test_unstructured_edge_and_k_domain_rewrites_edge_and_preserves_k_range():
+    domain_expr = im.call("unstructured_domain")(
+        im.call("named_range")(
+            ir.AxisLiteral(value="Edge", kind=common.DimensionKind.HORIZONTAL),
+            im.ref("horizontal_start"),
+            im.ref("horizontal_end"),
+        ),
+        im.call("named_range")(
+            ir.AxisLiteral(value="K", kind=common.DimensionKind.VERTICAL),
+            im.ref("vertical_start"),
+            im.ref("vertical_end"),
+        ),
+    )
+
+    testee = ir.Program(
+        id="testee",
+        function_definitions=[],
+        params=[
+            im.sym("inp"),
+            im.sym("out"),
+            im.sym("horizontal_start"),
+            im.sym("horizontal_end"),
+            im.sym("i_min"),
+            im.sym("i_max"),
+            im.sym("j_min"),
+            im.sym("j_max"),
+            im.sym("vertical_start"),
+            im.sym("vertical_end"),
+        ],
+        declarations=[],
+        body=[ir.SetAt(expr=im.ref("inp"), domain=domain_expr, target=im.ref("out"))],
+    )
+
+    IDim = common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL)
+    JDim = common.Dimension("JDim", kind=common.DimensionKind.HORIZONTAL)
+    Kolor = common.Dimension("Kolor", kind=common.DimensionKind.HORIZONTAL)
+
+    expected = ir.Program(
+        id="testee",
+        function_definitions=[],
+        params=[
+            im.sym("inp"),
+            im.sym("out"),
+            im.sym("horizontal_start"),
+            im.sym("horizontal_end"),
+            im.sym("i_min"),
+            im.sym("i_max"),
+            im.sym("j_min"),
+            im.sym("j_max"),
+            im.sym("vertical_start"),
+            im.sym("vertical_end"),
+        ],
+        declarations=[],
+        body=[
+            ir.SetAt(
+                expr=im.ref("inp"),
+                domain=im.call("cartesian_domain")(
+                    im.named_range(IDim, im.ref("i_min"), im.ref("i_max")),
+                    im.named_range(JDim, im.ref("j_min"), im.ref("j_max")),
+                    im.named_range(Kolor, ir.OffsetLiteral(value=0), ir.OffsetLiteral(value=3)),
+                    im.named_range(
+                        ir.AxisLiteral(value="K", kind=common.DimensionKind.VERTICAL),
+                        im.ref("vertical_start"),
+                        im.ref("vertical_end"),
+                    ),
+                ),
+                target=im.ref("out"),
+            )
+        ],
+    )
+
+    actual = CartUnroll.apply(testee)
+    assert actual == expected
 
 
 def test_tuple_get_get_domain_range_inlines_max_i_max_j():

@@ -95,6 +95,28 @@ def _read_lonlat(ds):
     return _first_present(ds, ["lonlat", "vertex_lonlat", "node_lonlat"], required=False)
 
 
+def _interior_ij_bounds(remap_sizes):
+    lateral = int(getattr(remap_sizes, "lateral", 0))
+    return lateral, int(remap_sizes.max_i) - lateral, lateral, int(remap_sizes.max_j) - lateral
+
+
+def _vertex_interior_mask(index_map, remap_sizes):
+    i_lo, i_hi, j_lo, j_hi = _interior_ij_bounds(remap_sizes)
+    ij = index_map.vertex_to_ij
+    i = ij[:, 0]
+    j = ij[:, 1]
+    return (i >= i_lo) & (i < i_hi) & (j >= j_lo) & (j < j_hi)
+
+
+def _edge_interior_mask(index_map, remap_sizes):
+    i_lo, i_hi, j_lo, j_hi = _interior_ij_bounds(remap_sizes)
+    ijk = index_map.edge_to_ijk
+    i = ijk[:, 0]
+    j = ijk[:, 1]
+    valid = (i >= 0) & (j >= 0)
+    return valid & (i >= i_lo) & (i < i_hi) & (j >= j_lo) & (j < j_hi)
+
+
 @gtx.field_operator
 def compute_zavgS(
     pp: gtx.Field[[Vertex], float], S_M: gtx.Field[[Edge], float]
@@ -175,11 +197,13 @@ def test_ffront_compute_zavgS_parallelogram_grid(exec_alloc_descriptor):
     )
     xr = pytest.importorskip("xarray")
 
+    lateral = 1
+
     with xr.open_dataset(mesh_nc) as ds:
         e2v = _read_e2v(ds)
         v2e = _read_v2e(ds)
         lonlat = _read_lonlat(ds)
-        remap_sizes = load_structured_remap_sizes_from_netcdf(mesh_nc)
+        remap_sizes = load_structured_remap_sizes_from_netcdf(mesh_nc, lateral=lateral)
 
         print(f"remap sies: ",remap_sizes)
 
@@ -223,6 +247,7 @@ def test_ffront_compute_zavgS_parallelogram_grid(exec_alloc_descriptor):
         otf_workflow__bare_translation__symbolic_domain_sizes={
             "max_i": int(remap_sizes.max_i),
             "max_j": int(remap_sizes.max_j),
+            "lateral": int(remap_sizes.lateral),
         },
     )
     compute_zavgS_program = setup_program(
@@ -244,7 +269,10 @@ def test_ffront_compute_zavgS_parallelogram_grid(exec_alloc_descriptor):
     pp = setup.input_field.asnumpy()
     s_m = setup.S_fields[0].asnumpy()
     ref = np.zeros_like(s_m)
-    ref[valid] = s_m[valid] * 0.5 * (pp[e2v_conn[valid, 0]] + pp[e2v_conn[valid, 1]])
+    interior_edges = _edge_interior_mask(index_map, remap_sizes)
+    ref[valid & interior_edges] = s_m[valid & interior_edges] * 0.5 * (
+        pp[e2v_conn[valid & interior_edges, 0]] + pp[e2v_conn[valid & interior_edges, 1]]
+    )
 
     assert np.isfinite(zavgS_np).all()
     np.testing.assert_allclose(zavgS_np, ref, rtol=1e-12, atol=1e-12)
@@ -282,11 +310,12 @@ def test_ffront_nabla_parallelogram_grid(exec_alloc_descriptor):
     )
     xr = pytest.importorskip("xarray")
 
+    lateral = 1
     with xr.open_dataset(mesh_nc) as ds:
         e2v = _read_e2v(ds)
         v2e = _read_v2e(ds)
         lonlat = _read_lonlat(ds)
-        remap_sizes = load_structured_remap_sizes_from_netcdf(mesh_nc)
+        remap_sizes = load_structured_remap_sizes_from_netcdf(mesh_nc, lateral=lateral)
         dual_volumes = _first_present(ds, ["dual_area"])
 
         print(f"remap sies: ",remap_sizes)
@@ -368,6 +397,7 @@ def test_ffront_nabla_parallelogram_grid(exec_alloc_descriptor):
         otf_workflow__bare_translation__symbolic_domain_sizes={
             "max_i": int(remap_sizes.max_i),
             "max_j": int(remap_sizes.max_j),
+            "lateral": int(remap_sizes.lateral),
         },
     )
     pnabla_mxx_program = setup_program(
@@ -425,7 +455,11 @@ def test_ffront_nabla_parallelogram_grid(exec_alloc_descriptor):
     pnabla_mxx_numpy = np.zeros((n_vertex,), dtype=float)
     pnabla_myy_numpy = np.zeros((n_vertex,), dtype=float)
     
+    interior_vertices = _vertex_interior_mask(index_map, remap_sizes)
+
     for v in range(n_vertex):
+        if not interior_vertices[v]:
+            continue
         edges = v2e_un[v]              # list of neighbor edge indices (pad -1)
         mask = edges >= 0
         if not np.any(mask):
@@ -446,7 +480,6 @@ def test_ffront_nabla_parallelogram_grid(exec_alloc_descriptor):
     print(f"difference: ", pnabla_mxx_np - pnabla_mxx_numpy)
     print(f"pnabla_mxx_np: ", pnabla_mxx_np)
 
-    
     # compare to GT4Py result (unstructured)
     assert np.allclose(pnabla_mxx_np, pnabla_mxx_numpy, rtol=1e-9, atol=0)
     assert np.allclose(pnabla_myy_np, pnabla_myy_numpy, rtol=1e-9, atol=0)
@@ -467,12 +500,13 @@ def _prepare_parallelogram_structured_case(exec_alloc_descriptor):
         "/home/raphael/Documents/Studium/Msc_thesis/grid-generator/parallelogram_grid.nc",
     )
     xr = pytest.importorskip("xarray")
+    lateral = 1
 
     with xr.open_dataset(mesh_nc) as ds:
         e2v = _read_e2v(ds)
         v2e = _read_v2e(ds)
         lonlat = _read_lonlat(ds)
-        remap_sizes = load_structured_remap_sizes_from_netcdf(mesh_nc)
+        remap_sizes = load_structured_remap_sizes_from_netcdf(mesh_nc, lateral=lateral)
         setup = nabla_setup.from_connectivity(
             allocator=exec_alloc_descriptor.allocator,
             e2v=e2v,
@@ -531,6 +565,7 @@ def _prepare_parallelogram_structured_case(exec_alloc_descriptor):
         otf_workflow__bare_translation__symbolic_domain_sizes={
             "max_i": int(remap_sizes.max_i),
             "max_j": int(remap_sizes.max_j),
+            "lateral": int(remap_sizes.lateral),
         },
     )
 
@@ -631,8 +666,9 @@ def test_ffront_nabla_parallelogram_part_neighbor_sum_unweighted(exec_alloc_desc
             return 0.0
         return float(zavg_np[i, j, k])
 
-    for i in range(0, max_i):
-        for j in range(0, max_j):
+    i_lo, i_hi, j_lo, j_hi = _interior_ij_bounds(case["remap_sizes"])
+    for i in range(i_lo, i_hi):
+        for j in range(j_lo, j_hi):
             pnabla_numpy[i, j, 0] = (
                 _zavg_or_zero(i, j, 0)
                 + _zavg_or_zero(i, j - 1, 0)
@@ -715,8 +751,9 @@ def test_ffront_nabla_parallelogram_part_neighbor_sum_weighted(exec_alloc_descri
         return float(zavg_np[i, j, k])
 
     
-    for i in range(0, case["remap_sizes"].max_i):
-        for j in range(0, case["remap_sizes"].max_j):
+    i_lo, i_hi, j_lo, j_hi = _interior_ij_bounds(case["remap_sizes"])
+    for i in range(i_lo, i_hi):
+        for j in range(j_lo, j_hi):
             pnabla_numpy[i, j, 0] = (
                 _zavg_or_zero(i, j, 0) * sign_np[i, j,0,0]
                 + _zavg_or_zero(i, j - 1, 0) * sign_np[i, j,0,3]
@@ -794,8 +831,9 @@ def test_ffront_nabla_parallelogram_part_divide(exec_alloc_descriptor, request):
             return 0.0
         return float(zavg_np[i, j, k])
     
-    for i in range(0, case["remap_sizes"].max_i):
-        for j in range(0, case["remap_sizes"].max_j):
+    i_lo, i_hi, j_lo, j_hi = _interior_ij_bounds(case["remap_sizes"])
+    for i in range(i_lo, i_hi):
+        for j in range(j_lo, j_hi):
             pnabla_numpy[i, j, 0] = (
                 _zavg_or_zero(i, j, 0) * sign_np[i, j, 0, 0]
                 + _zavg_or_zero(i, j - 1, 0) * sign_np[i, j, 0, 3]
@@ -810,7 +848,6 @@ def test_ffront_nabla_parallelogram_part_divide(exec_alloc_descriptor, request):
     print(f"zavgS difference: \n", (zavgS_struct.asnumpy() - zavg_np)[:,:,0], "\n", (zavgS_struct.asnumpy() - zavg_np)[:,:,1], "\n", (zavgS_struct.asnumpy() - zavg_np)[:,:,2])
     print(f"pnabla difference: \n", pnabla_m_struct.asnumpy() - pnabla_numpy)
     print(f"divide difference: \n", out_struct.asnumpy() - out_numpy)
-
 
     assert np.isfinite(out_struct.asnumpy()).all()
     assert np.allclose(out_struct.asnumpy(), out_numpy, rtol=1e-10, atol=0)
@@ -866,7 +903,11 @@ def test_ffront_pnabla_clean(exec_alloc_descriptor):
     pnabla_mxx_numpy = np.zeros((n_vertex,), dtype=float)
     pnabla_myy_numpy = np.zeros((n_vertex,), dtype=float)
     
+    interior_vertices = _vertex_interior_mask(case["index_map"], case["remap_sizes"])
+
     for v in range(n_vertex):
+        if not interior_vertices[v]:
+            continue
         edges = v2e_un[v]              # list of neighbor edge indices (pad -1)
         mask = edges >= 0
         if not np.any(mask):

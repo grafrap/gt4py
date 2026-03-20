@@ -11,6 +11,7 @@ import functools
 import math
 import copy
 import os
+import numbers
 
 from gt4py.next import common
 from gt4py.eve import NodeTranslator
@@ -20,8 +21,12 @@ from gt4py.next.iterator.transforms.inline_lambdas import InlineLambdas
 from gt4py.next.iterator.ir_utils import common_pattern_matcher as cpm
 from gt4py.next.iterator.type_system import type_specifications as it_ts
 from gt4py.next.type_system import type_specifications as ts
-from gt4py.next.iterator.transforms.map_dict import map_dict as map_dict
+import gt4py.next.iterator.transforms.map_dict as map_dict_module
+import dataclasses
+from typing import ClassVar  # Add this import
 
+# You can keep map_dict as a local alias so you don't have to change the rest of your code
+map_dict = map_dict_module.map_dict
 
 # =====================================================================
 # Shift and Concat-Where Helpers
@@ -57,48 +62,6 @@ def _make_lifted_deref_shift(
     )(copy.deepcopy(arg))
 
 
-def _build_guarded_field_concat_where(
-    arg: ir.Expr, branches: tuple, domain: ir.Expr | None, neutral_element: ir.Expr
-) -> ir.Expr:
-    cond, shift_spec = branches[0]
-    expr = _make_lifted_guarded_shift(arg, shift_spec, neutral_element, domain)
-    if len(branches) == 1 or cond is None:
-        return expr
-    return im.concat_where(
-        copy.deepcopy(cond),
-        expr,
-        _build_guarded_field_concat_where(arg, branches[1:], domain, neutral_element),
-    )
-
-
-def _make_lifted_guarded_shift(
-    arg: ir.Expr,
-    shift_spec: tuple[ir.OffsetLiteral, ...],
-    neutral_element: ir.Expr,
-    domain: ir.Expr | None = None,
-) -> ir.Expr:
-    # 1. Compute the valid shrunk domain FIRST
-    valid_domain = _compute_shift_guard_domain(shift_spec, domain) if domain else None
-    
-    # 2. Use the SHRUNK domain to create the shifted field
-    shifted_domain = valid_domain if valid_domain is not None else domain
-    shifted_field = _make_lifted_deref_shift(arg, shift_spec, shifted_domain)
-    
-    if valid_domain is None:
-        return shifted_field
-        
-    cond = _concat_where_condition_from_domain(valid_domain)
-    
-    # 3. Create a 0-arity fallback field.
-    # By taking no parameters (lambda_()) and passing no arguments ()(),
-    # we broadcast the neutral element over the domain without triggering
-    # an unused iterator type-clash!
-    fallback_field = im.as_fieldop(
-        im.lambda_()(copy.deepcopy(neutral_element)), domain
-    )()
-        
-    return im.concat_where(cond, shifted_field, fallback_field)
-
 
 def _neutral_element_for_reduce_op(red_op: ir.Expr, red_init: ir.Expr) -> ir.Expr:
     op_name = red_op.id if isinstance(red_op, ir.SymRef) else None
@@ -116,9 +79,7 @@ def _bounded_shifted_deref(
     domain_bounds: dict[str, tuple[ir.Expr, ir.Expr]] | None = None,
 ) -> ir.Expr:
     shifted_ref = _apply_shift_chain(copy.deepcopy(ref), shift_spec)
-    can_deref_shifted = im.can_deref(copy.deepcopy(shifted_ref))
-    deref_shifted = im.deref(shifted_ref)
-    return im.if_(can_deref_shifted, deref_shifted, copy.deepcopy(neutral_element))
+    return im.deref(shifted_ref)
 
 
 def _build_field_concat_where_from_branches(arg: ir.Expr, branches, domain: ir.Expr | None = None):
@@ -210,10 +171,15 @@ def _compute_shift_guard_domain(
         "IDim": common.DimensionKind.HORIZONTAL,
         "JDim": common.DimensionKind.HORIZONTAL,
         "Kolor": common.DimensionKind.HORIZONTAL,
+        "K": common.DimensionKind.VERTICAL,
     }
     dim_ranges: dict[common.Dimension, tuple[ir.Expr, ir.Expr]] = {}
-    for axis_name, (_, lo, hi) in new_ranges.items():
-        kind = dim_kind_map.get(axis_name, common.DimensionKind.HORIZONTAL)
+    for axis_name, (axis_lit, lo, hi) in new_ranges.items():
+        kind = (
+            axis_lit.kind
+            if isinstance(axis_lit, ir.AxisLiteral)
+            else dim_kind_map.get(axis_name, common.DimensionKind.HORIZONTAL)
+        )
         dim = common.Dimension(axis_name, kind=kind)
         dim_ranges[dim] = (lo, hi)
         
@@ -259,9 +225,86 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
 
     @classmethod
     def apply(
-        cls, node: ir.Node, *, symbolic_domain_sizes: dict[str, str] | None = None,
+        cls,
+        node: ir.Node,
+        *,
+        symbolic_domain_sizes: dict[str, str | int] | None = None,
+        offset_provider: common.OffsetProvider | None = None,
     ) -> ir.Node:
-        return cls().visit(node, symbolic_domain_sizes=symbolic_domain_sizes)
+        effective_symbolic_sizes = dict(symbolic_domain_sizes or {})
+
+        has_structured_bounds = any(
+            key in effective_symbolic_sizes
+            for key in (
+                "i_min",
+                "i_max",
+                "j_min",
+                "j_max",
+                "max_i",
+                "max_j",
+                "domain_max_i",
+                "domain_max_j",
+                "nx",
+                "ny",
+            )
+        )
+
+        if (
+            not has_structured_bounds
+            and offset_provider is not None
+            and cls._program_uses_offsets(node, {"E2C2E"})
+        ):
+            inferred_sizes = cls._infer_symbolic_sizes_from_offset_provider(offset_provider)
+            for key, value in inferred_sizes.items():
+                effective_symbolic_sizes.setdefault(key, value)
+
+        return cls().visit(node, symbolic_domain_sizes=effective_symbolic_sizes)
+
+    @staticmethod
+    def _program_uses_offsets(node: ir.Node, names: set[str]) -> bool:
+        for lit in node.pre_walk_values().if_isinstance(ir.OffsetLiteral):
+            if isinstance(lit.value, str) and lit.value in names:
+                return True
+        return False
+
+    @staticmethod
+    def _infer_symbolic_sizes_from_offset_provider(
+        offset_provider: common.OffsetProvider,
+    ) -> dict[str, int]:
+        if not isinstance(offset_provider, dict):
+            return {}
+
+        axis_sizes: dict[str, int] = {}
+        for connectivity in offset_provider.values():
+            domain = getattr(connectivity, "domain", None)
+            shape = getattr(connectivity, "shape", None)
+            dims = getattr(domain, "dims", ()) if domain is not None else ()
+            if shape is None or not dims:
+                continue
+
+            for dim, size in zip(dims, shape):
+                dim_name = getattr(dim, "value", None)
+                if isinstance(dim_name, str) and isinstance(size, numbers.Integral) and int(size) > 0:
+                    axis_sizes.setdefault(dim_name, int(size))
+
+        i_extent = axis_sizes.get("IDim")
+        j_extent = axis_sizes.get("JDim")
+        if not (
+            isinstance(i_extent, int)
+            and isinstance(j_extent, int)
+            and i_extent > 0
+            and j_extent > 0
+        ):
+            return {}
+
+        return {
+            "i_min": 0,
+            "i_max": i_extent,
+            "j_min": 0,
+            "j_max": j_extent,
+            "max_i": i_extent,
+            "max_j": j_extent,
+        }
 
     def visit_Program(self, node: ir.Program, **kwargs) -> ir.Program:
         program_param_ids = {str(param.id) for param in node.params}
@@ -301,7 +344,7 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
 
     def visit_FunCall(self, node: ir.FunCall, **kwargs) -> ir.Expr:
         program_param_ids: set[str] = kwargs.get("program_param_ids", set())
-        symbolic_domain_sizes: dict[str, str] | None = kwargs.get("symbolic_domain_sizes")
+        symbolic_domain_sizes: dict[str, str | int] | None = kwargs.get("symbolic_domain_sizes")
         new_node = copy.deepcopy(self.generic_visit(node, **kwargs))
 
         def _pick_size_param(*candidates: str) -> ir.Expr | None:
@@ -309,7 +352,8 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                 if candidate in program_param_ids: return im.ref(candidate)
                 if symbolic_domain_sizes is not None and candidate in symbolic_domain_sizes:
                     symbolic_size = symbolic_domain_sizes[candidate]
-                    if isinstance(symbolic_size, int): return ir.OffsetLiteral(value=symbolic_size)
+                    if isinstance(symbolic_size, numbers.Integral):
+                        return ir.OffsetLiteral(value=int(symbolic_size))
                     if isinstance(symbolic_size, str):
                         if symbolic_size in program_param_ids: return im.ref(symbolic_size)
                         try: return ir.OffsetLiteral(value=int(symbolic_size))
@@ -317,13 +361,60 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                     return im.ensure_expr(symbolic_size)
             return None
 
+        def _lateral_size() -> ir.Expr:
+            lateral = _pick_size_param("lateral")
+            return ir.OffsetLiteral(value=0) if lateral is None else lateral
+
+        def _offset_int_value(expr: ir.Expr) -> int | None:
+            if isinstance(expr, ir.OffsetLiteral) and isinstance(expr.value, int):
+                return expr.value
+            return None
+
+        def _offset_add(lhs: ir.Expr, rhs: ir.Expr) -> ir.Expr:
+            lhs_val = _offset_int_value(lhs)
+            rhs_val = _offset_int_value(rhs)
+            if lhs_val is not None and rhs_val is not None:
+                return ir.OffsetLiteral(value=lhs_val + rhs_val)
+            if rhs_val == 0:
+                return copy.deepcopy(lhs)
+            if lhs_val == 0:
+                return copy.deepcopy(rhs)
+            return im.plus(copy.deepcopy(lhs), copy.deepcopy(rhs))
+
+        def _offset_sub(lhs: ir.Expr, rhs: ir.Expr) -> ir.Expr:
+            lhs_val = _offset_int_value(lhs)
+            rhs_val = _offset_int_value(rhs)
+            if lhs_val is not None and rhs_val is not None:
+                return ir.OffsetLiteral(value=lhs_val - rhs_val)
+            if rhs_val == 0:
+                return copy.deepcopy(lhs)
+            return im.minus(copy.deepcopy(lhs), copy.deepcopy(rhs))
+
         def _cartesian_axis_bounds(axis_name: str) -> tuple[ir.Expr, ir.Expr] | None:
             if axis_name == "IDim":
-                upper = _pick_size_param("max_i", "domain_max_i", "nx")
-                return (ir.OffsetLiteral(value=0), upper) if upper is not None else None
+                lower_base = _pick_size_param("i_min", "domain_i_min", "imin")
+                upper_base = _pick_size_param("i_max", "domain_i_max", "max_i", "domain_max_i", "nx", "num_i", "ni")
+                if upper_base is None:
+                    return None
+                lateral = _lateral_size()
+                lower = _offset_add(
+                    ir.OffsetLiteral(value=0) if lower_base is None else lower_base,
+                    copy.deepcopy(lateral),
+                )
+                upper = _offset_sub(upper_base, lateral)
+                return lower, upper
             if axis_name == "JDim":
-                upper = _pick_size_param("max_j", "domain_max_j", "ny")
-                return (ir.OffsetLiteral(value=0), upper) if upper is not None else None
+                lower_base = _pick_size_param("j_min", "domain_j_min", "jmin")
+                upper_base = _pick_size_param("j_max", "domain_j_max", "max_j", "domain_max_j", "ny", "num_j", "nj")
+                if upper_base is None:
+                    return None
+                lateral = _lateral_size()
+                lower = _offset_add(
+                    ir.OffsetLiteral(value=0) if lower_base is None else lower_base,
+                    copy.deepcopy(lateral),
+                )
+                upper = _offset_sub(upper_base, lateral)
+                return lower, upper
             if axis_name == "Kolor": return ir.OffsetLiteral(value=0), ir.OffsetLiteral(value=3)
             return None
 
@@ -379,40 +470,35 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                             im.named_range(Kolor, *kolor_bounds),
                         )
 
-        if cpm.is_call_to(new_node, "unstructured_domain") and len(new_node.args) == 1:
-            nr = new_node.args[0]
-            if cpm.is_call_to(nr, "named_range") and len(nr.args) == 3:
-                axis, start, stop = nr.args
-                if isinstance(axis, ir.AxisLiteral) and axis.value in {"Edge", "Vertex", "Cell"}:
-                    field_from_start = _extract_field_from_get_domain_range(start, axis.value)
-                    field_from_stop = _extract_field_from_get_domain_range(stop, axis.value)
-
-                    if field_from_start is not None and field_from_start == field_from_stop:
-                        out_field = field_from_start
-                        IDim = common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL)
-                        JDim = common.Dimension("JDim", kind=common.DimensionKind.HORIZONTAL)
-                        Kolor = common.Dimension("Kolor", kind=common.DimensionKind.HORIZONTAL)
-
+        if cpm.is_call_to(new_node, "unstructured_domain") or cpm.is_call_to(new_node, "cartesian_domain"):
+            new_ranges = []
+            needs_remap = False
+            for nr in new_node.args:
+                if cpm.is_call_to(nr, "named_range") and len(nr.args) == 3:
+                    axis_name = _axis_name(nr.args[0])
+                    # If it's a horizontal unstructured dimension, split it into 3 Cartesian dimensions
+                    if axis_name in {"Edge", "Vertex", "Cell"}:
                         idim_bounds = _cartesian_axis_bounds("IDim")
                         jdim_bounds = _cartesian_axis_bounds("JDim")
-                        if idim_bounds is not None and jdim_bounds is not None:
-                            def _bounds(dim: common.Dimension) -> tuple[ir.Expr, ir.Expr]:
-                                if dim.value in {"IDim", "JDim"}:
-                                    return idim_bounds if dim.value == "IDim" else jdim_bounds
-                                if dim.value == "Kolor":
-                                    if (bounds := _entity_kolor_bounds(axis.value)) is not None:
-                                        return bounds
-                                gdr = im.call("get_domain_range")(out_field, dim)
-                                return im.tuple_get(0, gdr), im.tuple_get(1, gdr)
+                        kolor_bounds = _entity_kolor_bounds(axis_name)
+                        if idim_bounds is not None and jdim_bounds is not None and kolor_bounds is not None:
+                            IDim = common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL)
+                            JDim = common.Dimension("JDim", kind=common.DimensionKind.HORIZONTAL)
+                            Kolor = common.Dimension("Kolor", kind=common.DimensionKind.HORIZONTAL)
+                            new_ranges.extend([
+                                im.named_range(IDim, *idim_bounds),
+                                im.named_range(JDim, *jdim_bounds),
+                                im.named_range(Kolor, *kolor_bounds),
+                            ])
+                            needs_remap = True
+                            continue
+                
+                # If it's a vertical dimension (K), or we couldn't remap it, keep it exactly as it is
+                new_ranges.append(nr)
 
-                            i0, i1 = _bounds(IDim)
-                            j0, j1 = _bounds(JDim)
-                            k0, k1 = _bounds(Kolor)
-                            return im.call("cartesian_domain")(
-                                im.named_range(IDim, i0, i1),
-                                im.named_range(JDim, j0, j1),
-                                im.named_range(Kolor, k0, k1),
-                            )
+            if needs_remap:
+                return im.call("cartesian_domain")(*new_ranges)
+        
         return new_node
 
 
@@ -560,9 +646,9 @@ class CartesianReductionUnroller(NodeTranslator):
                             return None
                         entry = map_dict[key]
                         if entry["kind"] == "shift":
-                            return _make_lifted_guarded_shift(field_expr, entry["shifts"], neutral_element, domain)
+                            return _make_lifted_deref_shift(field_expr, entry["shifts"], domain)
                         if entry["kind"] == "concat_where":
-                            return _build_guarded_field_concat_where(field_expr, entry["branches"], domain, neutral_element)
+                            return _build_field_concat_where_from_branches(field_expr, entry["branches"], domain)
 
                 # Is it map_ ?
                 if isinstance(stencil.expr, ir.FunCall) and cpm.is_call_to(stencil.expr.fun, "map_"):
@@ -630,7 +716,7 @@ class CartesianReductionUnroller(NodeTranslator):
                     entry = map_dict[key]
                     if entry["kind"] != "shift": break
                     
-                    elem_field = _make_lifted_guarded_shift(input_field, entry["shifts"], neutral_element, domain)
+                    elem_field = _make_lifted_deref_shift(input_field, entry["shifts"], domain)
                     acc_field = im.as_fieldop(
                         im.lambda_("__a", "__b")(im.call(copy.deepcopy(red_op))(im.deref("__a"), im.deref("__b"))),
                         domain,
@@ -746,12 +832,12 @@ class CartesianReductionUnroller(NodeTranslator):
                     neutral_element = im.literal("0.0", "float64")
                     
                     if entry["kind"] == "concat_where":
-                        return _build_guarded_field_concat_where(
-                            rewritten_arg, entry["branches"], current_domain, neutral_element
+                        return _build_field_concat_where_from_branches(
+                            rewritten_arg, entry["branches"], current_domain
                         )
                     elif entry["kind"] == "shift":
-                        return _make_lifted_guarded_shift(
-                            rewritten_arg, entry["shifts"], neutral_element, current_domain
+                        return _make_lifted_deref_shift(
+                            rewritten_arg, entry["shifts"], current_domain
                         )
 
             if (reduce_inputs := self._extract_generic_reduce_inputs(node)) is not None:
@@ -797,3 +883,17 @@ class RewriteCartesianCanDeref(NodeTranslator):
             return im.literal("True", "bool")
 
         return new_node
+
+
+@dataclasses.dataclass
+class CartUnroll:
+    _cartesian_remapped_type = staticmethod(CartesianDomainAndTypeRemapper._cartesian_remapped_type)
+
+    @classmethod
+    def apply(
+        cls, node: ir.Node, *, symbolic_domain_sizes: dict[str, str] | None = None
+    ) -> ir.Node:
+        transformed = CartesianDomainAndTypeRemapper.apply(
+            node, symbolic_domain_sizes=symbolic_domain_sizes
+        )
+        return CartesianReductionUnroller.apply(transformed)

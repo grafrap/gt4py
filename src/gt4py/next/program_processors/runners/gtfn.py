@@ -7,6 +7,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import functools
+import re
 from typing import Any
 
 import factory
@@ -34,6 +35,8 @@ def convert_arg(arg: Any) -> Any:
         return arg.ndarray, origin
     if isinstance(arg, tuple):
         return tuple(convert_arg(a) for a in arg)
+    if isinstance(arg, np.integer):
+        return int(arg)
     if isinstance(arg, np.bool_):
         # nanobind does not support implicit conversion of `np.bool` to `bool`
         return bool(arg)

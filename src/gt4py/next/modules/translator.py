@@ -28,6 +28,7 @@ class StructuredRemapSizes:
     vertex_size: int
     edge_size_padded: int
     cell_size: int
+    lateral: int = 0
 
 def _read_e2v(ds):
     raw = _first_present(ds, ["E2V", "edge_vertices", "edges2nodes", "edge_node_connectivity"])
@@ -69,6 +70,7 @@ def infer_structured_remap_sizes(
     domain_length: float,
     mean_edge_length: float,
     n_cells: int,
+    lateral: int = 0,
 ) -> StructuredRemapSizes:
     if mean_edge_length <= 0:
         raise ValueError("mean_edge_length must be > 0.")
@@ -98,10 +100,11 @@ def infer_structured_remap_sizes(
         vertex_size=vertex_size,
         edge_size_padded=edge_size_padded,
         cell_size=cell_size,
+        lateral=lateral,
     )
 
 
-def load_structured_remap_sizes_from_netcdf(nc_path: str) -> StructuredRemapSizes:
+def load_structured_remap_sizes_from_netcdf(nc_path: str, lateral=0) -> StructuredRemapSizes:
     import xarray as xr
 
     with xr.open_dataset(nc_path) as ds:
@@ -116,6 +119,7 @@ def load_structured_remap_sizes_from_netcdf(nc_path: str) -> StructuredRemapSize
             domain_length=float(ds.attrs["domain_length"]),
             mean_edge_length=float(ds.attrs["mean_edge_length"]),
             n_cells=int(ds.sizes["cell"]),
+            lateral=lateral,
         )
 
     return sizes
