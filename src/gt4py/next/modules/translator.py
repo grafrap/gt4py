@@ -30,6 +30,15 @@ class StructuredRemapSizes:
     cell_size: int
     lateral: int = 0
 
+
+def _first_present(ds, names: list[str], required: bool = True):
+    for name in names:
+        if name in ds:
+            return ds[name]
+    if required:
+        raise KeyError(f"None of the dataset variables are present: {names}")
+    return None
+
 def _read_e2v(ds):
     raw = _first_present(ds, ["E2V", "edge_vertices", "edges2nodes", "edge_node_connectivity"])
     arr = np.asarray(raw, dtype=np.int32)
@@ -230,13 +239,20 @@ def pack_vertex_field_to_structured(vertex_values: np.ndarray, m: IndexMap) -> n
 def pack_edge_field_to_structured(edge_values: np.ndarray, m: IndexMap) -> np.ndarray:
     ni, max_nj, n_kolor = m.ijk_to_edge.shape
     out = np.zeros((ni, max_nj, n_kolor), dtype=edge_values.dtype)
+    n_edge = edge_values.shape[0]
     for i in range(ni):
         for j in range(max_nj):
             for k in range(n_kolor):
                 e = m.ijk_to_edge[i, j, k]
-                if e >= 0:
+                if e < 0:
+                    continue
+                if e >= n_edge:
+                    raise IndexError(
+                        f"IndexMap edge id {e} at (i={i}, j={j}, kolor={k}) exceeds available edge axis {n_edge}. "
+                        "Use an index map generated for the current grid."
+                    )
+                if 0 <= e < n_edge:
                     out[i, j, k] = edge_values[e]
-    # print("m.ijk_to_edge: ", m.ijk_to_edge)
     return out
 
 def unpack_vertex_field_to_unstructured(struct_values: np.ndarray, m: IndexMap) -> np.ndarray:
@@ -261,6 +277,7 @@ def pack_edge_field(edge_values: np.ndarray, m: 'IndexMap') -> np.ndarray:
     """Packs 1D or 2D unstructured edge fields into structured [I, J, Kolor, (K)]."""
     ni, max_nj, n_kolor = m.ijk_to_edge.shape
     has_k = edge_values.ndim == 2
+    n_edge = edge_values.shape[0]
     
     if has_k:
         nk = edge_values.shape[1]
@@ -272,11 +289,17 @@ def pack_edge_field(edge_values: np.ndarray, m: 'IndexMap') -> np.ndarray:
         for j in range(max_nj):
             for k in range(n_kolor):
                 e = m.ijk_to_edge[i, j, k]
-                if e >= 0:
-                    if has_k:
-                        out[i, j, k, :] = edge_values[e, :]
-                    else:
-                        out[i, j, k] = edge_values[e]
+                if e < 0:
+                    continue
+                if e >= n_edge:
+                    raise IndexError(
+                        f"IndexMap edge id {e} at (i={i}, j={j}, kolor={k}) exceeds available edge axis {n_edge}. "
+                        "Use an index map generated for the current grid."
+                    )
+                if has_k:
+                    out[i, j, k, :] = edge_values[e, :]
+                else:
+                    out[i, j, k] = edge_values[e]
     return out
 
 def unpack_edge_field(struct_values: np.ndarray, m: 'IndexMap', n_edge: int) -> np.ndarray:
@@ -294,11 +317,17 @@ def unpack_edge_field(struct_values: np.ndarray, m: 'IndexMap', n_edge: int) -> 
         for j in range(max_nj):
             for k in range(n_kolor):
                 e = m.ijk_to_edge[i, j, k]
-                if e >= 0:
-                    if has_k:
-                        out[e, :] = struct_values[i, j, k, :]
-                    else:
-                        out[e] = struct_values[i, j, k]
+                if e < 0:
+                    continue
+                if e >= n_edge:
+                    raise IndexError(
+                        f"IndexMap edge id {e} at (i={i}, j={j}, kolor={k}) exceeds output edge axis {n_edge}. "
+                        "Use an index map generated for the current grid."
+                    )
+                if has_k:
+                    out[e, :] = struct_values[i, j, k, :]
+                else:
+                    out[e] = struct_values[i, j, k]
     return out
 
 def pack_vertex_field(vertex_values: np.ndarray, m) -> np.ndarray:
@@ -459,6 +488,8 @@ def build_index_map_from_lonlat_e2v(
     e2v_np = np.asarray(e2v)
     if e2v_np.ndim != 2 or e2v_np.shape[1] != 2:
         raise ValueError("e2v must have shape (n_edge, 2).")
+    
+    print(f"int(nodes_size)={nodes_size}, ")
 
     n_vertex = int(nodes_size if nodes_size is not None else lonlat.shape[0])
     n_edge = int(edges_size if edges_size is not None else e2v_np.shape[0])

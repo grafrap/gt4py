@@ -1,15 +1,19 @@
 import os
+import functools
 import xarray as xr
-import gt4py as gtx
+import gt4py.next as gtx
 import numpy as np
 from icon4py.model.common.dimension import IDim, JDim, Kolor
 
 from gt4py.next.modules.translator import (
+    IndexMap,
+    StructuredRemapSizes,
     load_structured_remap_sizes_from_netcdf,
     build_index_map_from_lonlat_e2v,
     build_structured_sign_from_unstructured,
     pack_vertex_field_to_structured,
     pack_edge_field_to_structured,
+    pack_edge_field,
     unpack_vertex_field_to_unstructured,
     unpack_edge_field,
     _read_e2v,
@@ -18,12 +22,125 @@ from gt4py.next.modules.translator import (
 
 _CACHED_INDEX_MAP = None
 _CACHED_REMAP_SIZES = None
+_CACHED_EDGE_COUNT = None
 
-def get_global_grid_mapping():
+
+def _swap_index_map_edge_colors(index_map: IndexMap, color_a: int = 0, color_b: int = 2) -> IndexMap:
+    ijk_to_edge = np.array(index_map.ijk_to_edge, copy=True)
+    edge_to_ijk = np.array(index_map.edge_to_ijk, copy=True)
+
+    tmp = np.array(ijk_to_edge[:, :, color_a], copy=True)
+    ijk_to_edge[:, :, color_a] = ijk_to_edge[:, :, color_b]
+    ijk_to_edge[:, :, color_b] = tmp
+
+    mask_a = edge_to_ijk[:, 2] == color_a
+    mask_b = edge_to_ijk[:, 2] == color_b
+    edge_to_ijk[mask_a, 2] = color_b
+    edge_to_ijk[mask_b, 2] = color_a
+
+    return IndexMap(
+        vertex_to_ij=index_map.vertex_to_ij,
+        row_lengths=index_map.row_lengths,
+        row_offsets=index_map.row_offsets,
+        ij_to_vertex=index_map.ij_to_vertex,
+        edge_to_ijk=edge_to_ijk,
+        ijk_to_edge=ijk_to_edge,
+    )
+
+
+def _build_periodic_square_index_map(e2v: np.ndarray) -> tuple[IndexMap, StructuredRemapSizes] | None:
+    n_edge = int(e2v.shape[0])
+    n_vertex = int(e2v.max()) + 1 if e2v.size else 0
+    side = int(round(np.sqrt(n_vertex)))
+    if side * side != n_vertex or n_edge != 3 * n_vertex:
+        return None
+
+    vertex_to_ij = np.zeros((n_vertex, 2), dtype=np.int32)
+    ij_to_vertex = np.zeros((side, side), dtype=np.int32)
+    for vertex in range(n_vertex):
+        i, j = divmod(vertex, side)
+        vertex_to_ij[vertex] = (i, j)
+        ij_to_vertex[i, j] = vertex
+
+    row_lengths = np.full((side,), side, dtype=np.int32)
+    row_offsets = (np.arange(side, dtype=np.int32) * side).astype(np.int32)
+
+    ijk_to_edge = np.full((side, side, 3), -1, dtype=np.int32)
+    edge_to_ijk = np.full((n_edge, 3), -1, dtype=np.int32)
+
+    def _assign(i: int, j: int, kolor: int, edge_id: int) -> None:
+        if ijk_to_edge[i, j, kolor] != -1:
+            raise ValueError(
+                f"Ambiguous periodic mapping at (i={i}, j={j}, kolor={kolor}) for edge {edge_id}."
+            )
+        ijk_to_edge[i, j, kolor] = edge_id
+        edge_to_ijk[edge_id] = (i, j, kolor)
+
+    for edge_id, (vertex_a, vertex_b) in enumerate(e2v.astype(np.int32, copy=False)):
+        i_a, j_a = vertex_to_ij[int(vertex_a)]
+        i_b, j_b = vertex_to_ij[int(vertex_b)]
+        di = (int(i_b) - int(i_a)) % side
+        dj = (int(j_b) - int(j_a)) % side
+
+        if (di, dj) == (1 % side, 0):
+            _assign(int(i_a), int(j_a), 0, edge_id)
+        elif (di, dj) == (0, 1 % side):
+            _assign(int(i_a), int(j_a), 1, edge_id)
+        elif (di, dj) == (1 % side, 1 % side):
+            _assign(int(i_a), int(j_a), 2, edge_id)
+        elif (di, dj) == ((side - 1) % side, 0):
+            _assign(int(i_b), int(j_b), 0, edge_id)
+        elif (di, dj) == (0, (side - 1) % side):
+            _assign(int(i_b), int(j_b), 1, edge_id)
+        elif (di, dj) == ((side - 1) % side, (side - 1) % side):
+            _assign(int(i_b), int(j_b), 2, edge_id)
+        else:
+            return None
+
+    if np.any(ijk_to_edge < 0):
+        return None
+
+    index_map = IndexMap(
+        vertex_to_ij=vertex_to_ij,
+        row_lengths=row_lengths,
+        row_offsets=row_offsets,
+        ij_to_vertex=ij_to_vertex,
+        edge_to_ijk=edge_to_ijk,
+        ijk_to_edge=ijk_to_edge,
+    )
+    remap_sizes = StructuredRemapSizes(
+        nx=max(side - 1, 1),
+        ny=max(side - 1, 1),
+        max_i=side,
+        max_j=side,
+        vertex_size=n_vertex,
+        edge_size_padded=3 * side * side,
+        cell_size=0,
+        lateral=0,
+    )
+    return index_map, remap_sizes
+
+def get_global_grid_mapping(e2v_override=None):
     """Builds or returns the cached index_map and remap_sizes for the current run."""
-    global _CACHED_INDEX_MAP, _CACHED_REMAP_SIZES
+    global _CACHED_INDEX_MAP, _CACHED_REMAP_SIZES, _CACHED_EDGE_COUNT
+
+    override_edge_count = None
+    normalized_e2v_override = None
+    if e2v_override is not None:
+        normalized_e2v_override = np.asarray(e2v_override, dtype=np.int32)
+        if normalized_e2v_override.ndim != 2:
+            raise ValueError(f"Expected 2D E2V connectivity, got shape {normalized_e2v_override.shape}")
+        if normalized_e2v_override.shape[1] != 2 and normalized_e2v_override.shape[0] == 2:
+            normalized_e2v_override = normalized_e2v_override.T
+        if normalized_e2v_override.shape[1] != 2:
+            raise ValueError(
+                f"Expected E2V connectivity with shape (n_edge, 2), got {normalized_e2v_override.shape}"
+            )
+        override_edge_count = int(normalized_e2v_override.shape[0])
     
-    if _CACHED_INDEX_MAP is not None:
+    if _CACHED_INDEX_MAP is not None and (
+        override_edge_count is None or override_edge_count == _CACHED_EDGE_COUNT
+    ):
         return _CACHED_INDEX_MAP, _CACHED_REMAP_SIZES
 
     # Read the grid file specified in the environment (or default)
@@ -36,12 +153,15 @@ def get_global_grid_mapping():
     with xr.open_dataset(mesh_nc) as ds:
         e2v = _read_e2v(ds)
         lonlat = _read_lonlat(ds)
-        remap_sizes = load_structured_remap_sizes_from_netcdf(mesh_nc)
-        
-    index_map = build_index_map_from_lonlat_e2v(lonlat, e2v, ...) # Add your exact sizes here
+        lateral = int(os.environ.get("GT4PY_TRANSLATOR_LATERAL", "1"))
+        remap_sizes = load_structured_remap_sizes_from_netcdf(mesh_nc, lateral=lateral)
+
+    print(f"lateral={remap_sizes.lateral}, max_i={remap_sizes.max_i}, max_j={remap_sizes.max_j}")        
+    index_map = build_index_map_from_lonlat_e2v(lonlat, e2v) # Add your exact sizes here
     
     _CACHED_INDEX_MAP = index_map
     _CACHED_REMAP_SIZES = remap_sizes
+    _CACHED_EDGE_COUNT = int(e2v.shape[0])
     
     return _CACHED_INDEX_MAP, _CACHED_REMAP_SIZES
 
@@ -49,12 +169,19 @@ class GenericStructuredWrapper:
     def __init__(self, operator, backend_factory, index_map, remap_sizes, allocator, offset_provider):
         self.index_map = index_map
         self.allocator = allocator
+        self.operator_name = getattr(operator, "id", None) or getattr(operator, "__name__", "")
+        self.debug_enabled = os.environ.get("GT4PY_STRUCTURED_DEBUG", "0") == "1"
+        self.max_i = int(remap_sizes.max_i)
+        self.max_j = int(remap_sizes.max_j)
         
         # 1. Dynamically extract connectivities from the offset_provider!
         # Tests will pass standard offset_providers like {"V2E": v2e_field, "E2V": e2v_field}
         self.v2e_conn = offset_provider.get("V2E").asnumpy() if "V2E" in offset_provider else None
         self.e2v_conn = offset_provider.get("E2V").asnumpy() if "E2V" in offset_provider else None
-        
+        self.e2c2e_conn_raw = self._get_connectivity(offset_provider, "E2C2E")
+        self.e2c2e_conn = self._sanitize_sparse_connectivity(self.e2c2e_conn_raw)
+        self.structured_offset_provider = self._build_structured_offset_provider(offset_provider)
+
         # 2. Instantiate the structured backend dynamically using the remap_sizes
         structured_backend = backend_factory(
             cached=True,
@@ -62,6 +189,7 @@ class GenericStructuredWrapper:
             otf_workflow__bare_translation__symbolic_domain_sizes={
                 "max_i": int(remap_sizes.max_i),
                 "max_j": int(remap_sizes.max_j),
+                "lateral": int(remap_sizes.lateral)
             },
         )
 
@@ -70,13 +198,201 @@ class GenericStructuredWrapper:
         self._compiled_program = original_setup(
             operator,
             backend=structured_backend,
-            offset_provider=offset_provider
+            offset_provider=self.structured_offset_provider
         )
+
+    def _get_connectivity(self, offset_provider, name: str):
+        if not offset_provider:
+            return None
+        for key, value in offset_provider.items():
+            key_name = getattr(key, "value", str(key))
+            if key_name == name:
+                return value.asnumpy()
+        return None
+
+    def _sanitize_sparse_connectivity(self, conn: np.ndarray | None) -> np.ndarray | None:
+        if conn is None:
+            return None
+        sanitized = np.array(conn, copy=True)
+        invalid_mask = sanitized < 0
+        if not invalid_mask.any():
+            return sanitized
+
+        row_max = sanitized.max(axis=1, keepdims=True)
+        # Keep fully-invalid rows untouched; fill partial invalid entries with last valid neighbor.
+        has_valid = row_max >= 0
+        fill_values = np.where(has_valid, row_max, sanitized)
+        sanitized = np.where(invalid_mask, fill_values, sanitized)
+        return sanitized
+
+    def _build_structured_offset_provider(self, offset_provider):
+        if not offset_provider or self.e2c2e_conn is None:
+            return offset_provider
+
+        structured_offset_provider = dict(offset_provider)
+        for key, value in offset_provider.items():
+            key_name = getattr(key, "value", str(key))
+            if key_name != "E2C2E":
+                continue
+            structured_offset_provider[key] = gtx.as_connectivity(
+                value.domain.dims,
+                value.codomain,
+                data=self.e2c2e_conn,
+                dtype=gtx.int32,
+                skip_value=None,
+                allocator=self.allocator,
+            )
+        return structured_offset_provider
+
+    def _reference_tangential_wind(self, vn: np.ndarray, coeff: np.ndarray, e2c2e: np.ndarray) -> np.ndarray:
+        vt_ref = np.zeros((vn.shape[0], vn.shape[1]), dtype=vn.dtype)
+        for edge in range(e2c2e.shape[0]):
+            for local in range(e2c2e.shape[1]):
+                neighbor = int(e2c2e[edge, local])
+                if neighbor >= 0:
+                    vt_ref[edge, :] += vn[neighbor, :] * coeff[edge, local]
+        return vt_ref
+
+    def _print_tangential_wind_debug(
+        self,
+        vn: np.ndarray,
+        coeff: np.ndarray,
+        vt_out: np.ndarray,
+        e2c2e: np.ndarray,
+    ) -> None:
+        vt_ref = self._reference_tangential_wind(vn, coeff, e2c2e)
+        abs_diff = np.abs(vt_out - vt_ref)
+        max_abs = float(abs_diff.max())
+        mismatched = int(np.count_nonzero(abs_diff > 1e-9))
+        total = int(abs_diff.size)
+        # print(
+        #     f"[structured-debug] operator={self.operator_name} max_abs_diff={max_abs:.6e} "
+        #     f"mismatched={mismatched}/{total}"
+        # )
+
+        edge_scores = abs_diff.max(axis=1)
+        color_mismatch = {0: 0, 1: 0, 2: 0}
+        for edge in range(edge_scores.shape[0]):
+            if edge_scores[edge] > 1e-9:
+                color = int(self.index_map.edge_to_ijk[edge, 2])
+                color_mismatch[color] = color_mismatch.get(color, 0) + 1
+        # print(
+        #     "[structured-debug] mismatch_by_kolor="
+        #     f"{color_mismatch}"
+        # )
+
+        top_edges = np.argsort(edge_scores)[-5:][::-1]
+        for edge in top_edges:
+            if edge_scores[edge] <= 1e-9:
+                continue
+            center_ijk = tuple(int(v) for v in self.index_map.edge_to_ijk[edge])
+            neighbors = [int(v) for v in e2c2e[edge]]
+            neighbor_ijk = [tuple(int(v) for v in self.index_map.edge_to_ijk[n]) if n >= 0 else (-1, -1, -1) for n in neighbors]
+            # print(
+            #     f"[structured-debug] edge={int(edge)} center_ijk={center_ijk} "
+            #     f"out_k0={float(vt_out[edge, 0]):+.6e} ref_k0={float(vt_ref[edge, 0]):+.6e} "
+            #     f"coeff={coeff[edge].tolist()} neighbors={neighbors} neighbor_ijk={neighbor_ijk}"
+            # )
 
     def _is_unstructured(self, field, axis_name):
         if not getattr(field, "domain", None):
             return False
         return any(d.value == axis_name for d in field.domain.dims)
+
+    def _is_edge_sparse_e2c2e(self, field, np_data: np.ndarray) -> bool:
+        if not self._is_unstructured(field, "Edge") or np_data.ndim != 2:
+            return False
+        dims = list(getattr(field.domain, "dims", ()))
+        return len(dims) >= 2 and getattr(dims[1], "value", None) == "E2C2E"
+
+    def _pack_edge_sparse_e2c2e(self, coeff: np.ndarray) -> np.ndarray:
+        ni, nj, n_kolor = self.index_map.ijk_to_edge.shape
+        n_local = coeff.shape[1]
+        out = np.zeros((ni, nj, n_kolor, n_local), dtype=coeff.dtype)
+        if self.e2c2e_conn is None:
+            return out
+
+        expected_rel: dict[int, dict[int, tuple[tuple[int, int, int], ...]]] = {
+            0: {
+                0: ((0, 0, 2),),
+                1: ((0, 1, 1), (0, 0, 1)),
+                2: ((-1, 0, 2),),
+                3: ((0, 0, 1), (-1, 1, 1), (-1, 0, 1)),
+            },
+            1: {
+                0: ((0, 0, 0), (1, 0, 0)),     # Merged slot 0
+                1: ((0, 0, 2),),
+                2: ((1, -1, 0), (0, -1, 0)),   # Merged slot 2
+                3: ((0, -1, 2),),
+            },
+            2: {
+                0: ((0, 1, 1),),
+                1: ((1, 0, 0),),
+                2: ((0, 0, 1), (1, -2, 2)),    # Merged slot 2
+                3: ((0, 0, 0), (1, -2, 1)),    # Merged slot 3
+            },
+        }
+        slot_by_rel = {
+            kolor: {
+                rel: tuple(
+                    slot
+                    for slot, rels in rel_map.items()
+                    if rel in rels
+                )
+                for rel in {r for rels in rel_map.values() for r in rels}
+            }
+            for kolor, rel_map in expected_rel.items()
+        }
+
+        def _normalize_shift(delta: int, period: int) -> int:
+            if period <= 0:
+                return delta
+            half = period // 2
+            if delta > half:
+                return delta - period
+            if delta < -half:
+                return delta + period
+            return delta
+
+        mapped = 0
+        unmatched = 0
+        n_edge = min(coeff.shape[0], self.e2c2e_conn.shape[0])
+        for edge in range(n_edge):
+            i, j, kolor = (int(v) for v in self.index_map.edge_to_ijk[edge])
+            if kolor < 0:
+                continue
+            rel_to_slot = slot_by_rel.get(kolor, {})
+            for local in range(min(n_local, self.e2c2e_conn.shape[1])):
+                neighbor = int(self.e2c2e_conn[edge, local])
+                if neighbor < 0:
+                    continue
+                ni_, nj_, nk_ = (int(v) for v in self.index_map.edge_to_ijk[neighbor])
+                rel = (
+                    _normalize_shift(ni_ - i, self.max_i),
+                    _normalize_shift(nj_ - j, self.max_j),
+                    nk_,
+                )
+                slots = rel_to_slot.get(rel)
+                if slots is None:
+                    unmatched += 1
+                    continue
+                assigned = False
+                for slot in slots:
+                    if slot >= n_local:
+                        continue
+                    out[i, j, kolor, slot] = coeff[edge, local]
+                    assigned = True
+                if not assigned:
+                    unmatched += 1
+                    continue
+                mapped += 1
+
+        # if self.debug_enabled:
+        #     print(
+        #         f"[structured-debug] E2C2E remap mapped={mapped} unmatched={unmatched} "
+        #         f"edges={n_edge} local={n_local}"
+        #     )
+        return out
 
     def _pack_argument(self, field):
         if not getattr(field, "domain", None):
@@ -92,6 +408,11 @@ class GenericStructuredWrapper:
                 axis=-1
             )
             return gtx.as_field([IDim, JDim, Kolor, local_dim], struct_np, allocator=self.allocator)
+
+        if self._is_edge_sparse_e2c2e(field, np_data):
+            local_dim = field.domain.dims[1]
+            struct_np = self._pack_edge_sparse_e2c2e(np_data)
+            return gtx.as_field([IDim, JDim, Kolor, local_dim], struct_np, allocator=self.allocator)
             
         # 2. Standard unstructured fields
         if self._is_unstructured(field, "Vertex"):
@@ -99,8 +420,9 @@ class GenericStructuredWrapper:
             return gtx.as_field([IDim, JDim, Kolor], struct_np, allocator=self.allocator)
             
         elif self._is_unstructured(field, "Edge"):
-            struct_np = pack_edge_field_to_structured(np_data, self.index_map)
-            return gtx.as_field([IDim, JDim, Kolor], struct_np, allocator=self.allocator)
+            struct_np = pack_edge_field(np_data, self.index_map)
+            trailing_dims = list(field.domain.dims[1:]) if np_data.ndim > 1 else []
+            return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np, allocator=self.allocator)
 
         return field 
 
@@ -122,23 +444,49 @@ class GenericStructuredWrapper:
     
     def __call__(self, **kwargs):
         structured_kwargs = {}
-        out_fields = []
+        packed_fields: list[tuple[object, object]] = []
+        runtime_offset_provider = kwargs.get("offset_provider")
+        debug_tangential = self.debug_enabled and "compute_tangential_wind" in str(self.operator_name)
 
         for arg_name, arg_val in kwargs.items():
-            if arg_name == "out":
-                if isinstance(arg_val, tuple):
-                    out_fields = list(arg_val)
-                    structured_kwargs[arg_name] = tuple(self._pack_argument(f) for f in arg_val)
-                else:
-                    out_fields = [arg_val]
-                    structured_kwargs[arg_name] = self._pack_argument(arg_val)
+            if arg_name == "offset_provider":
+                continue
+            if isinstance(arg_val, tuple):
+                packed_tuple = tuple(self._pack_argument(f) for f in arg_val)
+                structured_kwargs[arg_name] = packed_tuple
+                for original_field, packed_field in zip(arg_val, packed_tuple, strict=False):
+                    if getattr(original_field, "domain", None) is not None:
+                        packed_fields.append((original_field, packed_field))
             else:
-                structured_kwargs[arg_name] = self._pack_argument(arg_val)
+                packed_arg = self._pack_argument(arg_val)
+                structured_kwargs[arg_name] = packed_arg
+                if getattr(arg_val, "domain", None) is not None:
+                    packed_fields.append((arg_val, packed_arg))
 
-        self._compiled_program(**structured_kwargs)
-
-        if isinstance(kwargs["out"], tuple):
-            for orig_f, struct_f in zip(out_fields, structured_kwargs["out"]):
-                self._unpack_to_buffer(struct_f, orig_f)
+        compiled = self._compiled_program
+        if isinstance(compiled, functools.partial) and hasattr(compiled.func, "_compiled_programs"):
+            bound_kwargs = dict(compiled.keywords or {})
+            offset_provider = bound_kwargs.pop(
+                "offset_provider", self.structured_offset_provider
+            )
+            enable_jit = bound_kwargs.pop("enable_jit", None)
+            bound_kwargs.pop("offset_provider", None)
+            call_kwargs = {**bound_kwargs, **structured_kwargs}
+            compiled.func._compiled_programs(
+                **call_kwargs,
+                offset_provider=offset_provider,
+                enable_jit=enable_jit,
+            )
         else:
-            self._unpack_to_buffer(structured_kwargs["out"], out_fields[0])
+            self._compiled_program(**structured_kwargs)
+
+        for original_field, packed_field in packed_fields:
+            self._unpack_to_buffer(packed_field, original_field)
+
+        if debug_tangential and {"vn", "rbf_vec_coeff_e", "vt"}.issubset(kwargs):
+            e2c2e = self._get_connectivity(runtime_offset_provider, "E2C2E")
+            if e2c2e is not None:
+                vn = kwargs["vn"].asnumpy()
+                coeff = kwargs["rbf_vec_coeff_e"].asnumpy()
+                vt_out = kwargs["vt"].asnumpy()
+                self._print_tangential_wind_debug(vn=vn, coeff=coeff, vt_out=vt_out, e2c2e=e2c2e)

@@ -211,6 +211,56 @@ def _concat_where_condition_from_domain(domain_expr: ir.Expr) -> ir.Expr:
 class CartesianDomainAndTypeRemapper(NodeTranslator):
 
     @staticmethod
+    def _program_uses_horizontal_unstructured_axis(node: ir.Node) -> bool:
+        for fun_call in node.pre_walk_values().if_isinstance(ir.FunCall):
+            if not cpm.is_call_to(fun_call, "named_range") or len(fun_call.args) != 3:
+                continue
+            axis_name = _get_axis_name(fun_call.args[0])
+            if axis_name in {"Edge", "Vertex", "Cell"}:
+                return True
+        return False
+
+    @staticmethod
+    def _validate_structured_remap_requirements(
+        node: ir.Node, symbolic_domain_sizes: dict[str, str | int]
+    ) -> None:
+        if not isinstance(node, ir.Program):
+            return
+        if not CartesianDomainAndTypeRemapper._program_uses_horizontal_unstructured_axis(node):
+            return
+
+        program_param_ids = {str(param.id) for param in node.params}
+
+        def _has_any(*names: str) -> bool:
+            return any(name in symbolic_domain_sizes or name in program_param_ids for name in names)
+
+        has_symbolic_structured_sizes = any(
+            name in symbolic_domain_sizes
+            for name in ("max_i", "max_j", "domain_max_i", "domain_max_j", "nx", "ny")
+        )
+        has_symbolic_signal = has_symbolic_structured_sizes or "lateral" in symbolic_domain_sizes
+
+        if not has_symbolic_signal:
+            return
+
+        missing_groups: list[str] = []
+        if has_symbolic_structured_sizes and not _has_any("lateral"):
+            missing_groups.append("lateral")
+        if not _has_any("i_max", "domain_i_max", "max_i", "domain_max_i", "nx", "num_i", "ni"):
+            missing_groups.append("IDim upper bound")
+        if not _has_any("j_max", "domain_j_max", "max_j", "domain_max_j", "ny", "num_j", "nj"):
+            missing_groups.append("JDim upper bound")
+
+        if missing_groups:
+            missing = ", ".join(missing_groups)
+            raise ValueError(
+                "Cartesian unstructured→structured remap requires explicit symbolic domain "
+                f"sizes. Missing: {missing}. "
+                "Provide these values via backend option "
+                "'otf_workflow__bare_translation__symbolic_domain_sizes'."
+            )
+
+    @staticmethod
     def _cartesian_remapped_type(type_: ts.TypeSpec | None) -> ts.TypeSpec | None:
         if not isinstance(type_, ts.FieldType): return type_
         if not any(dim.value in {"Edge", "Vertex", "Cell"} for dim in type_.dims): return type_
@@ -257,6 +307,8 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
             inferred_sizes = cls._infer_symbolic_sizes_from_offset_provider(offset_provider)
             for key, value in inferred_sizes.items():
                 effective_symbolic_sizes.setdefault(key, value)
+
+        cls._validate_structured_remap_requirements(node, effective_symbolic_sizes)
 
         return cls().visit(node, symbolic_domain_sizes=effective_symbolic_sizes)
 

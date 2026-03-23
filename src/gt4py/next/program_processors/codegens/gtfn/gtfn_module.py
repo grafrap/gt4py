@@ -223,7 +223,7 @@ class GTFNTranslationStep(
 
         static_arg_descriptors = argument_descriptor_contexts.get(arguments.StaticArg)
         if static_arg_descriptors is not None:
-            for name in ("max_i", "max_j", "domain_max_i", "domain_max_j", "nx", "ny"):
+            for name in ("max_i", "max_j", "domain_max_i", "domain_max_j", "nx", "ny", "lateral"):
                 descriptor = static_arg_descriptors.get(name)
                 if not isinstance(descriptor, arguments.StaticArg):
                     continue
@@ -252,6 +252,12 @@ class GTFNTranslationStep(
     @staticmethod
     def _resolve_symbolic_domain_sizes_from_mesh_metadata() -> dict[str, int]:
         mesh_path = os.environ.get("GT4PY_TRANSLATOR_MESH")
+        lateral_env = os.environ.get("GT4PY_TRANSLATOR_LATERAL", "1")
+        try:
+            lateral = int(lateral_env)
+        except ValueError:
+            lateral = 1
+        lateral = max(0, lateral)
 
         if not mesh_path:
             repo_root = Path(__file__).resolve().parents[6]
@@ -273,7 +279,7 @@ class GTFNTranslationStep(
         try:
             from gt4py.next.modules.translator import load_structured_remap_sizes_from_netcdf
 
-            sizes = load_structured_remap_sizes_from_netcdf(mesh_path)
+            sizes = load_structured_remap_sizes_from_netcdf(mesh_path, lateral=lateral)
         except Exception:
             return {}
 
@@ -288,6 +294,7 @@ class GTFNTranslationStep(
             "domain_max_j": int(sizes.max_j),
             "nx": int(sizes.nx),
             "ny": int(sizes.ny),
+            "lateral": int(sizes.lateral),
         }
 
     @staticmethod
