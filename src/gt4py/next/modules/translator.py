@@ -489,7 +489,7 @@ def build_index_map_from_lonlat_e2v(
     if e2v_np.ndim != 2 or e2v_np.shape[1] != 2:
         raise ValueError("e2v must have shape (n_edge, 2).")
     
-    print(f"int(nodes_size)={nodes_size}, ")
+    # print(f"int(nodes_size)={nodes_size}, ")
 
     n_vertex = int(nodes_size if nodes_size is not None else lonlat.shape[0])
     n_edge = int(edges_size if edges_size is not None else e2v_np.shape[0])
