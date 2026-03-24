@@ -221,7 +221,8 @@ class GenericStructuredWrapper:
         row_max = sanitized.max(axis=1, keepdims=True)
         # Keep fully-invalid rows untouched; fill partial invalid entries with last valid neighbor.
         has_valid = row_max >= 0
-        fill_values = np.where(has_valid, row_max, sanitized)
+        fill_values = np.where(has_valid, 0, sanitized)
+        # print(f"[structured-debug] fill values: {fill_values}")
         sanitized = np.where(invalid_mask, fill_values, sanitized)
         return sanitized
 
@@ -258,17 +259,54 @@ class GenericStructuredWrapper:
         vn: np.ndarray,
         coeff: np.ndarray,
         vt_out: np.ndarray,
-        e2c2e: np.ndarray,
+        e2c2e_raw: np.ndarray,
+        e2c2e_effective: np.ndarray | None,
     ) -> None:
-        vt_ref = self._reference_tangential_wind(vn, coeff, e2c2e)
-        abs_diff = np.abs(vt_out - vt_ref)
-        max_abs = float(abs_diff.max())
-        mismatched = int(np.count_nonzero(abs_diff > 1e-9))
-        total = int(abs_diff.size)
-        # print(
-        #     f"[structured-debug] operator={self.operator_name} max_abs_diff={max_abs:.6e} "
-        #     f"mismatched={mismatched}/{total}"
-        # )
+        compare_sanitized = os.environ.get("GT4PY_STRUCTURED_DEBUG_COMPARE_SANITIZED", "0") == "1"
+        vt_ref_raw = self._reference_tangential_wind(vn, coeff, e2c2e_raw)
+        vt_ref_eff = (
+            self._reference_tangential_wind(vn, coeff, e2c2e_effective)
+            if compare_sanitized and e2c2e_effective is not None
+            else None
+        )
+
+        print(f"[structured-debug] vt_out: {vt_out}")
+        print(f"[structured-debug] vt_ref_raw: {vt_ref_raw}")
+        if vt_ref_eff is not None:
+            print(f"[structured-debug] vt_ref_effective: {vt_ref_eff}")
+
+        abs_diff_raw = np.abs(vt_out - vt_ref_raw)
+        max_abs_raw = float(np.nanmax(abs_diff_raw)) if abs_diff_raw.size else 0.0
+        mismatched_raw = int(np.count_nonzero((abs_diff_raw > 1e-9) | np.isnan(abs_diff_raw)))
+
+        if vt_ref_eff is not None:
+            abs_diff_eff = np.abs(vt_out - vt_ref_eff)
+            max_abs_eff = float(np.nanmax(abs_diff_eff)) if abs_diff_eff.size else 0.0
+            mismatched_eff = int(np.count_nonzero((abs_diff_eff > 1e-9) | np.isnan(abs_diff_eff)))
+        else:
+            abs_diff_eff = None
+            max_abs_eff = float("nan")
+            mismatched_eff = -1
+
+        total = int(abs_diff_raw.size)
+        if vt_ref_eff is not None:
+            print(
+                f"[structured-debug] operator={self.operator_name} "
+                f"raw(max_abs={max_abs_raw:.6e}, mismatched={mismatched_raw}/{total}) "
+                f"effective(max_abs={max_abs_eff:.6e}, mismatched={mismatched_eff}/{total})"
+            )
+        else:
+            print(
+                f"[structured-debug] operator={self.operator_name} "
+                f"raw(max_abs={max_abs_raw:.6e}, mismatched={mismatched_raw}/{total})"
+            )
+
+        # Raw connectivity is the canonical reference for this debug path; sanitized
+        # comparison is optional and only reported when explicitly enabled.
+        abs_diff = abs_diff_raw
+        vt_ref = vt_ref_raw
+        e2c2e = e2c2e_raw
+        print("[structured-debug] detail_reference=raw")
 
         edge_scores = abs_diff.max(axis=1)
         color_mismatch = {0: 0, 1: 0, 2: 0}
@@ -288,11 +326,11 @@ class GenericStructuredWrapper:
             center_ijk = tuple(int(v) for v in self.index_map.edge_to_ijk[edge])
             neighbors = [int(v) for v in e2c2e[edge]]
             neighbor_ijk = [tuple(int(v) for v in self.index_map.edge_to_ijk[n]) if n >= 0 else (-1, -1, -1) for n in neighbors]
-            # print(
-            #     f"[structured-debug] edge={int(edge)} center_ijk={center_ijk} "
-            #     f"out_k0={float(vt_out[edge, 0]):+.6e} ref_k0={float(vt_ref[edge, 0]):+.6e} "
-            #     f"coeff={coeff[edge].tolist()} neighbors={neighbors} neighbor_ijk={neighbor_ijk}"
-            # )
+            print(
+                f"[structured-debug] edge={int(edge)} center_ijk={center_ijk} "
+                f"out_k0={float(vt_out[edge, 0]):+.6e} ref_k0={float(vt_ref[edge, 0]):+.6e} "
+                f"coeff={coeff[edge].tolist()} neighbors={neighbors} neighbor_ijk={neighbor_ijk}"
+            )
 
     def _is_unstructured(self, field, axis_name):
         if not getattr(field, "domain", None):
@@ -309,29 +347,33 @@ class GenericStructuredWrapper:
         ni, nj, n_kolor = self.index_map.ijk_to_edge.shape
         n_local = coeff.shape[1]
         out = np.zeros((ni, nj, n_kolor, n_local), dtype=coeff.dtype)
-        if self.e2c2e_conn is None:
+        conn = self.e2c2e_conn_raw if self.e2c2e_conn_raw is not None else self.e2c2e_conn
+        if conn is None:
             return out
 
+        # Canonical E2C2E mapping derived from iterator/transforms/map_dict.py.
+        # Relation tuple is (delta_i, delta_j, neighbor_kolor).
         expected_rel: dict[int, dict[int, tuple[tuple[int, int, int], ...]]] = {
             0: {
                 0: ((0, 0, 2),),
-                1: ((0, 1, 1), (0, 0, 1)),
+                1: ((0, 0, 1),),
                 2: ((-1, 0, 2),),
-                3: ((0, 0, 1), (-1, 1, 1), (-1, 0, 1)),
+                3: ((-1, 1, 1),),
             },
             1: {
-                0: ((0, 0, 0), (1, 0, 0)),     # Merged slot 0
+                0: ((0, 0, 0),),
                 1: ((0, 0, 2),),
-                2: ((1, -1, 0), (0, -1, 0)),   # Merged slot 2
+                2: ((1, -1, 0),),
                 3: ((0, -1, 2),),
             },
             2: {
-                0: ((0, 1, 1),),
-                1: ((1, 0, 0),),
-                2: ((0, 0, 1), (1, -2, 2)),    # Merged slot 2
-                3: ((0, 0, 0), (1, -2, 1)),    # Merged slot 3
+                0: ((0, 0, 1),),
+                1: ((0, 0, 0),),
+                2: ((0, 1, 1),),
+                3: ((1, 0, 0),),
             },
         }
+        
         slot_by_rel = {
             kolor: {
                 rel: tuple(
@@ -356,14 +398,14 @@ class GenericStructuredWrapper:
 
         mapped = 0
         unmatched = 0
-        n_edge = min(coeff.shape[0], self.e2c2e_conn.shape[0])
+        n_edge = min(coeff.shape[0], conn.shape[0])
         for edge in range(n_edge):
             i, j, kolor = (int(v) for v in self.index_map.edge_to_ijk[edge])
             if kolor < 0:
                 continue
             rel_to_slot = slot_by_rel.get(kolor, {})
-            for local in range(min(n_local, self.e2c2e_conn.shape[1])):
-                neighbor = int(self.e2c2e_conn[edge, local])
+            for local in range(min(n_local, conn.shape[1])):
+                neighbor = int(conn[edge, local])
                 if neighbor < 0:
                     continue
                 ni_, nj_, nk_ = (int(v) for v in self.index_map.edge_to_ijk[neighbor])
@@ -410,8 +452,10 @@ class GenericStructuredWrapper:
             return gtx.as_field([IDim, JDim, Kolor, local_dim], struct_np, allocator=self.allocator)
 
         if self._is_edge_sparse_e2c2e(field, np_data):
+            # print(f"np_data: ",np_data)
             local_dim = field.domain.dims[1]
             struct_np = self._pack_edge_sparse_e2c2e(np_data)
+            # print(f"[structured-debug] e2c2e packed full-field: ", struct_np)
             return gtx.as_field([IDim, JDim, Kolor, local_dim], struct_np, allocator=self.allocator)
             
         # 2. Standard unstructured fields
@@ -423,6 +467,10 @@ class GenericStructuredWrapper:
             struct_np = pack_edge_field(np_data, self.index_map)
             trailing_dims = list(field.domain.dims[1:]) if np_data.ndim > 1 else []
             return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np, allocator=self.allocator)
+        
+        elif self._is_unstructured(field, "Cell"): # TODO: check if this is actually correct.
+            struct_np = pack_cell_field_to_structured(np_data, self.index_map)
+            return gtx.as_field([IDim, JDim, Kolor], struct_np, allocator=self.allocator)
 
         return field 
 
@@ -432,6 +480,11 @@ class GenericStructuredWrapper:
 
         struct_np = structured_field.asnumpy()
         orig_np = original_unstructured_field.asnumpy()
+
+        # Sparse local-connectivity inputs (e.g. [Edge, E2C2E]) are read-only coefficients
+        # and must not be overwritten during unpack. Doing so mutates benchmark inputs.
+        if self._is_edge_sparse_e2c2e(original_unstructured_field, orig_np):
+            return
         
         if self._is_unstructured(original_unstructured_field, "Vertex"):
             unstruct_np = unpack_vertex_field_to_unstructured(struct_np, self.index_map)
@@ -448,6 +501,18 @@ class GenericStructuredWrapper:
         runtime_offset_provider = kwargs.get("offset_provider")
         debug_tangential = self.debug_enabled and "compute_tangential_wind" in str(self.operator_name)
 
+        debug_vn: np.ndarray | None = None
+        debug_coeff: np.ndarray | None = None
+        debug_e2c2e_raw: np.ndarray | None = None
+        debug_e2c2e_effective: np.ndarray | None = None
+        if debug_tangential and {"vn", "rbf_vec_coeff_e", "vt"}.issubset(kwargs):
+            debug_vn = np.array(kwargs["vn"].asnumpy(), copy=True)
+            debug_coeff = np.array(kwargs["rbf_vec_coeff_e"].asnumpy(), copy=True)
+            runtime_e2c2e = self._get_connectivity(runtime_offset_provider, "E2C2E")
+            if runtime_e2c2e is not None:
+                debug_e2c2e_raw = np.array(runtime_e2c2e, copy=True)
+                debug_e2c2e_effective = self._sanitize_sparse_connectivity(runtime_e2c2e)
+
         for arg_name, arg_val in kwargs.items():
             if arg_name == "offset_provider":
                 continue
@@ -458,6 +523,7 @@ class GenericStructuredWrapper:
                     if getattr(original_field, "domain", None) is not None:
                         packed_fields.append((original_field, packed_field))
             else:
+                # print(f"Packing argument '{arg_name}' for operator '{self.operator_name}'")
                 packed_arg = self._pack_argument(arg_val)
                 structured_kwargs[arg_name] = packed_arg
                 if getattr(arg_val, "domain", None) is not None:
@@ -483,10 +549,17 @@ class GenericStructuredWrapper:
         for original_field, packed_field in packed_fields:
             self._unpack_to_buffer(packed_field, original_field)
 
-        if debug_tangential and {"vn", "rbf_vec_coeff_e", "vt"}.issubset(kwargs):
-            e2c2e = self._get_connectivity(runtime_offset_provider, "E2C2E")
-            if e2c2e is not None:
-                vn = kwargs["vn"].asnumpy()
-                coeff = kwargs["rbf_vec_coeff_e"].asnumpy()
-                vt_out = kwargs["vt"].asnumpy()
-                self._print_tangential_wind_debug(vn=vn, coeff=coeff, vt_out=vt_out, e2c2e=e2c2e)
+        # if (
+        #     debug_tangential
+        #     and debug_vn is not None
+        #     and debug_coeff is not None
+        #     and debug_e2c2e_raw is not None
+        # ):
+        #         vt_out = kwargs["vt"].asnumpy()
+        #         self._print_tangential_wind_debug(
+        #             vn=debug_vn,
+        #             coeff=debug_coeff,
+        #             vt_out=vt_out,
+        #             e2c2e_raw=debug_e2c2e_raw,
+        #             e2c2e_effective=debug_e2c2e_effective,
+        #         )
