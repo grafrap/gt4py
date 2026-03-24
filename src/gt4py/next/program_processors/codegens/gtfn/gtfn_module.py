@@ -252,7 +252,9 @@ class GTFNTranslationStep(
     @staticmethod
     def _resolve_symbolic_domain_sizes_from_mesh_metadata() -> dict[str, int]:
         mesh_path = os.environ.get("GT4PY_TRANSLATOR_MESH")
-        lateral_env = os.environ.get("GT4PY_TRANSLATOR_LATERAL", "1")
+        lateral_env = os.environ.get("GT4PY_TRANSLATOR_LATERAL")
+        if lateral_env is None:
+            lateral_env = os.environ.get("LATERAL_BOUNDARY_LEVEL", "1")
         try:
             lateral = int(lateral_env)
         except ValueError:

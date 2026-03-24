@@ -379,6 +379,36 @@ def build_cell_to_ijk(m: IndexMap, ds) -> np.ndarray:
             
     return ijk_to_cell
 
+
+def build_cell_ijk_maps(c2v: np.ndarray, m: IndexMap) -> tuple[np.ndarray, np.ndarray]:
+    """Build both cell->(i,j,kolor) and (i,j,kolor)->cell lookup maps from C2V."""
+    c2v_np = np.asarray(c2v, dtype=np.int32)
+    n_cells = c2v_np.shape[0]
+    ni, nj = m.ij_to_vertex.shape
+
+    cell_to_ijk = np.full((n_cells, 3), -1, dtype=np.int32)
+    ijk_to_cell = np.full((ni, nj, 2), -1, dtype=np.int32)
+
+    for c in range(n_cells):
+        v = c2v_np[c]
+        if np.any(v < 0):
+            continue
+
+        i_coords = [int(m.vertex_to_ij[v[k], 0]) for k in range(3)]
+        j_coords = [int(m.vertex_to_ij[v[k], 1]) for k in range(3)]
+        if any(i < 0 for i in i_coords):
+            continue
+
+        i_min = min(i_coords)
+        j_min = min(j_coords)
+        kolor = 0 if i_coords.count(i_min) == 2 else 1
+
+        if 0 <= i_min < ni and 0 <= j_min < nj:
+            cell_to_ijk[c] = (i_min, j_min, kolor)
+            ijk_to_cell[i_min, j_min, kolor] = c
+
+    return cell_to_ijk, ijk_to_cell
+
 def pack_cell_field(cell_values: np.ndarray, ijk_to_cell: np.ndarray) -> np.ndarray:
     """Packs 1D/2D unstructured Cell arrays into [IDim, JDim, Kolor, (KDim)]."""
     import numpy as np
@@ -394,6 +424,20 @@ def pack_cell_field(cell_values: np.ndarray, ijk_to_cell: np.ndarray) -> np.ndar
                     out[i, j, k, :] = cell_values[c, :] if has_k else cell_values[c]
     return out if has_k else out[:, :, :, 0]
 
+
+def pack_cell_field_to_structured(
+    cell_values: np.ndarray,
+    cell_to_ijk: np.ndarray,
+    ijk_to_cell: np.ndarray,
+) -> np.ndarray:
+    """Compatibility wrapper expected by cartesian_interceptor.
+
+    Uses ijk_to_cell as authoritative mapping; cell_to_ijk is accepted for API compatibility.
+    TODO: Fill this with the correct values
+    """
+    _ = cell_to_ijk
+    return pack_cell_field(cell_values, ijk_to_cell)
+
 def unpack_cell_field(struct_values: np.ndarray, ijk_to_cell: np.ndarray, n_cells: int) -> np.ndarray:
     """Unpacks [IDim, JDim, Kolor, (KDim)] Cell arrays back to unstructured."""
     import numpy as np
@@ -407,6 +451,24 @@ def unpack_cell_field(struct_values: np.ndarray, ijk_to_cell: np.ndarray, n_cell
                 c = ijk_to_cell[i, j, k]
                 if c >= 0:
                     out[c, :] = struct_values[i, j, k, :] if has_k else struct_values[i, j, k]
+    return out if has_k else out[:, 0]
+
+
+def unpack_cell_field_from_structured(
+    struct_values: np.ndarray,
+    cell_to_ijk: np.ndarray,
+    n_cells: int,
+) -> np.ndarray:
+    """Compatibility API to unpack structured cell fields via cell_to_ijk map."""
+    has_k = struct_values.ndim == 4
+    out = np.zeros((n_cells, struct_values.shape[3] if has_k else 1), dtype=struct_values.dtype)
+
+    for c in range(min(n_cells, cell_to_ijk.shape[0])):
+        i, j, k = int(cell_to_ijk[c, 0]), int(cell_to_ijk[c, 1]), int(cell_to_ijk[c, 2])
+        if i < 0 or j < 0 or k < 0:
+            continue
+        out[c, :] = struct_values[i, j, k, :] if has_k else struct_values[i, j, k]
+
     return out if has_k else out[:, 0]
 
 def build_c2e2co_unstructured(ijk_to_cell: np.ndarray, n_cells: int) -> np.ndarray:

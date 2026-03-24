@@ -10,12 +10,15 @@ from gt4py.next.modules.translator import (
     StructuredRemapSizes,
     load_structured_remap_sizes_from_netcdf,
     build_index_map_from_lonlat_e2v,
+    build_cell_ijk_maps,
     build_structured_sign_from_unstructured,
     pack_vertex_field_to_structured,
     pack_edge_field_to_structured,
     pack_edge_field,
+    pack_cell_field_to_structured,
     unpack_vertex_field_to_unstructured,
     unpack_edge_field,
+    unpack_cell_field_from_structured,
     _read_e2v,
     _read_lonlat
 )
@@ -289,6 +292,11 @@ class GenericStructuredWrapper:
         # Store all raw (unsanitized) connectivity arrays keyed by name.
         self.v2e_conn = offset_provider.get("V2E").asnumpy() if "V2E" in offset_provider else None
         self.e2v_conn = offset_provider.get("E2V").asnumpy() if "E2V" in offset_provider else None
+        self.c2v_conn = offset_provider.get("C2V").asnumpy() if "C2V" in offset_provider else None
+        self.cell_to_ijk = None
+        self.ijk_to_cell = None
+        if self.c2v_conn is not None:
+            self.cell_to_ijk, self.ijk_to_cell = build_cell_ijk_maps(self.c2v_conn, self.index_map)
 
         # Raw connectivity arrays for all sparse local-connectivity types in the offset_provider.
         self._raw_conn: dict[str, np.ndarray] = {}
@@ -617,8 +625,11 @@ class GenericStructuredWrapper:
             return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np, allocator=self.allocator)
         
         elif self._is_unstructured(field, "Cell"): # TODO: check if this is actually correct.
-            struct_np = pack_cell_field_to_structured(np_data, self.index_map)
-            return gtx.as_field([IDim, JDim, Kolor], struct_np, allocator=self.allocator)
+            if self.cell_to_ijk is None or self.ijk_to_cell is None:
+                return field
+            struct_np = pack_cell_field_to_structured(np_data, self.cell_to_ijk, self.ijk_to_cell)
+            trailing_dims = list(field.domain.dims[1:]) if np_data.ndim > 1 else []
+            return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np, allocator=self.allocator)
 
         return field 
 
@@ -638,6 +649,10 @@ class GenericStructuredWrapper:
             unstruct_np = unpack_vertex_field_to_unstructured(struct_np, self.index_map)
         elif self._is_unstructured(original_unstructured_field, "Edge"):
             unstruct_np = unpack_edge_field(struct_np, self.index_map, orig_np.shape[0])
+        elif self._is_unstructured(original_unstructured_field, "Cell"):
+            if self.cell_to_ijk is None:
+                return
+            unstruct_np = unpack_cell_field_from_structured(struct_np, self.cell_to_ijk, orig_np.shape[0])
         else:
             return 
 

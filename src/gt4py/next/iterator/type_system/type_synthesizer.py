@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import os
 import inspect
 from typing import TypeVar, cast, overload
 
@@ -102,7 +103,11 @@ def _is_derefable_iterator_type(it_type: it_ts.IteratorType, *, default: bool = 
     # so we just return the default
     if it_type.position_dims == "unknown":
         return default
-    return set(it_type.defined_dims).issubset(set(it_type.position_dims))
+
+    non_local_defined_dims = {
+        dim for dim in it_type.defined_dims if dim.kind is not common.DimensionKind.LOCAL
+    }
+    return non_local_defined_dims.issubset(set(it_type.position_dims))
 
 
 def _register_builtin_type_synthesizer(
@@ -193,7 +198,10 @@ def deref(it: it_ts.IteratorType | ts.DeferredType) -> ts.DataType | ts.Deferred
     if isinstance(it, ts.DeferredType):
         return ts.DeferredType(constraint=None)
     assert isinstance(it, it_ts.IteratorType)
-    assert _is_derefable_iterator_type(it)
+    if not _is_derefable_iterator_type(it):
+        if os.environ.get("USE_STRUCTURED_BACKEND", "0") != "1":
+            return it.element_type
+        assert _is_derefable_iterator_type(it)
     return it.element_type
 
 

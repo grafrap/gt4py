@@ -221,10 +221,18 @@ def _reduce_domains(
     Applies range_op to the ranges of a list of domains with same dimensions and grid_type.
     """
     assert all(domain.grid_type == domains[0].grid_type for domain in domains)
-    assert all(domain.ranges.keys() == domains[0].ranges.keys() for domain in domains)
 
-    dims = domains[0].ranges.keys()
-    new_domain_ranges = {dim: range_reduce_op(*(d.ranges[dim] for d in domains)) for dim in dims}
+    dims: list[common.Dimension] = [*domains[0].ranges.keys()]
+    for domain in domains[1:]:
+        for dim in domain.ranges.keys():
+            if dim not in dims:
+                dims.append(dim)
+
+    promoted_domains = [promote_domain(domain, dims) for domain in domains]
+    new_domain_ranges = {
+        dim: range_reduce_op(*(domain.ranges[dim] for domain in promoted_domains))
+        for dim in dims
+    }
 
     return SymbolicDomain(domains[0].grid_type, new_domain_ranges)
 

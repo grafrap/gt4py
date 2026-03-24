@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import functools
+import os
 
 from gt4py import eve
 from gt4py.eve import concepts
@@ -34,9 +35,16 @@ def _is_representable_as_int(s: int | str) -> bool:
 
 def _set_node_type(node: itir.Node, type_: ts.TypeSpec) -> None:
     if node.type and not isinstance(type_, ts.DeferredType):
-        assert type_info.is_compatible_type(node.type, type_), (
-            f"Node {node!s} already has a type {node.type} which differs from {type_}."
-        )
+        if not type_info.is_compatible_type(node.type, type_):
+            if (
+                os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1"
+                and _is_structured_remap_compatibility_case(node.type, type_)
+            ):
+                type_ = node.type
+            else:
+                raise AssertionError(
+                    f"Node {node!s} already has a type {node.type} which differs from {type_}."
+                )
     # Also populate the type of the parameters of a lambda. That way the one can access the type
     # of a parameter by a lookup in the symbol table. As long as `_set_node_type` is used
     # exclusively, the information stays consistent with the types stored in the `FunctionType`
@@ -46,6 +54,43 @@ def _set_node_type(node: itir.Node, type_: ts.TypeSpec) -> None:
         for param, param_type in zip(node.params, type_.pos_only_args):
             _set_node_type(param, param_type)
     node.type = type_
+
+
+def _is_structured_remap_compatibility_case(existing: ts.TypeSpec, inferred: ts.TypeSpec) -> bool:
+    if isinstance(existing, ts.FieldType) and isinstance(inferred, ts.FieldType):
+        if existing.dtype != inferred.dtype:
+            return False
+        if len(inferred.dims) != len(existing.dims) + 1:
+            return False
+        if inferred.dims[0].value not in {"Edge", "Cell", "Vertex"}:
+            return False
+        return tuple(inferred.dims[1:]) == tuple(existing.dims)
+
+    if isinstance(existing, it_ts.IteratorType) and isinstance(inferred, it_ts.IteratorType):
+        if existing.element_type != inferred.element_type:
+            return False
+        if existing.position_dims == "unknown" or inferred.position_dims == "unknown":
+            return False
+        if len(existing.position_dims) != len(inferred.position_dims) + 1:
+            return False
+        if existing.position_dims[0].value not in {"Edge", "Cell", "Vertex"}:
+            return False
+        if tuple(existing.position_dims[1:]) != tuple(inferred.position_dims):
+            return False
+
+        if tuple(existing.defined_dims) == tuple(inferred.defined_dims):
+            return True
+
+        if len(existing.defined_dims) == len(inferred.defined_dims) + 1 and existing.defined_dims[0].value in {
+            "Edge",
+            "Cell",
+            "Vertex",
+        }:
+            return tuple(existing.defined_dims[1:]) == tuple(inferred.defined_dims)
+
+        return False
+
+    return False
 
 
 def copy_type(from_: itir.Node, to: itir.Node, allow_untyped: bool = False) -> None:
@@ -388,10 +433,16 @@ class ITIRTypeInference(eve.NodeTranslator):
             if isinstance(result, ts.TypeSpec):
                 if node.type and not isinstance(node.type, ts.DeferredType):
                     if not type_info.is_compatible_type(node.type, result):
-                        raise TypeError(
-                            "Incompatible inferred type for node "
-                            f"{node}: existing={node.type}, inferred={result}."
-                        )
+                        if (
+                            os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1"
+                            and _is_structured_remap_compatibility_case(node.type, result)
+                        ):
+                            result = node.type
+                        else:
+                            raise TypeError(
+                                "Incompatible inferred type for node "
+                                f"{node}: existing={node.type}, inferred={result}."
+                            )
                 node.type = result
             elif isinstance(result, ObservableTypeSynthesizer) or result is None:
                 pass

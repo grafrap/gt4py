@@ -58,7 +58,7 @@ def convert_args(
         if out is not None:
             args = (*args, out)
         converted_args = tuple(convert_arg(arg) for arg in args)
-        conn_args = extract_connectivity_args(offset_provider, device)
+        conn_args = extract_connectivity_args(offset_provider, device, inp)
 
         opt_kwargs: dict[str, Any] = {}
         if collect_metrics := metrics.is_level_enabled(metrics.PERFORMANCE):
@@ -92,30 +92,129 @@ def convert_args(
 
 
 def extract_connectivity_args(
-    offset_provider: dict[str, common.Connectivity | common.Dimension], device: core_defs.DeviceType
+    offset_provider: dict[str, common.Connectivity | common.Dimension],
+    device: core_defs.DeviceType,
+    inp: stages.ExecutableProgram | None = None,
 ) -> list[tuple[core_defs.NDArrayObject, tuple[int, ...]]]:
     # Note: this function is on the hot path and needs to have minimal overhead.
     zero_origin = (0, 0)
+    required_connectivities: tuple[str, ...] = _extract_required_connectivity_names(inp)
+    connectivities_by_name = {
+        name.lower(): conn for name, conn in offset_provider.items() if hasattr(conn, "ndarray")
+    }
+
+    if required_connectivities:
+        selected_connectivities = [
+            connectivities_by_name[name]
+            for name in required_connectivities
+            if name in connectivities_by_name
+        ]
+    else:
+        selected_connectivities = [
+            conn for conn in offset_provider.values() if hasattr(conn, "ndarray")
+        ]
+
     assert all(
         hasattr(conn, "ndarray") or isinstance(conn, common.Dimension)
         for conn in offset_provider.values()
     )
-    # Note: the order here needs to agree with the order of the generated bindings.
-    # This is currently true only because when hashing offset provider dicts,
-    # the keys' order is taken into account. Any modification to the hashing
-    # of offset providers may break this assumption here.
-    args: list[tuple[core_defs.NDArrayObject, tuple[int, ...]]] = [
-        (ndarray, zero_origin)
-        for conn in offset_provider.values()
-        if (ndarray := getattr(conn, "ndarray", None)) is not None
-    ]
     assert all(
         common.is_neighbor_table(conn) and field_utils.verify_device_field_type(conn, device)
-        for conn in offset_provider.values()
-        if hasattr(conn, "ndarray")
+        for conn in selected_connectivities
     )
 
+    args: list[tuple[core_defs.NDArrayObject, tuple[int, ...]]] = [
+        (conn.ndarray, zero_origin) for conn in selected_connectivities
+    ]
+
     return args
+
+
+@functools.cache
+def _extract_required_connectivity_names_from_doc(doc: str) -> tuple[str, ...]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for match in re.finditer(r"\bgt_conn_([a-zA-Z0-9_]+)\b", doc):
+        name = match.group(1).lower()
+        if name not in seen:
+            seen.add(name)
+            names.append(name)
+    return tuple(names)
+
+
+def _extract_required_connectivity_names(inp: stages.ExecutableProgram | None) -> tuple[str, ...]:
+    if inp is None:
+        return ()
+
+    candidates: list[Any] = [inp]
+    for accessor in ("func", "__wrapped__", "__func__"):
+        candidate = getattr(inp, accessor, None)
+        if candidate is not None:
+            candidates.append(candidate)
+
+    seen_candidate_ids: set[int] = set()
+    for candidate in candidates:
+        candidate_id = id(candidate)
+        if candidate_id in seen_candidate_ids:
+            continue
+        seen_candidate_ids.add(candidate_id)
+
+        for attr_name in ("__doc__", "__text_signature__"):
+            text = getattr(candidate, attr_name, None)
+            if text:
+                names = _extract_required_connectivity_names_from_doc(text)
+                if names:
+                    return names
+
+        repr_text = repr(candidate)
+        names = _extract_required_connectivity_names_from_doc(repr_text)
+        if names:
+            return names
+
+        str_text = str(candidate)
+        names = _extract_required_connectivity_names_from_doc(str_text)
+        if names:
+            return names
+
+    function_name = getattr(inp, "__name__", "")
+    if function_name:
+        return _extract_required_connectivity_names_from_cache(function_name)
+
+    return ()
+
+
+@functools.cache
+def _extract_required_connectivity_names_from_cache(function_name: str) -> tuple[str, ...]:
+    cache_dir = config.BUILD_CACHE_DIR / "gtfn_cache"
+    if not cache_dir.exists():
+        return ()
+
+    function_name_bytes = function_name.encode()
+    for cache_file in sorted(cache_dir.glob("*.pkl"), reverse=True):
+        try:
+            data = cache_file.read_bytes()
+        except OSError:
+            continue
+
+        if function_name_bytes not in data:
+            continue
+
+        decoded = data.decode("latin1", errors="ignore")
+        function_decl_match = re.search(
+            rf"decltype\(auto\)\s+{re.escape(function_name)}\((.*?)\)\s*\{{",
+            decoded,
+            flags=re.DOTALL,
+        )
+        if function_decl_match is not None:
+            names = _extract_required_connectivity_names_from_doc(function_decl_match.group(1))
+            if names:
+                return names
+
+        names = _extract_required_connectivity_names_from_doc(decoded)
+        if names:
+            return names
+
+    return ()
 
 
 class GTFNCompileWorkflowFactory(factory.Factory):
