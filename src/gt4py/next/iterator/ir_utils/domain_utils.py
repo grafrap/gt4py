@@ -167,6 +167,24 @@ class SymbolicDomain:
 
                 assert new_dim not in new_ranges or old_dim == new_dim
 
+                # If the new_dim is not in horizontal_sizes, try to compute it from the connectivity
+                if new_dim.value not in horizontal_sizes:
+                        # Try to extract the size from the offset provider itself
+                        offset_name = off.value if isinstance(off, itir.OffsetLiteral) else None
+                        if offset_name and common.is_offset_provider(offset_provider):
+                            provider = offset_provider.get(offset_name)
+                            if provider is not None and common.is_neighbor_connectivity(provider):
+                                # Extract codomain size from the connectivity array
+                                max_neighbor = int(provider.ndarray.max())  # type: ignore[attr-defined]
+                                horizontal_sizes[new_dim.value] = im.literal(
+                                    str(max_neighbor + 1), builtins.INTEGER_INDEX_BUILTIN
+                                )
+                    
+                        # If still not found, skip this translation - return unchanged domain
+                        if new_dim.value not in horizontal_sizes:
+                            return self
+
+
                 new_range = SymbolicRange(
                     im.literal("0", builtins.INTEGER_INDEX_BUILTIN),
                     horizontal_sizes[new_dim.value],
