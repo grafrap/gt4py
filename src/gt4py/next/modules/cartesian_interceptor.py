@@ -11,7 +11,6 @@ from gt4py.next.modules.translator import (
     load_structured_remap_sizes_from_netcdf,
     build_index_map_from_lonlat_e2v,
     build_cell_ijk_maps,
-    build_structured_sign_from_unstructured,
     pack_vertex_field_to_structured,
     pack_edge_field_to_structured,
     pack_edge_field,
@@ -307,6 +306,24 @@ class GenericStructuredWrapper:
                 if hasattr(value, "asnumpy"):
                     arr = value.asnumpy()
                     if arr.ndim == 2:
+                        if key_name == "E2C":
+                            if self.index_map is not None:
+                                edge_to_ijk = getattr(self.index_map, "edge_to_ijk", None)
+                                if edge_to_ijk is not None:
+                                    normalized = np.array(arr, copy=True)
+                                    edge_kolor = np.asarray(edge_to_ijk[:, 2], dtype=np.int32)
+                                    n_edge = min(normalized.shape[0], edge_kolor.shape[0])
+                                    if n_edge > 0 and normalized.shape[1] >= 2:
+                                        swap_mask = (edge_kolor[:n_edge] == 0) | (edge_kolor[:n_edge] == 2)
+                                        if np.any(swap_mask):
+                                            tmp = np.array(normalized[:n_edge, 0], copy=True)
+                                            normalized[:n_edge, 0] = np.where(
+                                                swap_mask, normalized[:n_edge, 1], normalized[:n_edge, 0]
+                                            )
+                                            normalized[:n_edge, 1] = np.where(
+                                                swap_mask, tmp, normalized[:n_edge, 1]
+                                            )
+                                    arr = normalized
                         self._raw_conn[key_name] = arr
                         self._sanitized_conn[key_name] = self._sanitize_sparse_connectivity(arr)
 
@@ -358,6 +375,53 @@ class GenericStructuredWrapper:
         # print(f"[structured-debug] fill values: {fill_values}")
         sanitized = np.where(invalid_mask, fill_values, sanitized)
         return sanitized
+
+    def _normalize_e2c_slot_order(self, conn: np.ndarray | None) -> np.ndarray | None:
+        if conn is None:
+            return None
+        if conn.ndim != 2 or conn.shape[1] < 2:
+            return conn
+        if self.index_map is None or self.cell_to_ijk is None:
+            return conn
+
+        remap = _SPARSE_REMAP_TABLE.get("E2C")
+        if remap is None:
+            return conn
+
+        normalized = np.array(conn, copy=True)
+        edge_to_ijk = self.index_map.edge_to_ijk
+        n_edge = min(normalized.shape[0], edge_to_ijk.shape[0])
+
+        for edge in range(n_edge):
+            ei, ej, ek = (int(v) for v in edge_to_ijk[edge])
+            if ei < 0 or ej < 0 or ek < 0:
+                continue
+
+            slot_map = remap.get(ek)
+            if slot_map is None or 0 not in slot_map or 1 not in slot_map:
+                continue
+
+            c0 = int(normalized[edge, 0])
+            c1 = int(normalized[edge, 1])
+            if c0 < 0 or c1 < 0:
+                continue
+            if c0 >= self.cell_to_ijk.shape[0] or c1 >= self.cell_to_ijk.shape[0]:
+                continue
+
+            ci0, cj0, ck0 = (int(v) for v in self.cell_to_ijk[c0])
+            ci1, cj1, ck1 = (int(v) for v in self.cell_to_ijk[c1])
+            if min(ci0, cj0, ck0, ci1, cj1, ck1) < 0:
+                continue
+
+            rel0 = (ci0 - ei, cj0 - ej, ck0)
+            rel1 = (ci1 - ei, cj1 - ej, ck1)
+            exp0 = tuple(int(v) for v in slot_map[0])
+            exp1 = tuple(int(v) for v in slot_map[1])
+
+            if rel0 == exp1 and rel1 == exp0:
+                normalized[edge, 0], normalized[edge, 1] = c1, c0
+
+        return normalized
 
     def _build_structured_offset_provider(self, offset_provider):
         if not offset_provider:
@@ -477,16 +541,16 @@ class GenericStructuredWrapper:
         return any(d.value == axis_name for d in field.domain.dims)
 
     def _get_local_dim_name(self, field) -> str | None:
-        """Return the local-connectivity dimension name (e.g. 'E2C2E') from a 2-D sparse field, or None."""
+        """Return the local-connectivity dimension name (e.g. 'E2C2E') from a sparse-local field, or None."""
         dims = list(getattr(field.domain, "dims", ()))
         if len(dims) < 2:
             return None
         return getattr(dims[1], "value", None)
 
     def _is_sparse_local_field(self, field, np_data: np.ndarray) -> bool:
-        """Return True if the field is a 2-D sparse local-connectivity field whose connectivity is
+        """Return True if the field is a sparse local-connectivity field whose connectivity is
         known in the map_dict remap table and for which we have the raw connectivity array."""
-        if np_data.ndim != 2:
+        if np_data.ndim < 2:
             return False
         local_dim = self._get_local_dim_name(field)
         if local_dim is None:
@@ -497,8 +561,8 @@ class GenericStructuredWrapper:
         return local_dim in self._raw_conn
 
     def _pack_sparse_local_field(self, field, coeff: np.ndarray) -> np.ndarray:
-        """Generic packing of a 2-D sparse local-connectivity field into a structured
-        (ni, nj, n_kolor, n_local) array, derived from the map_dict remap table.
+        """Generic packing of a sparse local-connectivity field into a structured
+        (ni, nj, n_kolor, n_local, ...) array, derived from the map_dict remap table.
 
         Works for any connectivity whose name appears as a key in _SPARSE_REMAP_TABLE
         (e.g. E2C2E, E2C2EO, E2C, C2E, V2E, E2C2V, …).
@@ -509,9 +573,24 @@ class GenericStructuredWrapper:
 
         ni, nj, n_kolor = self.index_map.ijk_to_edge.shape
         n_local = coeff.shape[1]
-        out = np.zeros((ni, nj, n_kolor, n_local), dtype=coeff.dtype)
+        tail_shape = coeff.shape[2:]
+        if np.issubdtype(coeff.dtype, np.integer):
+            out = np.full((ni, nj, n_kolor, n_local, *tail_shape), -1, dtype=coeff.dtype)
+        else:
+            out = np.zeros((ni, nj, n_kolor, n_local, *tail_shape), dtype=coeff.dtype)
 
         if conn is None or remap is None:
+            return out
+
+        if local_dim == "E2C":
+            n_elem = min(coeff.shape[0], self.index_map.edge_to_ijk.shape[0])
+            n_local_eff = min(n_local, conn.shape[1])
+            for elem in range(n_elem):
+                ci, cj, ck = (int(v) for v in self.index_map.edge_to_ijk[elem])
+                if ci < 0 or cj < 0 or ck < 0:
+                    continue
+                for local in range(n_local_eff):
+                    out[ci, cj, ck, local, ...] = coeff[elem, local, ...]
             return out
 
         center_type = _CENTER_ELEMENT_BY_PREFIX.get(local_dim[0], "Edge")
@@ -544,8 +623,12 @@ class GenericStructuredWrapper:
             elif center_type == "Vertex":
                 ij = self.index_map.vertex_to_ij[element_idx]
                 return int(ij[0]), int(ij[1]), 0
+            elif center_type == "Cell":
+                if self.cell_to_ijk is None or element_idx >= self.cell_to_ijk.shape[0]:
+                    return None
+                ijk = self.cell_to_ijk[element_idx]
+                return int(ijk[0]), int(ijk[1]), int(ijk[2])
             else:
-                # Cell support not yet implemented
                 return None
 
         def _neighbor_ijk(neighbor_idx: int) -> tuple[int, int, int] | None:
@@ -561,6 +644,11 @@ class GenericStructuredWrapper:
             elif ntype == "Vertex":
                 ij = self.index_map.vertex_to_ij[neighbor_idx]
                 return int(ij[0]), int(ij[1]), 0
+            elif ntype == "Cell":
+                if self.cell_to_ijk is None or neighbor_idx >= self.cell_to_ijk.shape[0]:
+                    return None
+                ijk = self.cell_to_ijk[neighbor_idx]
+                return int(ijk[0]), int(ijk[1]), int(ijk[2])
             else:
                 return None
 
@@ -591,7 +679,7 @@ class GenericStructuredWrapper:
                     continue
                 for slot in slots:
                     if slot < n_local:
-                        out[ci, cj, ck, slot] = coeff[elem, local]
+                        out[ci, cj, ck, slot, ...] = coeff[elem, local, ...]
         return out
 
     def _pack_argument(self, field):
@@ -599,25 +687,22 @@ class GenericStructuredWrapper:
             return field 
 
         np_data = field.asnumpy()
-        
-        # 1. Sparse fields (e.g., Sign: [Vertex, V2EDim])
-        if self._is_unstructured(field, "Vertex") and np_data.ndim == 2:
-            local_dim = field.domain.dims[1] 
-            struct_np = np.stack(
-                build_structured_sign_from_unstructured(np_data, self.v2e_conn, self.index_map),
-                axis=-1
-            )
-            return gtx.as_field([IDim, JDim, Kolor, local_dim], struct_np, allocator=self.allocator)
 
         if self._is_sparse_local_field(field, np_data):
             local_dim = field.domain.dims[1]
             struct_np = self._pack_sparse_local_field(field, np_data)
-            return gtx.as_field([IDim, JDim, Kolor, local_dim], struct_np, allocator=self.allocator)
+            trailing_dims = list(field.domain.dims[2:]) if np_data.ndim > 2 else []
+            return gtx.as_field(
+                [IDim, JDim, Kolor, local_dim, *trailing_dims],
+                struct_np,
+                allocator=self.allocator,
+            )
             
         # 2. Standard unstructured fields
         if self._is_unstructured(field, "Vertex"):
             struct_np = pack_vertex_field_to_structured(np_data, self.index_map)
-            return gtx.as_field([IDim, JDim, Kolor], struct_np, allocator=self.allocator)
+            trailing_dims = list(field.domain.dims[1:]) if np_data.ndim > 1 else []
+            return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np, allocator=self.allocator)
             
         elif self._is_unstructured(field, "Edge"):
             struct_np = pack_edge_field(np_data, self.index_map)
@@ -643,6 +728,16 @@ class GenericStructuredWrapper:
         # Sparse local-connectivity inputs (e.g. [Edge, E2C2E]) are read-only coefficients
         # and must not be overwritten during unpack. Doing so mutates benchmark inputs.
         if self._is_sparse_local_field(original_unstructured_field, orig_np):
+            return
+
+        # Vertex-local sparse coefficient inputs (e.g. [Vertex, V2E]) are read-only.
+        # Do not skip regular vertex outputs like [Vertex, K].
+        local_dim_name = self._get_local_dim_name(original_unstructured_field)
+        if (
+            self._is_unstructured(original_unstructured_field, "Vertex")
+            and orig_np.ndim > 1
+            and local_dim_name in _SPARSE_REMAP_TABLE
+        ):
             return
         
         if self._is_unstructured(original_unstructured_field, "Vertex"):
@@ -694,6 +789,11 @@ class GenericStructuredWrapper:
             else:
                 # print(f"Packing argument '{arg_name}' for operator '{self.operator_name}'")
                 packed_arg = self._pack_argument(arg_val)
+                if (
+                    isinstance(packed_arg, (int, np.integer))
+                    and arg_name.startswith("horizontal_start")
+                ):
+                    packed_arg = type(packed_arg)(0)
                 structured_kwargs[arg_name] = packed_arg
                 if getattr(arg_val, "domain", None) is not None:
                     packed_fields.append((arg_val, packed_arg))

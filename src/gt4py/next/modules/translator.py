@@ -28,7 +28,11 @@ class StructuredRemapSizes:
     vertex_size: int
     edge_size_padded: int
     cell_size: int
+    end_i: int
+    end_j: int
     lateral: int = 0
+    start_i: int = 0
+    start_j: int = 0
 
 
 def _first_present(ds, names: list[str], required: bool = True):
@@ -100,6 +104,10 @@ def infer_structured_remap_sizes(
     vertex_size = max_i * max_j
     edge_size_padded = 3 * max_i * max_j
     cell_size = 2 * nx * ny
+    start_i = lateral
+    start_j = lateral
+    end_i = max_i - lateral
+    end_j = max_j - lateral
 
     return StructuredRemapSizes(
         nx=nx,
@@ -110,6 +118,10 @@ def infer_structured_remap_sizes(
         edge_size_padded=edge_size_padded,
         cell_size=cell_size,
         lateral=lateral,
+        start_i=start_i,
+        start_j=start_j,
+        end_i=end_i,
+        end_j=end_j,
     )
 
 
@@ -130,6 +142,7 @@ def load_structured_remap_sizes_from_netcdf(nc_path: str, lateral=0) -> Structur
             n_cells=int(ds.sizes["cell"]),
             lateral=lateral,
         )
+        print(f"Inferred structured remap sizes from {nc_path}: {sizes}")
 
     return sizes
 
@@ -223,11 +236,12 @@ def build_index_map_for_ragged_lonlat_e2v(
 
 def pack_vertex_field_to_structured(vertex_values: np.ndarray, m: IndexMap) -> np.ndarray:
     ni, max_nj = m.ij_to_vertex.shape
-    out = np.zeros((ni, max_nj, 1), dtype=vertex_values.dtype)
+    trailing_shape = vertex_values.shape[1:]
+    out = np.zeros((ni, max_nj, 1, *trailing_shape), dtype=vertex_values.dtype)
     for v in range(vertex_values.shape[0]):
         i, local_j = int(m.vertex_to_ij[v, 0]), int(m.vertex_to_ij[v, 1])
         if i >= 0:
-            out[i, local_j, 0] = vertex_values[v]
+            out[i, local_j, 0, ...] = vertex_values[v, ...]
     return out
 
 # def pack_edge_field_to_structured(edge_values: np.ndarray, m: IndexMap) -> np.ndarray:
@@ -257,10 +271,11 @@ def pack_edge_field_to_structured(edge_values: np.ndarray, m: IndexMap) -> np.nd
 
 def unpack_vertex_field_to_unstructured(struct_values: np.ndarray, m: IndexMap) -> np.ndarray:
     n_vertex = m.vertex_to_ij.shape[0]
-    out = np.zeros((n_vertex,), dtype=struct_values.dtype)
+    trailing_shape = struct_values.shape[3:]
+    out = np.zeros((n_vertex, *trailing_shape), dtype=struct_values.dtype)
     for v in range(n_vertex):
         i, local_j = int(m.vertex_to_ij[v, 0]), int(m.vertex_to_ij[v, 1])
-        out[v] = struct_values[i, local_j, 0]
+        out[v, ...] = struct_values[i, local_j, 0, ...]
     return out
 
 import numpy as np
@@ -693,48 +708,6 @@ def build_index_map_from_atlas_setup(setup: Any, decimals: int = 10) -> IndexMap
         decimals=decimals,
     )
 
-
-def build_structured_sign_from_unstructured(
-    sign_vertex_v2e: np.ndarray,
-    nodes2edge: np.ndarray,
-    m: IndexMap,
-) -> tuple[np.ndarray, ...]:
-    ni, nj = m.ij_to_vertex.shape
-    
-    # Dynamically initialize a tuple of 6 fields
-    signs = tuple(np.zeros((ni, nj, 1), dtype=sign_vertex_v2e.dtype) for _ in range(6))
-
-    for v in range(m.vertex_to_ij.shape[0]):
-        i, j = m.vertex_to_ij[v]
-        if i < 0 or j < 0:
-            continue
-        for l in range(nodes2edge.shape[1]):
-            e = int(nodes2edge[v, l])
-            if e < 0:
-                continue
-            ie, je, ke = m.edge_to_ijk[e]
-            if ke < 0:
-                continue
-            
-            sign_val = sign_vertex_v2e[v, l]
-            
-            if ke == 0:
-                if ie == i and je == j:
-                    signs[0][i, j, 0] = sign_val # East
-                elif ie == i and je == j - 1:
-                    signs[3][i, j, 0] = sign_val # West
-            elif ke == 1:
-                if ie == i and je == j:
-                    signs[1][i, j, 0] = sign_val # NE
-                elif ie == i - 1 and je == j:
-                    signs[4][i, j, 0] = sign_val # SW
-            elif ke == 2:
-                if ie == i and je == j - 1:
-                    signs[2][i, j, 0] = sign_val # NW
-                elif ie == i - 1 and je == j:
-                    signs[5][i, j, 0] = sign_val # SE
-
-    return signs
 
 # def run_structured_pnabla_from_unstructured(
 #     pp_vertex: np.ndarray,
