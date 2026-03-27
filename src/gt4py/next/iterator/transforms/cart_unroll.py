@@ -520,6 +520,35 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
         )
 
     def visit_SetAt(self, node: ir.SetAt, **kwargs) -> ir.SetAt:
+        def _has_unstructured_axis(type_: ts.TypeSpec | None) -> bool:
+            return isinstance(type_, ts.FieldType) and any(
+                dim.value in {"Edge", "Vertex", "Cell"} for dim in type_.dims
+            )
+
+        def _retarget_self_refs(expr: ir.Expr, target: ir.Expr) -> ir.Expr:
+            if not isinstance(target, ir.SymRef) or not isinstance(target.type, ts.FieldType):
+                return expr
+
+            target_id = target.id
+            target_type = target.type
+
+            class _RetargetSelfRef(NodeTranslator):
+                def visit_SymRef(self, n: ir.SymRef, **kws) -> ir.SymRef:
+                    if n.id == target_id and _has_unstructured_axis(n.type):
+                        return ir.SymRef(id=n.id, type=target_type)
+                    return n
+
+            return _RetargetSelfRef().visit(expr)
+
+        def _is_fully_structured_field(expr: ir.Expr) -> bool:
+            type_ = getattr(expr, "type", None)
+            if not isinstance(type_, ts.FieldType):
+                return False
+            dim_names = {dim.value for dim in type_.dims}
+            if {"IDim", "JDim", "Kolor"}.isdisjoint(dim_names):
+                return False
+            return not any(name in {"Edge", "Vertex", "Cell"} for name in dim_names)
+
         def _is_unstructured_edge_domain(domain_expr: ir.Expr) -> bool:
             if not cpm.is_call_to(domain_expr, "unstructured_domain"):
                 return False
@@ -612,6 +641,12 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
         new_expr = self.visit(node.expr, current_domain=new_domain, **kwargs)
         new_target = self.visit(node.target, **kwargs)
 
+        # Some concat_where expansions keep a stale unstructured self-reference in the
+        # SetAt expression (e.g. `next_vn` in the false branch). Retype those refs to
+        # the structured target so expr/target dimensions stay aligned.
+        if _is_fully_structured_field(new_target):
+            new_expr = _retarget_self_refs(new_expr, new_target)
+
         if _is_unstructured_edge_domain(node.domain):
             masked_expr = _build_edge_validity_masked_expr(new_expr, new_target, new_domain)
             if masked_expr is not None:
@@ -623,6 +658,35 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
         program_param_ids: set[str] = kwargs.get("program_param_ids", set())
         symbolic_domain_sizes: dict[str, str | int] | None = kwargs.get("symbolic_domain_sizes")
         new_node = copy.deepcopy(self.generic_visit(node, **kwargs))
+
+        def _structured_axis_literals() -> list[ir.AxisLiteral]:
+            return [
+                ir.AxisLiteral(value="IDim", kind=common.DimensionKind.HORIZONTAL),
+                ir.AxisLiteral(value="JDim", kind=common.DimensionKind.HORIZONTAL),
+                ir.AxisLiteral(value="Kolor", kind=common.DimensionKind.HORIZONTAL),
+            ]
+
+        def _expand_unstructured_axis(axis_expr: ir.Expr) -> list[ir.Expr]:
+            axis_name = _get_axis_name(axis_expr)
+            if axis_name in {"Edge", "Vertex", "Cell"}:
+                return _structured_axis_literals()
+            return [copy.deepcopy(axis_expr)]
+
+        def _remap_broadcast_axes(axes_expr: ir.Expr) -> ir.Expr:
+            if cpm.is_call_to(axes_expr, "make_tuple"):
+                remapped_args: list[ir.Expr] = []
+                for arg in axes_expr.args:
+                    remapped_args.extend(_expand_unstructured_axis(arg))
+                return im.call("make_tuple")(*remapped_args)
+
+            expanded = _expand_unstructured_axis(axes_expr)
+            if len(expanded) == 1:
+                return expanded[0]
+            return im.call("make_tuple")(*expanded)
+
+        if cpm.is_call_to(new_node, "broadcast") and len(new_node.args) == 2:
+            remapped_axes = _remap_broadcast_axes(new_node.args[1])
+            new_node = ir.FunCall(fun=new_node.fun, args=[new_node.args[0], remapped_axes], type=new_node.type)
 
         def _pick_size_param(*candidates: str) -> ir.Expr | None:
             for candidate in candidates:
@@ -1146,6 +1210,16 @@ class CartesianReductionUnroller(NodeTranslator):
                     return _apply_shift_chain(copy.deepcopy(arg), entry["shifts"])
 
                 if entry["kind"] == "concat_where":
+                    conn_name = None
+                    if key and isinstance(key[0], ir.OffsetLiteral) and isinstance(key[0].value, str):
+                        conn_name = key[0].value
+                    if current_domain is not None:
+                        return _build_field_concat_where_from_branches(
+                            arg,
+                            entry["branches"],
+                            current_domain,
+                            apply_edge_shape_bounds=_needs_edge_shape_bounds(conn_name),
+                        )
                     return _build_concat_where_from_branches(arg, entry["branches"])
         
         return new_node

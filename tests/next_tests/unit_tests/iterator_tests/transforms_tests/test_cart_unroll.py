@@ -1587,3 +1587,34 @@ def test_tuple_get_get_domain_range_inlines_symbolic_domain_sizes():
     assert actual == expected
 
 
+def test_broadcast_axes_remap_edge_and_k_to_structured_axes():
+    testee = im.call("broadcast")(
+        im.ref("scale"),
+        im.call("make_tuple")(
+            ir.AxisLiteral(value="Edge", kind=common.DimensionKind.HORIZONTAL),
+            ir.AxisLiteral(value="K", kind=common.DimensionKind.VERTICAL),
+        ),
+    )
+
+    actual = CartUnroll.apply(testee)
+    assert cpm.is_call_to(actual, "broadcast")
+    assert cpm.is_call_to(actual.args[1], "make_tuple")
+
+    axes = [arg.value for arg in actual.args[1].args if hasattr(arg, "value")]
+    assert axes == ["IDim", "JDim", "Kolor", "K"]
+
+
+def test_broadcast_single_edge_axis_expands_to_structured_tuple():
+    testee = im.call("broadcast")(
+        im.ref("scale"),
+        ir.AxisLiteral(value="Edge", kind=common.DimensionKind.HORIZONTAL),
+    )
+
+    actual = CartUnroll.apply(testee)
+    assert cpm.is_call_to(actual, "broadcast")
+    assert cpm.is_call_to(actual.args[1], "make_tuple")
+
+    axes = [arg.value for arg in actual.args[1].args if hasattr(arg, "value")]
+    assert axes == ["IDim", "JDim", "Kolor"]
+
+
