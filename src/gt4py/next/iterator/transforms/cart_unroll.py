@@ -62,6 +62,12 @@ def _make_lifted_deref_shift(
     )(copy.deepcopy(arg))
 
 
+def _needs_edge_shape_bounds(connectivity: str | None) -> bool:
+    if connectivity is None:
+        return False
+    return connectivity == "E2V"
+
+
 
 def _neutral_element_for_reduce_op(red_op: ir.Expr, red_init: ir.Expr) -> ir.Expr:
     op_name = red_op.id if isinstance(red_op, ir.SymRef) else None
@@ -82,13 +88,137 @@ def _bounded_shifted_deref(
     return im.deref(shifted_ref)
 
 
-def _build_field_concat_where_from_branches(arg: ir.Expr, branches, domain: ir.Expr | None = None):
+def _build_field_concat_where_from_branches(
+    arg: ir.Expr,
+    branches,
+    domain: ir.Expr | None = None,
+    inferred_kolor_start: int | None = None,
+    apply_edge_shape_bounds: bool = False,
+):
+    def _extract_kolor_interval(cond_expr: ir.Expr | None) -> tuple[int, int] | None:
+        if cond_expr is None or not cpm.is_call_to(cond_expr, "cartesian_domain"):
+            return None
+        for range_expr in cond_expr.args:
+            if not (cpm.is_call_to(range_expr, "named_range") and len(range_expr.args) == 3):
+                continue
+            if _get_axis_name(range_expr.args[0]) != "Kolor":
+                continue
+            lo = range_expr.args[1]
+            hi = range_expr.args[2]
+            if (
+                isinstance(lo, ir.OffsetLiteral)
+                and isinstance(lo.value, int)
+                and isinstance(hi, ir.OffsetLiteral)
+                and isinstance(hi.value, int)
+            ):
+                return lo.value, hi.value
+        return None
+
+    def _kolor_shift(shift_spec: tuple[ir.OffsetLiteral, ...]) -> int:
+        kolor_axis_tags = {
+            common.dimension_to_implicit_offset("Kolor"),
+            "Kolor",
+        }
+        for idx in range(0, len(shift_spec), 2):
+            if idx + 1 >= len(shift_spec):
+                break
+            axis_lit = shift_spec[idx]
+            off_lit = shift_spec[idx + 1]
+            if (
+                isinstance(axis_lit, ir.OffsetLiteral)
+                and axis_lit.value in kolor_axis_tags
+                and isinstance(off_lit, ir.OffsetLiteral)
+                and isinstance(off_lit.value, int)
+            ):
+                return int(off_lit.value)
+        return 0
+
+    def _minus_one(expr: ir.Expr) -> ir.Expr:
+        if isinstance(expr, ir.OffsetLiteral) and isinstance(expr.value, int):
+            return ir.OffsetLiteral(value=expr.value - 1)
+        return im.minus(copy.deepcopy(expr), ir.OffsetLiteral(value=1))
+
+    def _edge_shape_domain(
+        source_kolor: int,
+        shift_spec: tuple[ir.OffsetLiteral, ...],
+    ) -> ir.Expr | None:
+        if domain is None or not cpm.is_call_to(domain, "cartesian_domain"):
+            return None
+
+        target_kolor = source_kolor + _kolor_shift(shift_spec)
+        if target_kolor not in {0, 1, 2}:
+            return None
+
+        id_range = None
+        jd_range = None
+        for range_expr in domain.args:
+            if not (cpm.is_call_to(range_expr, "named_range") and len(range_expr.args) == 3):
+                continue
+            axis_name = _get_axis_name(range_expr.args[0])
+            if axis_name == "IDim":
+                id_range = range_expr
+            elif axis_name == "JDim":
+                jd_range = range_expr
+
+        if id_range is None or jd_range is None:
+            return None
+
+        i_lo, i_hi = copy.deepcopy(id_range.args[1]), copy.deepcopy(id_range.args[2])
+        j_lo, j_hi = copy.deepcopy(jd_range.args[1]), copy.deepcopy(jd_range.args[2])
+
+        if target_kolor in {1, 2}:
+            i_hi = _minus_one(i_hi)
+        if target_kolor in {0, 2}:
+            j_hi = _minus_one(j_hi)
+
+        new_ranges: list[ir.Expr] = []
+        for range_expr in domain.args:
+            if not (cpm.is_call_to(range_expr, "named_range") and len(range_expr.args) == 3):
+                continue
+            axis_name = _get_axis_name(range_expr.args[0])
+            if axis_name == "IDim":
+                new_ranges.append(im.named_range(copy.deepcopy(range_expr.args[0]), i_lo, i_hi))
+            elif axis_name == "JDim":
+                new_ranges.append(im.named_range(copy.deepcopy(range_expr.args[0]), j_lo, j_hi))
+            else:
+                new_ranges.append(copy.deepcopy(range_expr))
+
+        return im.call("cartesian_domain")(*new_ranges)
+
+    def _infer_source_kolor_from_cond(cond_expr: ir.Expr | None, fallback: int | None) -> tuple[int | None, int | None]:
+        if cond_expr is not None:
+            interval = _extract_kolor_interval(cond_expr)
+            if interval is None:
+                return None, fallback
+            lo, hi = interval
+            if hi - lo == 1:
+                return lo, hi
+            return None, fallback
+        if fallback is None:
+            return None, None
+        return fallback, fallback + 1
+
     cond, shift_spec = branches[0]
-    expr = _make_lifted_deref_shift(arg, shift_spec, domain)
+    source_kolor, next_inferred_kolor = _infer_source_kolor_from_cond(cond, inferred_kolor_start)
+    branch_domain = domain
+    if apply_edge_shape_bounds and source_kolor is not None:
+        edge_domain = _edge_shape_domain(source_kolor, shift_spec)
+        if edge_domain is not None:
+            branch_domain = edge_domain
+
+    expr = _make_lifted_deref_shift(arg, shift_spec, branch_domain)
     if len(branches) == 1:
         return expr
     return im.concat_where(
-        cond, expr, _build_field_concat_where_from_branches(arg, branches[1:], domain)
+        cond,
+        expr,
+        _build_field_concat_where_from_branches(
+            arg,
+            branches[1:],
+            domain,
+            inferred_kolor_start=next_inferred_kolor,
+            apply_edge_shape_bounds=apply_edge_shape_bounds,
+        ),
     )
 
 def _get_axis_name(axis_expr: ir.Expr) -> str | None:
@@ -390,9 +520,104 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
         )
 
     def visit_SetAt(self, node: ir.SetAt, **kwargs) -> ir.SetAt:
+        def _is_unstructured_edge_domain(domain_expr: ir.Expr) -> bool:
+            if not cpm.is_call_to(domain_expr, "unstructured_domain"):
+                return False
+            for nr in domain_expr.args:
+                if not (cpm.is_call_to(nr, "named_range") and len(nr.args) == 3):
+                    continue
+                axis_name = _get_axis_name(nr.args[0])
+                if axis_name == "Edge":
+                    return True
+            return False
+
+        def _minus_one(expr: ir.Expr) -> ir.Expr:
+            if isinstance(expr, ir.OffsetLiteral) and isinstance(expr.value, int):
+                return ir.OffsetLiteral(value=expr.value - 1)
+            if isinstance(expr, ir.Literal) and str(expr.value).lstrip("-").isdigit():
+                return ir.Literal(value=str(int(expr.value) - 1), type=expr.type)
+            return im.minus(copy.deepcopy(expr), ir.OffsetLiteral(value=1))
+
+        def _build_edge_validity_masked_expr(
+            expr: ir.Expr, target: ir.Expr, domain_expr: ir.Expr
+        ) -> ir.Expr | None:
+            if not cpm.is_call_to(domain_expr, "cartesian_domain"):
+                return None
+
+            id_axis = j_axis = k_axis = None
+            i_lo = i_hi = j_lo = j_hi = k_lo = k_hi = None
+            for nr in domain_expr.args:
+                if not (cpm.is_call_to(nr, "named_range") and len(nr.args) == 3):
+                    continue
+                axis_name = _get_axis_name(nr.args[0])
+                if axis_name == "IDim":
+                    id_axis, i_lo, i_hi = nr.args[0], nr.args[1], nr.args[2]
+                elif axis_name == "JDim":
+                    j_axis, j_lo, j_hi = nr.args[0], nr.args[1], nr.args[2]
+                elif axis_name == "Kolor":
+                    k_axis, k_lo, k_hi = nr.args[0], nr.args[1], nr.args[2]
+
+            if any(v is None for v in (id_axis, j_axis, k_axis, i_lo, i_hi, j_lo, j_hi, k_lo, k_hi)):
+                return None
+
+            # Only apply this mask for 3-kolor edge cartesian domains.
+            if isinstance(k_hi, ir.OffsetLiteral):
+                if k_hi.value != 3:
+                    return None
+            elif isinstance(k_hi, ir.Literal):
+                if str(k_hi.value) != "3":
+                    return None
+            else:
+                return None
+
+            def _dom(axis: ir.Expr, lo: ir.Expr, hi: ir.Expr) -> ir.Expr:
+                return im.call("cartesian_domain")(
+                    im.named_range(copy.deepcopy(axis), copy.deepcopy(lo), copy.deepcopy(hi))
+                )
+
+            def _and(lhs: ir.Expr, rhs: ir.Expr) -> ir.Expr:
+                return im.call("and_")(lhs, rhs)
+
+            cond_k0 = _and(
+                _dom(copy.deepcopy(k_axis), ir.OffsetLiteral(value=0), ir.OffsetLiteral(value=1)),
+                _dom(copy.deepcopy(j_axis), copy.deepcopy(j_lo), _minus_one(copy.deepcopy(j_hi))),
+            )
+            cond_k1 = _and(
+                _dom(copy.deepcopy(k_axis), ir.OffsetLiteral(value=1), ir.OffsetLiteral(value=2)),
+                _dom(copy.deepcopy(id_axis), copy.deepcopy(i_lo), _minus_one(copy.deepcopy(i_hi))),
+            )
+            cond_k2 = _and(
+                _dom(copy.deepcopy(k_axis), ir.OffsetLiteral(value=2), ir.OffsetLiteral(value=3)),
+                _and(
+                    _dom(copy.deepcopy(id_axis), copy.deepcopy(i_lo), _minus_one(copy.deepcopy(i_hi))),
+                    _dom(copy.deepcopy(j_axis), copy.deepcopy(j_lo), _minus_one(copy.deepcopy(j_hi))),
+                ),
+            )
+
+            return im.concat_where(
+                cond_k0,
+                copy.deepcopy(expr),
+                im.concat_where(
+                    cond_k1,
+                    copy.deepcopy(expr),
+                    im.concat_where(
+                        cond_k2,
+                        copy.deepcopy(expr),
+                        copy.deepcopy(target),
+                    ),
+                ),
+            )
+
         new_domain = self.visit(node.domain, **kwargs)
         new_expr = self.visit(node.expr, current_domain=new_domain, **kwargs)
-        return ir.SetAt(expr=new_expr, domain=new_domain, target=self.visit(node.target, **kwargs))
+        new_target = self.visit(node.target, **kwargs)
+
+        if _is_unstructured_edge_domain(node.domain):
+            masked_expr = _build_edge_validity_masked_expr(new_expr, new_target, new_domain)
+            if masked_expr is not None:
+                new_expr = masked_expr
+
+        return ir.SetAt(expr=new_expr, domain=new_domain, target=new_target)
 
     def visit_FunCall(self, node: ir.FunCall, **kwargs) -> ir.Expr:
         program_param_ids: set[str] = kwargs.get("program_param_ids", set())
@@ -700,7 +925,12 @@ class CartesianReductionUnroller(NodeTranslator):
                         if entry["kind"] == "shift":
                             return _make_lifted_deref_shift(field_expr, entry["shifts"], domain)
                         if entry["kind"] == "concat_where":
-                            return _build_field_concat_where_from_branches(field_expr, entry["branches"], domain)
+                            return _build_field_concat_where_from_branches(
+                                field_expr,
+                                entry["branches"],
+                                domain,
+                                apply_edge_shape_bounds=_needs_edge_shape_bounds(conn),
+                            )
 
                 # Is it map_ ?
                 if isinstance(stencil.expr, ir.FunCall) and cpm.is_call_to(stencil.expr.fun, "map_"):
@@ -885,7 +1115,12 @@ class CartesianReductionUnroller(NodeTranslator):
                     
                     if entry["kind"] == "concat_where":
                         return _build_field_concat_where_from_branches(
-                            rewritten_arg, entry["branches"], current_domain
+                            rewritten_arg,
+                            entry["branches"],
+                            current_domain,
+                            apply_edge_shape_bounds=_needs_edge_shape_bounds(
+                                key[0].value if isinstance(key[0], ir.OffsetLiteral) else None
+                            ),
                         )
                     elif entry["kind"] == "shift":
                         return _make_lifted_deref_shift(

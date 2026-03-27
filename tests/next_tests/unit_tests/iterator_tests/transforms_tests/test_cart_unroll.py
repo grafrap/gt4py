@@ -7,12 +7,14 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import pytest
+import numpy as np
 
 from gt4py.next import common
 from gt4py.eve import SymbolRef
 from gt4py.next.iterator import ir
 from gt4py.next.iterator.ir_utils import ir_makers as im
 from gt4py.next.iterator.ir_utils import common_pattern_matcher as cpm
+from gt4py.next.modules import translator as tr
 from gt4py.next.iterator.transforms.cart_unroll import (
     CartUnroll,
     _bounded_shifted_deref,
@@ -831,6 +833,274 @@ def test_lifted_applied_shift_is_rewritten_to_lifted_concat_where():
     )
 
 
+def test_lifted_e2v_domains_respect_packed_edge_kolor_shapes():
+    # Build a tiny edge map with explicit padding holes per Kolor:
+    # K0 valid on J in [0, max_j-1), K1 valid on I in [0, max_i-1), K2 valid on both.
+    ijk_to_edge = np.full((2, 2, 3), -1, dtype=np.int32)
+    ijk_to_edge[0, 0, 0] = 0
+    ijk_to_edge[0, 1, 0] = 1
+    ijk_to_edge[0, 0, 1] = 2
+    ijk_to_edge[1, 0, 1] = 3
+    ijk_to_edge[0, 0, 2] = 4
+
+    m = tr.IndexMap(
+        vertex_to_ij=np.zeros((4, 2), dtype=np.int32),
+        row_lengths=np.array([2, 2], dtype=np.int32),
+        row_offsets=np.array([0, 2], dtype=np.int32),
+        ij_to_vertex=np.array([[0, 1], [2, 3]], dtype=np.int32),
+        edge_to_ijk=np.array(
+            [[0, 0, 0], [0, 1, 0], [0, 0, 1], [1, 0, 1], [0, 0, 2]], dtype=np.int32
+        ),
+        ijk_to_edge=ijk_to_edge,
+    )
+    packed_edges = tr.pack_edge_field_to_structured(np.arange(5, dtype=np.float64), m)
+    max_i, max_j, _ = packed_edges.shape
+
+    IDim = common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL)
+    JDim = common.Dimension("JDim", kind=common.DimensionKind.HORIZONTAL)
+    Kolor = common.Dimension("Kolor", kind=common.DimensionKind.HORIZONTAL)
+    domain = im.call("cartesian_domain")(
+        im.named_range(IDim, 0, max_i),
+        im.named_range(JDim, 0, max_j),
+        im.named_range(Kolor, 0, 3),
+    )
+
+    lifted_expr = im.as_fieldop(
+        im.lambda_("it")(im.deref(im.shift("E2V", 0)("it"))),
+        domain,
+    )("arg")
+
+    program = ir.Program(
+        id="testee",
+        function_definitions=[],
+        params=[im.sym("arg"), im.sym("out")],
+        declarations=[],
+        body=[ir.SetAt(expr=lifted_expr, domain=domain, target=im.ref("out"))],
+    )
+
+    actual_program = NormalizeShifts().visit(CartUnroll.apply(program))
+    assert isinstance(actual_program, ir.Program)
+    assert len(actual_program.body) == 1
+    assert isinstance(actual_program.body[0], ir.SetAt)
+    actual = actual_program.body[0].expr
+    assert cpm.is_call_to(actual, "concat_where")
+
+    _, branch0, tail = actual.args
+    assert cpm.is_call_to(tail, "concat_where")
+    _, branch1, branch2 = tail.args
+
+    def _domain_upper(branch: ir.Expr, axis_name: str) -> int:
+        assert cpm.is_applied_as_fieldop(branch)
+        branch_domain = branch.fun.args[1]
+        assert cpm.is_call_to(branch_domain, "cartesian_domain")
+        for named_range in branch_domain.args:
+            if not (cpm.is_call_to(named_range, "named_range") and len(named_range.args) == 3):
+                continue
+            axis_expr = named_range.args[0]
+            axis = axis_expr.value if hasattr(axis_expr, "value") else None
+            if axis == axis_name:
+                upper = named_range.args[2]
+                if isinstance(upper, ir.OffsetLiteral):
+                    return int(upper.value)
+                if isinstance(upper, ir.Literal):
+                    return int(upper.value)
+                if cpm.is_call_to(upper, "minus") and len(upper.args) == 2:
+                    lhs, rhs = upper.args
+                    if isinstance(lhs, ir.Literal) and isinstance(rhs, ir.OffsetLiteral):
+                        return int(lhs.value) - int(rhs.value)
+                raise AssertionError(f"Unsupported upper bound node: {upper!r}")
+        raise AssertionError(f"Missing axis {axis_name} in branch domain")
+
+    assert _domain_upper(branch0, "IDim") == max_i
+    assert _domain_upper(branch1, "IDim") == max_i
+    assert _domain_upper(branch2, "IDim") == max_i
+
+    assert _domain_upper(branch0, "JDim") == max_j - 1
+    assert _domain_upper(branch1, "JDim") == max_j - 1
+    assert _domain_upper(branch2, "JDim") == max_j - 1
+
+
+def test_lifted_c2v_domains_do_not_apply_edge_trimming():
+    max_i = 6
+    max_j = 5
+
+    IDim = common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL)
+    JDim = common.Dimension("JDim", kind=common.DimensionKind.HORIZONTAL)
+    Kolor = common.Dimension("Kolor", kind=common.DimensionKind.HORIZONTAL)
+    domain = im.call("cartesian_domain")(
+        im.named_range(IDim, 0, max_i),
+        im.named_range(JDim, 0, max_j),
+        im.named_range(Kolor, 0, 2),
+    )
+
+    lifted_expr = im.as_fieldop(
+        im.lambda_("it")(im.deref(im.shift("C2V", 0)("it"))),
+        domain,
+    )("arg")
+
+    program = ir.Program(
+        id="testee",
+        function_definitions=[],
+        params=[im.sym("arg"), im.sym("out")],
+        declarations=[],
+        body=[ir.SetAt(expr=lifted_expr, domain=domain, target=im.ref("out"))],
+    )
+
+    actual_program = NormalizeShifts().visit(CartUnroll.apply(program))
+    assert isinstance(actual_program, ir.Program)
+    assert len(actual_program.body) == 1
+    assert isinstance(actual_program.body[0], ir.SetAt)
+    actual = actual_program.body[0].expr
+    assert cpm.is_call_to(actual, "concat_where")
+
+    _, branch0, branch1 = actual.args
+
+    def _domain_upper(branch: ir.Expr, axis_name: str) -> int:
+        assert cpm.is_applied_as_fieldop(branch)
+        branch_domain = branch.fun.args[1]
+        assert cpm.is_call_to(branch_domain, "cartesian_domain")
+        for named_range in branch_domain.args:
+            if not (cpm.is_call_to(named_range, "named_range") and len(named_range.args) == 3):
+                continue
+            axis_expr = named_range.args[0]
+            axis = axis_expr.value if hasattr(axis_expr, "value") else None
+            if axis == axis_name:
+                upper = named_range.args[2]
+                if isinstance(upper, ir.OffsetLiteral):
+                    return int(upper.value)
+                if isinstance(upper, ir.Literal):
+                    return int(upper.value)
+                if cpm.is_call_to(upper, "minus") and len(upper.args) == 2:
+                    lhs, rhs = upper.args
+                    if isinstance(lhs, ir.Literal) and isinstance(rhs, ir.OffsetLiteral):
+                        return int(lhs.value) - int(rhs.value)
+                raise AssertionError(f"Unsupported upper bound node: {upper!r}")
+        raise AssertionError(f"Missing axis {axis_name} in branch domain")
+
+    assert _domain_upper(branch0, "IDim") == max_i
+    assert _domain_upper(branch1, "IDim") == max_i
+
+    assert _domain_upper(branch0, "JDim") == max_j
+    assert _domain_upper(branch1, "JDim") == max_j
+
+
+def test_lifted_e2c_domains_do_not_apply_e2v_edge_trimming_with_lateral_bounds():
+    i_start = 4
+    j_start = 3
+    i_end = 17
+    j_end = 14
+
+    IDim = common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL)
+    JDim = common.Dimension("JDim", kind=common.DimensionKind.HORIZONTAL)
+    Kolor = common.Dimension("Kolor", kind=common.DimensionKind.HORIZONTAL)
+    domain = im.call("cartesian_domain")(
+        im.named_range(IDim, i_start, i_end),
+        im.named_range(JDim, j_start, j_end),
+        im.named_range(Kolor, 0, 3),
+    )
+
+    lifted_expr = im.as_fieldop(
+        im.lambda_("it")(im.deref(im.shift("E2C", 1)("it"))),
+        domain,
+    )("arg")
+
+    program = ir.Program(
+        id="testee",
+        function_definitions=[],
+        params=[im.sym("arg"), im.sym("out")],
+        declarations=[],
+        body=[ir.SetAt(expr=lifted_expr, domain=domain, target=im.ref("out"))],
+    )
+
+    actual_program = NormalizeShifts().visit(CartUnroll.apply(program))
+    assert isinstance(actual_program, ir.Program)
+    assert len(actual_program.body) == 1
+    assert isinstance(actual_program.body[0], ir.SetAt)
+    actual = actual_program.body[0].expr
+    assert cpm.is_call_to(actual, "concat_where")
+
+    _, branch0, tail = actual.args
+    assert cpm.is_call_to(tail, "concat_where")
+    _, branch1, branch2 = tail.args
+
+    def _domain_bounds(branch: ir.Expr, axis_name: str) -> tuple[int, int]:
+        assert cpm.is_applied_as_fieldop(branch)
+        branch_domain = branch.fun.args[1]
+        assert cpm.is_call_to(branch_domain, "cartesian_domain")
+        for named_range in branch_domain.args:
+            if not (cpm.is_call_to(named_range, "named_range") and len(named_range.args) == 3):
+                continue
+            axis_expr = named_range.args[0]
+            axis = axis_expr.value if hasattr(axis_expr, "value") else None
+            if axis == axis_name:
+                lo = named_range.args[1]
+                hi = named_range.args[2]
+                if isinstance(lo, (ir.OffsetLiteral, ir.Literal)) and isinstance(
+                    hi, (ir.OffsetLiteral, ir.Literal)
+                ):
+                    return int(lo.value), int(hi.value)
+                raise AssertionError(f"Unsupported bound nodes: lo={lo!r}, hi={hi!r}")
+        raise AssertionError(f"Missing axis {axis_name} in branch domain")
+
+    for branch in (branch0, branch1, branch2):
+        assert _domain_bounds(branch, "IDim") == (i_start, i_end)
+        assert _domain_bounds(branch, "JDim") == (j_start, j_end)
+
+
+def test_edge_setat_domain_is_masked_by_kolor_specific_validity():
+    edge_axis = ir.AxisLiteral(value="Edge")
+    domain_expr = im.call("unstructured_domain")(
+        im.call("named_range")(
+            edge_axis,
+            im.tuple_get(0, im.call("get_domain_range")(im.ref("next_vn"), edge_axis)),
+            im.tuple_get(1, im.call("get_domain_range")(im.ref("next_vn"), edge_axis)),
+        )
+    )
+
+    testee = ir.Program(
+        id="testee",
+        function_definitions=[],
+        params=[im.sym("current_vn"), im.sym("next_vn"), im.sym("max_i"), im.sym("max_j")],
+        declarations=[],
+        body=[
+            ir.SetAt(
+                expr=im.ref("current_vn"),
+                domain=domain_expr,
+                target=im.ref("next_vn"),
+            )
+        ],
+    )
+
+    actual = NormalizeShifts().visit(CartUnroll.apply(testee))
+    assert isinstance(actual, ir.Program)
+    assert len(actual.body) == 1
+    assert isinstance(actual.body[0], ir.SetAt)
+    assert cpm.is_call_to(actual.body[0].expr, "concat_where")
+
+    found_kolor_slices: set[tuple[int, int]] = set()
+
+    def _visit(node: ir.Expr) -> None:
+        if cpm.is_call_to(node, "cartesian_domain"):
+            for nr in node.args:
+                if not (cpm.is_call_to(nr, "named_range") and len(nr.args) == 3):
+                    continue
+                axis = nr.args[0].value if hasattr(nr.args[0], "value") else None
+                if axis != "Kolor":
+                    continue
+                lo, hi = nr.args[1], nr.args[2]
+                if isinstance(lo, ir.OffsetLiteral) and isinstance(hi, ir.OffsetLiteral):
+                    found_kolor_slices.add((int(lo.value), int(hi.value)))
+        if isinstance(node, ir.FunCall):
+            _visit(node.fun)
+            for arg in node.args:
+                _visit(arg)
+        elif isinstance(node, ir.Lambda):
+            _visit(node.expr)
+
+    _visit(actual.body[0].expr)
+    assert {(0, 1), (1, 2), (2, 3)}.issubset(found_kolor_slices)
+
+
 def test_cartesian_remapped_type_includes_cell_fields():
     Cell = common.Dimension("Cell", kind=common.DimensionKind.HORIZONTAL)
     testee = ts.FieldType(dims=[Cell], dtype=ts.ScalarType(kind=ts.ScalarKind.FLOAT64))
@@ -1008,6 +1278,16 @@ def test_unstructured_domain_inlines_nx_ny_and_kolor_bounds_when_available(axis,
     JDim = common.Dimension("JDim", kind=common.DimensionKind.HORIZONTAL)
     Kolor = common.Dimension("Kolor", kind=common.DimensionKind.HORIZONTAL)
 
+    expected_domain = im.call("cartesian_domain")(
+        im.named_range(IDim, ir.OffsetLiteral(value=0), im.ref("max_i")),
+        im.named_range(JDim, ir.OffsetLiteral(value=0), im.ref("max_j")),
+        im.named_range(
+            Kolor,
+            ir.OffsetLiteral(value=0),
+            ir.OffsetLiteral(value=kolor_stop),
+        ),
+    )
+
     expected = ir.Program(
         id="testee",
         function_definitions=[],
@@ -1016,22 +1296,22 @@ def test_unstructured_domain_inlines_nx_ny_and_kolor_bounds_when_available(axis,
         body=[
             ir.SetAt(
                 expr=im.ref("inp"),
-                domain=im.call("cartesian_domain")(
-                    im.named_range(IDim, ir.OffsetLiteral(value=0), im.ref("max_i")),
-                    im.named_range(JDim, ir.OffsetLiteral(value=0), im.ref("max_j")),
-                    im.named_range(
-                        Kolor,
-                        ir.OffsetLiteral(value=0),
-                        ir.OffsetLiteral(value=kolor_stop),
-                    ),
-                ),
+                domain=expected_domain,
                 target=im.ref("out"),
             )
         ],
     )
 
     actual = CartUnroll.apply(testee)
-    assert actual == expected
+    if axis != "Edge":
+        assert actual == expected
+        return
+
+    assert isinstance(actual, ir.Program)
+    assert len(actual.body) == 1
+    assert isinstance(actual.body[0], ir.SetAt)
+    assert actual.body[0].domain == expected_domain
+    assert cpm.is_call_to(actual.body[0].expr, "concat_where")
 
 
 def test_unstructured_domain_is_not_rewritten_without_max_i_max_j():
@@ -1087,6 +1367,12 @@ def test_unstructured_domain_inlines_i_j_min_max_when_available():
     JDim = common.Dimension("JDim", kind=common.DimensionKind.HORIZONTAL)
     Kolor = common.Dimension("Kolor", kind=common.DimensionKind.HORIZONTAL)
 
+    expected_domain = im.call("cartesian_domain")(
+        im.named_range(IDim, im.ref("i_min"), im.ref("i_max")),
+        im.named_range(JDim, im.ref("j_min"), im.ref("j_max")),
+        im.named_range(Kolor, ir.OffsetLiteral(value=0), ir.OffsetLiteral(value=3)),
+    )
+
     expected = ir.Program(
         id="testee",
         function_definitions=[],
@@ -1104,18 +1390,18 @@ def test_unstructured_domain_inlines_i_j_min_max_when_available():
         body=[
             ir.SetAt(
                 expr=im.ref("inp"),
-                domain=im.call("cartesian_domain")(
-                    im.named_range(IDim, im.ref("i_min"), im.ref("i_max")),
-                    im.named_range(JDim, im.ref("j_min"), im.ref("j_max")),
-                    im.named_range(Kolor, ir.OffsetLiteral(value=0), ir.OffsetLiteral(value=3)),
-                ),
+                domain=expected_domain,
                 target=im.ref("out"),
             )
         ],
     )
 
     actual = CartUnroll.apply(testee)
-    assert actual == expected
+    assert isinstance(actual, ir.Program)
+    assert len(actual.body) == 1
+    assert isinstance(actual.body[0], ir.SetAt)
+    assert actual.body[0].domain == expected_domain
+    assert cpm.is_call_to(actual.body[0].expr, "concat_where")
 
 
 def test_unstructured_edge_and_k_domain_rewrites_edge_and_preserves_k_range():
@@ -1155,6 +1441,17 @@ def test_unstructured_edge_and_k_domain_rewrites_edge_and_preserves_k_range():
     JDim = common.Dimension("JDim", kind=common.DimensionKind.HORIZONTAL)
     Kolor = common.Dimension("Kolor", kind=common.DimensionKind.HORIZONTAL)
 
+    expected_domain = im.call("cartesian_domain")(
+        im.named_range(IDim, im.ref("i_min"), im.ref("i_max")),
+        im.named_range(JDim, im.ref("j_min"), im.ref("j_max")),
+        im.named_range(Kolor, ir.OffsetLiteral(value=0), ir.OffsetLiteral(value=3)),
+        im.named_range(
+            ir.AxisLiteral(value="K", kind=common.DimensionKind.VERTICAL),
+            im.ref("vertical_start"),
+            im.ref("vertical_end"),
+        ),
+    )
+
     expected = ir.Program(
         id="testee",
         function_definitions=[],
@@ -1174,23 +1471,18 @@ def test_unstructured_edge_and_k_domain_rewrites_edge_and_preserves_k_range():
         body=[
             ir.SetAt(
                 expr=im.ref("inp"),
-                domain=im.call("cartesian_domain")(
-                    im.named_range(IDim, im.ref("i_min"), im.ref("i_max")),
-                    im.named_range(JDim, im.ref("j_min"), im.ref("j_max")),
-                    im.named_range(Kolor, ir.OffsetLiteral(value=0), ir.OffsetLiteral(value=3)),
-                    im.named_range(
-                        ir.AxisLiteral(value="K", kind=common.DimensionKind.VERTICAL),
-                        im.ref("vertical_start"),
-                        im.ref("vertical_end"),
-                    ),
-                ),
+                domain=expected_domain,
                 target=im.ref("out"),
             )
         ],
     )
 
     actual = CartUnroll.apply(testee)
-    assert actual == expected
+    assert isinstance(actual, ir.Program)
+    assert len(actual.body) == 1
+    assert isinstance(actual.body[0], ir.SetAt)
+    assert actual.body[0].domain == expected_domain
+    assert cpm.is_call_to(actual.body[0].expr, "concat_where")
 
 
 def test_tuple_get_get_domain_range_inlines_max_i_max_j():
