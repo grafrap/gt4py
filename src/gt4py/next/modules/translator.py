@@ -2,12 +2,200 @@ from dataclasses import dataclass
 import numpy as np
 import gt4py.next as gtx
 from gt4py.next.iterator import atlas_utils
+from gt4py.next.iterator import ir
+from gt4py.next.iterator.transforms.map_dict import map_dict as _MAP_DICT
 
 from .ffront_fvm_nabla_structured import IDim, JDim, Kolor#, pnabla_cartesian
 from gt4py.next.program_processors.program_setup_utils import setup_program
 
 
 from typing import List
+
+
+def _parse_sparse_remap_table() -> dict[str, dict[int, dict[int, tuple[int, int, int]]]]:
+    """Parse map_dict remaps into conn -> center_kolor -> slot -> (di, dj, neighbor_kolor)."""
+    max_kolor = 3
+
+    def _extract_shift(shifts_tuple: tuple) -> tuple[int, int, int]:
+        vals: dict[str, int] = {}
+        it = iter(shifts_tuple)
+        for axis_lit, offset_lit in zip(it, it):
+            vals[axis_lit.value] = int(offset_lit.value)
+        return vals.get("IDim", 0), vals.get("JDim", 0), vals.get("Kolor", 0)
+
+    def _kolor_range_from_domain(domain) -> tuple[int, int] | None:
+        if domain is None:
+            return None
+        try:
+            named_ranges = domain.args
+            for nr in named_ranges:
+                dim_arg = nr.args[0]
+                if isinstance(dim_arg, ir.AxisLiteral) and dim_arg.value == "Kolor":
+                    return int(nr.args[1].value), int(nr.args[2].value)
+        except (AttributeError, IndexError, TypeError):
+            return None
+        return None
+
+    table: dict[str, dict[int, dict[int, tuple[int, int, int]]]] = {}
+    for (conn_lit, slot_lit), entry in _MAP_DICT.items():
+        conn_name = conn_lit.value
+        slot = int(slot_lit.value)
+        table.setdefault(conn_name, {})
+
+        if entry["kind"] == "shift":
+            di, dj, dk = _extract_shift(entry["shifts"])
+            for ck in range(max_kolor):
+                table[conn_name].setdefault(ck, {})[slot] = (di, dj, ck + dk)
+            continue
+
+        if entry["kind"] == "concat_where":
+            covered: set[int] = set()
+            else_shift: tuple[int, int, int] | None = None
+            resolved: list[tuple[tuple[int, int] | None, tuple[int, int, int]]] = []
+            for domain, shifts in entry["branches"]:
+                shift = _extract_shift(shifts)
+                if domain is None:
+                    else_shift = shift
+                else:
+                    resolved.append((_kolor_range_from_domain(domain), shift))
+
+            for krange, shift in resolved:
+                if krange is None:
+                    continue
+                for ck in range(krange[0], krange[1]):
+                    covered.add(ck)
+                    table[conn_name].setdefault(ck, {})[slot] = (shift[0], shift[1], ck + shift[2])
+
+            if else_shift is not None:
+                for ck in range(max_kolor):
+                    if ck not in covered:
+                        table[conn_name].setdefault(ck, {})[slot] = (
+                            else_shift[0],
+                            else_shift[1],
+                            ck + else_shift[2],
+                        )
+
+    return table
+
+
+_SPARSE_REMAP_TABLE: dict[str, dict[int, dict[int, tuple[int, int, int]]]] = _parse_sparse_remap_table()
+_CENTER_ELEMENT_BY_PREFIX: dict[str, str] = {"E": "Edge", "C": "Cell", "V": "Vertex"}
+
+
+def pack_sparse_local_field_to_structured(
+    coeff: np.ndarray,
+    connectivity: np.ndarray,
+    index_map: "IndexMap",
+    local_dim_name: str,
+    *,
+    cell_to_ijk: np.ndarray | None = None,
+) -> np.ndarray:
+    """Pack sparse-local coefficients into structured [I, J, Kolor, Local, ...]."""
+    if coeff.ndim < 2:
+        raise ValueError("Sparse-local coefficients must be at least 2-D [center, local, ...].")
+
+    remap = _SPARSE_REMAP_TABLE.get(local_dim_name)
+    if remap is None:
+        raise KeyError(f"Unsupported sparse-local dimension '{local_dim_name}'.")
+
+    conn = np.asarray(connectivity, dtype=np.int32)
+    if conn.ndim != 2:
+        raise ValueError("Sparse-local connectivity must be 2-D [center, local].")
+
+    ni, nj, n_kolor = index_map.ijk_to_edge.shape
+    max_i, max_j = index_map.ij_to_vertex.shape
+    n_local = coeff.shape[1]
+    tail_shape = coeff.shape[2:]
+
+    if np.issubdtype(coeff.dtype, np.integer):
+        out = np.full((ni, nj, n_kolor, n_local, *tail_shape), -1, dtype=coeff.dtype)
+    else:
+        out = np.zeros((ni, nj, n_kolor, n_local, *tail_shape), dtype=coeff.dtype)
+
+    if local_dim_name == "E2C":
+        n_elem = min(coeff.shape[0], index_map.edge_to_ijk.shape[0])
+        n_local_eff = min(n_local, conn.shape[1])
+        for elem in range(n_elem):
+            ci, cj, ck = (int(v) for v in index_map.edge_to_ijk[elem])
+            if ci < 0 or cj < 0 or ck < 0:
+                continue
+            for local in range(n_local_eff):
+                out[ci, cj, ck, local, ...] = coeff[elem, local, ...]
+        return out
+
+    center_type = _CENTER_ELEMENT_BY_PREFIX.get(local_dim_name[0], "Edge")
+
+    rel_to_slots: dict[int, dict[tuple[int, int, int], list[int]]] = {}
+    for ck, slot_map in remap.items():
+        r2s: dict[tuple[int, int, int], list[int]] = {}
+        for slot, (di, dj, nk) in slot_map.items():
+            r2s.setdefault((di, dj, nk), []).append(slot)
+        rel_to_slots[int(ck)] = r2s
+
+    def _normalize(delta: int, period: int) -> int:
+        if period <= 0:
+            return delta
+        half = period // 2
+        if delta > half:
+            return delta - period
+        if delta < -half:
+            return delta + period
+        return delta
+
+    def _center_ijk(element_idx: int) -> tuple[int, int, int] | None:
+        if center_type == "Edge":
+            ijk = index_map.edge_to_ijk[element_idx]
+            return int(ijk[0]), int(ijk[1]), int(ijk[2])
+        if center_type == "Vertex":
+            ij = index_map.vertex_to_ij[element_idx]
+            return int(ij[0]), int(ij[1]), 0
+        if center_type == "Cell":
+            if cell_to_ijk is None or element_idx >= cell_to_ijk.shape[0]:
+                return None
+            ijk = cell_to_ijk[element_idx]
+            return int(ijk[0]), int(ijk[1]), int(ijk[2])
+        return None
+
+    def _neighbor_ijk(neighbor_idx: int) -> tuple[int, int, int] | None:
+        ntype = _CENTER_ELEMENT_BY_PREFIX.get(local_dim_name[-1], "Edge")
+        if ntype == "Edge":
+            ijk = index_map.edge_to_ijk[neighbor_idx]
+            return int(ijk[0]), int(ijk[1]), int(ijk[2])
+        if ntype == "Vertex":
+            ij = index_map.vertex_to_ij[neighbor_idx]
+            return int(ij[0]), int(ij[1]), 0
+        if ntype == "Cell":
+            if cell_to_ijk is None or neighbor_idx >= cell_to_ijk.shape[0]:
+                return None
+            ijk = cell_to_ijk[neighbor_idx]
+            return int(ijk[0]), int(ijk[1]), int(ijk[2])
+        return None
+
+    n_elem = min(coeff.shape[0], conn.shape[0])
+    for elem in range(n_elem):
+        center = _center_ijk(elem)
+        if center is None:
+            continue
+        ci, cj, ck = center
+        if ck < 0:
+            continue
+        r2s = rel_to_slots.get(ck, {})
+        for local in range(min(n_local, conn.shape[1])):
+            neighbor_idx = int(conn[elem, local])
+            if neighbor_idx < 0:
+                continue
+            nbr = _neighbor_ijk(neighbor_idx)
+            if nbr is None:
+                continue
+            ni_, nj_, nk_ = nbr
+            rel = (_normalize(ni_ - ci, max_i), _normalize(nj_ - cj, max_j), nk_)
+            slots = r2s.get(rel)
+            if slots is None:
+                continue
+            for slot in slots:
+                if slot < n_local:
+                    out[ci, cj, ck, slot, ...] = coeff[elem, local, ...]
+    return out
 
 @dataclass(frozen=True)
 class IndexMap:

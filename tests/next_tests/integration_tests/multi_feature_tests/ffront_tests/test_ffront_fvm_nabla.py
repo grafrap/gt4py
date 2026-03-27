@@ -38,7 +38,7 @@ from gt4py.next.modules.translator import (
     IDim,
     JDim,
     Kolor,
-    build_structured_sign_from_unstructured,
+    pack_sparse_local_field_to_structured,
     build_index_map_from_lonlat_e2v,
     pack_edge_field_to_structured,
     pack_vertex_field,
@@ -115,6 +115,21 @@ def _edge_interior_mask(index_map, remap_sizes):
     j = ijk[:, 1]
     valid = (i >= 0) & (j >= 0)
     return valid & (i >= i_lo) & (i < i_hi) & (j >= j_lo) & (j < j_hi)
+
+
+def _edge_structured_active_mask(index_map, remap_sizes):
+    """Kolor-aware edge mask matching structured edge write extents."""
+    i_lo, i_hi, j_lo, j_hi = _interior_ij_bounds(remap_sizes)
+    ijk = index_map.edge_to_ijk
+    i = ijk[:, 0]
+    j = ijk[:, 1]
+    k = ijk[:, 2]
+
+    valid = (i >= 0) & (j >= 0) & (k >= 0)
+    k0 = (k == 0) & (i >= i_lo) & (i < i_hi) & (j >= j_lo) & (j < (j_hi - 1))
+    k1 = (k == 1) & (i >= i_lo) & (i < (i_hi - 1)) & (j >= j_lo) & (j < j_hi)
+    k2 = (k == 2) & (i >= i_lo) & (i < (i_hi - 1)) & (j >= j_lo) & (j < (j_hi - 1))
+    return valid & (k0 | k1 | k2)
 
 
 @gtx.field_operator
@@ -266,12 +281,12 @@ def test_ffront_compute_zavgS_parallelogram_grid(exec_alloc_descriptor):
 
     e2v_conn = setup.edges2node_connectivity.asnumpy()
     valid = np.all(e2v_conn >= 0, axis=1)
+    active = valid & _edge_structured_active_mask(index_map, remap_sizes)
     pp = setup.input_field.asnumpy()
     s_m = setup.S_fields[0].asnumpy()
     ref = np.zeros_like(s_m)
-    interior_edges = _edge_interior_mask(index_map, remap_sizes)
-    ref[valid & interior_edges] = s_m[valid & interior_edges] * 0.5 * (
-        pp[e2v_conn[valid & interior_edges, 0]] + pp[e2v_conn[valid & interior_edges, 1]]
+    ref[active] = s_m[active] * 0.5 * (
+        pp[e2v_conn[active, 0]] + pp[e2v_conn[active, 1]]
     )
 
     assert np.isfinite(zavgS_np).all()
@@ -358,17 +373,15 @@ def test_ffront_nabla_parallelogram_grid(exec_alloc_descriptor):
     #     allocator=exec_alloc_descriptor.allocator
     # )
     s_m_struct_np = pack_edge_field_to_structured(setup.S_fields[0].asnumpy(), index_map)
-    sign_struct_np = np.stack(
-        build_structured_sign_from_unstructured(
-            setup.sign_field.asnumpy(),
-            setup.nodes2edge_connectivity.asnumpy(),
-            index_map,
-        ),
-        axis=-1,
+    sign_struct_np = pack_sparse_local_field_to_structured(
+        coeff=setup.sign_field.asnumpy(),
+        connectivity=setup.nodes2edge_connectivity.asnumpy(),
+        index_map=index_map,
+        local_dim_name="V2E",
     )
     
     assert sign_struct_np.ndim == 4
-    assert sign_struct_np.shape[2] == 1
+    assert sign_struct_np.shape[2] == 3
     assert sign_struct_np.shape[3] == 6
     vol_struct_np = pack_vertex_field_to_structured(setup.vol_field.asnumpy(), index_map)
     pnabla_mxx_struct_np = np.zeros_like(vol_struct_np)
@@ -538,13 +551,11 @@ def _prepare_parallelogram_structured_case(exec_alloc_descriptor):
     #     allocator=exec_alloc_descriptor.allocator
     # )
     s_m_struct_np = pack_edge_field_to_structured(setup.S_fields[0].asnumpy(), index_map)
-    sign_struct_np = np.stack(
-        build_structured_sign_from_unstructured(
-            setup.sign_field.asnumpy(),
-            setup.nodes2edge_connectivity.asnumpy(),
-            index_map,
-        ),
-        axis=-1,
+    sign_struct_np = pack_sparse_local_field_to_structured(
+        coeff=setup.sign_field.asnumpy(),
+        connectivity=setup.nodes2edge_connectivity.asnumpy(),
+        index_map=index_map,
+        local_dim_name="V2E",
     )
     vol_struct_np = pack_vertex_field_to_structured(setup.vol_field.asnumpy(), index_map)
 

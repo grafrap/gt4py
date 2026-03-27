@@ -133,6 +133,136 @@ _CENTER_ELEMENT_BY_PREFIX: dict[str, str] = {
     "V": "Vertex",
 }
 
+
+def pack_sparse_local_field_to_structured(
+    coeff: np.ndarray,
+    connectivity: np.ndarray,
+    index_map: IndexMap,
+    local_dim_name: str,
+    *,
+    cell_to_ijk: np.ndarray | None = None,
+) -> np.ndarray:
+    """Pack sparse-local coefficients into structured [I, J, Kolor, Local, ...].
+
+    Args:
+        coeff: Unstructured sparse-local coefficients, shape [center, local, ...].
+        connectivity: Unstructured local connectivity, shape [center, local].
+        index_map: Structured index map.
+        local_dim_name: Connectivity/local dimension name (e.g. "V2E", "E2C2E").
+        cell_to_ijk: Optional cell mapping for cell-centered connectivities.
+    """
+    if coeff.ndim < 2:
+        raise ValueError("Sparse-local coefficients must have at least 2 dimensions [center, local, ...].")
+
+    remap = _SPARSE_REMAP_TABLE.get(local_dim_name)
+    if remap is None:
+        raise KeyError(f"Unsupported sparse-local dimension '{local_dim_name}'.")
+
+    conn = np.asarray(connectivity, dtype=np.int32)
+    if conn.ndim != 2:
+        raise ValueError("Sparse-local connectivity must be 2-D [center, local].")
+
+    ni, nj, n_kolor = index_map.ijk_to_edge.shape
+    max_i, max_j = index_map.ij_to_vertex.shape
+    n_local = coeff.shape[1]
+    tail_shape = coeff.shape[2:]
+
+    if np.issubdtype(coeff.dtype, np.integer):
+        out = np.full((ni, nj, n_kolor, n_local, *tail_shape), -1, dtype=coeff.dtype)
+    else:
+        out = np.zeros((ni, nj, n_kolor, n_local, *tail_shape), dtype=coeff.dtype)
+
+    if local_dim_name == "E2C":
+        n_elem = min(coeff.shape[0], index_map.edge_to_ijk.shape[0])
+        n_local_eff = min(n_local, conn.shape[1])
+        for elem in range(n_elem):
+            ci, cj, ck = (int(v) for v in index_map.edge_to_ijk[elem])
+            if ci < 0 or cj < 0 or ck < 0:
+                continue
+            for local in range(n_local_eff):
+                out[ci, cj, ck, local, ...] = coeff[elem, local, ...]
+        return out
+
+    center_type = _CENTER_ELEMENT_BY_PREFIX.get(local_dim_name[0], "Edge")
+
+    rel_to_slots: dict[int, dict[tuple[int, int, int], list[int]]] = {}
+    for ck, slot_map in remap.items():
+        r2s: dict[tuple[int, int, int], list[int]] = {}
+        for slot, (di, dj, nk) in slot_map.items():
+            key = (di, dj, nk)
+            r2s.setdefault(key, []).append(slot)
+        rel_to_slots[int(ck)] = r2s
+
+    def _normalize(delta: int, period: int) -> int:
+        if period <= 0:
+            return delta
+        half = period // 2
+        if delta > half:
+            return delta - period
+        if delta < -half:
+            return delta + period
+        return delta
+
+    def _center_ijk(element_idx: int) -> tuple[int, int, int] | None:
+        if center_type == "Edge":
+            ijk = index_map.edge_to_ijk[element_idx]
+            return int(ijk[0]), int(ijk[1]), int(ijk[2])
+        if center_type == "Vertex":
+            ij = index_map.vertex_to_ij[element_idx]
+            return int(ij[0]), int(ij[1]), 0
+        if center_type == "Cell":
+            if cell_to_ijk is None or element_idx >= cell_to_ijk.shape[0]:
+                return None
+            ijk = cell_to_ijk[element_idx]
+            return int(ijk[0]), int(ijk[1]), int(ijk[2])
+        return None
+
+    def _neighbor_ijk(neighbor_idx: int) -> tuple[int, int, int] | None:
+        last_char = local_dim_name[-1]
+        ntype = _CENTER_ELEMENT_BY_PREFIX.get(last_char, "Edge")
+        if ntype == "Edge":
+            ijk = index_map.edge_to_ijk[neighbor_idx]
+            return int(ijk[0]), int(ijk[1]), int(ijk[2])
+        if ntype == "Vertex":
+            ij = index_map.vertex_to_ij[neighbor_idx]
+            return int(ij[0]), int(ij[1]), 0
+        if ntype == "Cell":
+            if cell_to_ijk is None or neighbor_idx >= cell_to_ijk.shape[0]:
+                return None
+            ijk = cell_to_ijk[neighbor_idx]
+            return int(ijk[0]), int(ijk[1]), int(ijk[2])
+        return None
+
+    n_elem = min(coeff.shape[0], conn.shape[0])
+    for elem in range(n_elem):
+        center = _center_ijk(elem)
+        if center is None:
+            continue
+        ci, cj, ck = center
+        if ck < 0:
+            continue
+        r2s = rel_to_slots.get(ck, {})
+        for local in range(min(n_local, conn.shape[1])):
+            neighbor_idx = int(conn[elem, local])
+            if neighbor_idx < 0:
+                continue
+            nbr = _neighbor_ijk(neighbor_idx)
+            if nbr is None:
+                continue
+            ni_, nj_, nk_ = nbr
+            rel = (
+                _normalize(ni_ - ci, max_i),
+                _normalize(nj_ - cj, max_j),
+                nk_,
+            )
+            slots = r2s.get(rel)
+            if slots is None:
+                continue
+            for slot in slots:
+                if slot < n_local:
+                    out[ci, cj, ck, slot, ...] = coeff[elem, local, ...]
+    return out
+
 _CACHED_INDEX_MAP = None
 _CACHED_REMAP_SIZES = None
 _CACHED_EDGE_COUNT = None
@@ -569,118 +699,21 @@ class GenericStructuredWrapper:
         """
         local_dim = self._get_local_dim_name(field)
         conn = self._raw_conn.get(local_dim)
-        remap = _SPARSE_REMAP_TABLE.get(local_dim)
+        if conn is None:
+            ni, nj, n_kolor = self.index_map.ijk_to_edge.shape
+            n_local = coeff.shape[1]
+            tail_shape = coeff.shape[2:]
+            if np.issubdtype(coeff.dtype, np.integer):
+                return np.full((ni, nj, n_kolor, n_local, *tail_shape), -1, dtype=coeff.dtype)
+            return np.zeros((ni, nj, n_kolor, n_local, *tail_shape), dtype=coeff.dtype)
 
-        ni, nj, n_kolor = self.index_map.ijk_to_edge.shape
-        n_local = coeff.shape[1]
-        tail_shape = coeff.shape[2:]
-        if np.issubdtype(coeff.dtype, np.integer):
-            out = np.full((ni, nj, n_kolor, n_local, *tail_shape), -1, dtype=coeff.dtype)
-        else:
-            out = np.zeros((ni, nj, n_kolor, n_local, *tail_shape), dtype=coeff.dtype)
-
-        if conn is None or remap is None:
-            return out
-
-        if local_dim == "E2C":
-            n_elem = min(coeff.shape[0], self.index_map.edge_to_ijk.shape[0])
-            n_local_eff = min(n_local, conn.shape[1])
-            for elem in range(n_elem):
-                ci, cj, ck = (int(v) for v in self.index_map.edge_to_ijk[elem])
-                if ci < 0 or cj < 0 or ck < 0:
-                    continue
-                for local in range(n_local_eff):
-                    out[ci, cj, ck, local, ...] = coeff[elem, local, ...]
-            return out
-
-        center_type = _CENTER_ELEMENT_BY_PREFIX.get(local_dim[0], "Edge")
-
-        # Build reverse map: (center_kolor, di, dj, neighbor_kolor) -> [slot, ...]
-        # to handle the rare case where multiple slots share the same relation.
-        rel_to_slots: dict[int, dict[tuple[int, int, int], list[int]]] = {}
-        for ck, slot_map in remap.items():
-            r2s: dict[tuple[int, int, int], list[int]] = {}
-            for slot, (di, dj, nk) in slot_map.items():
-                key = (di, dj, nk)
-                r2s.setdefault(key, []).append(slot)
-            rel_to_slots[int(ck)] = r2s
-
-        def _normalize(delta: int, period: int) -> int:
-            if period <= 0:
-                return delta
-            half = period // 2
-            if delta > half:
-                return delta - period
-            if delta < -half:
-                return delta + period
-            return delta
-
-        def _center_ijk(element_idx: int) -> tuple[int, int, int] | None:
-            """Return (i, j, kolor) for the center element, or None if unmapped."""
-            if center_type == "Edge":
-                ijk = self.index_map.edge_to_ijk[element_idx]
-                return int(ijk[0]), int(ijk[1]), int(ijk[2])
-            elif center_type == "Vertex":
-                ij = self.index_map.vertex_to_ij[element_idx]
-                return int(ij[0]), int(ij[1]), 0
-            elif center_type == "Cell":
-                if self.cell_to_ijk is None or element_idx >= self.cell_to_ijk.shape[0]:
-                    return None
-                ijk = self.cell_to_ijk[element_idx]
-                return int(ijk[0]), int(ijk[1]), int(ijk[2])
-            else:
-                return None
-
-        def _neighbor_ijk(neighbor_idx: int) -> tuple[int, int, int] | None:
-            """Return (i, j, kolor) for the neighbor element. The neighbor type is
-            the element type encoded by the *last* character of the connectivity name.
-            E.g. for 'E2C2E' the neighbor is Edge; for 'C2E' the neighbor is Edge;
-            for 'V2E' the neighbor is Edge; for 'E2C' the neighbor is Cell."""
-            last_char = local_dim[-1]
-            ntype = _CENTER_ELEMENT_BY_PREFIX.get(last_char, "Edge")
-            if ntype == "Edge":
-                ijk = self.index_map.edge_to_ijk[neighbor_idx]
-                return int(ijk[0]), int(ijk[1]), int(ijk[2])
-            elif ntype == "Vertex":
-                ij = self.index_map.vertex_to_ij[neighbor_idx]
-                return int(ij[0]), int(ij[1]), 0
-            elif ntype == "Cell":
-                if self.cell_to_ijk is None or neighbor_idx >= self.cell_to_ijk.shape[0]:
-                    return None
-                ijk = self.cell_to_ijk[neighbor_idx]
-                return int(ijk[0]), int(ijk[1]), int(ijk[2])
-            else:
-                return None
-
-        n_elem = min(coeff.shape[0], conn.shape[0])
-        for elem in range(n_elem):
-            center = _center_ijk(elem)
-            if center is None:
-                continue
-            ci, cj, ck = center
-            if ck < 0:
-                continue
-            r2s = rel_to_slots.get(ck, {})
-            for local in range(min(n_local, conn.shape[1])):
-                neighbor_idx = int(conn[elem, local])
-                if neighbor_idx < 0:
-                    continue
-                nbr = _neighbor_ijk(neighbor_idx)
-                if nbr is None:
-                    continue
-                ni_, nj_, nk_ = nbr
-                rel = (
-                    _normalize(ni_ - ci, self.max_i),
-                    _normalize(nj_ - cj, self.max_j),
-                    nk_,
-                )
-                slots = r2s.get(rel)
-                if slots is None:
-                    continue
-                for slot in slots:
-                    if slot < n_local:
-                        out[ci, cj, ck, slot, ...] = coeff[elem, local, ...]
-        return out
+        return pack_sparse_local_field_to_structured(
+            coeff=coeff,
+            connectivity=conn,
+            index_map=self.index_map,
+            local_dim_name=local_dim,
+            cell_to_ijk=self.cell_to_ijk,
+        )
 
     def _pack_argument(self, field):
         if not getattr(field, "domain", None):

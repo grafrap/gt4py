@@ -10,7 +10,7 @@ from gt4py.next.modules.translator import (
     pack_edge_field_to_structured,
     unpack_vertex_field_to_unstructured,
     unpack_edge_field,
-    build_structured_sign_from_unstructured
+    pack_sparse_local_field_to_structured,
 )
 
 class StructuredExecutionWrapper:
@@ -41,9 +41,11 @@ class StructuredExecutionWrapper:
         # 1. Sparse fields (e.g., Sign: [Vertex, V2EDim])
         if self._is_unstructured(field, "Vertex") and np_data.ndim == 2:
             local_dim = field.domain.dims[1] 
-            struct_np = np.stack(
-                build_structured_sign_from_unstructured(np_data, self.v2e_conn, self.index_map),
-                axis=-1
+            struct_np = pack_sparse_local_field_to_structured(
+                coeff=np_data,
+                connectivity=self.v2e_conn,
+                index_map=self.index_map,
+                local_dim_name=getattr(local_dim, "value", "V2E"), # TODO: make this more general
             )
             return gtx.as_field([IDim, JDim, Kolor, local_dim], struct_np, allocator=self.allocator)
             
