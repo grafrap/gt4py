@@ -22,3 +22,17 @@ str = "Vertex"
 b_level = 2
 array = np.linspace(0.1, N*0.1, N)
 print(transform_to_unstructured(array, nx, str, b_level))
+
+N = 3 * 6 * 6 + 6 + 6
+nx = 6
+str = "Edge"
+b_level = 3
+array = np.linspace(0.1, N*0.1, N)
+print(transform_to_unstructured(array, nx, str, b_level))
+
+N = 2 * 6 * 6
+nx = 6
+str = "Cell"
+b_level = 2
+array = np.linspace(0.1, N*0.1, N)
+print(transform_to_unstructured(array, nx, str, b_level))
