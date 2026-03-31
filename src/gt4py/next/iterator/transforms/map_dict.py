@@ -105,7 +105,7 @@ map_dict = {# V2E:
 
             # From now on, we need concat_where to sort out the cases,
             #  as we have more than one Kolor mappint to the current index
-            # E2V: 
+            # E2V: # TODO: maybe change shifts for some edge kolors, since order matters.
             (ir.OffsetLiteral(value="E2V"), ir.OffsetLiteral(value=0)): {
                 "kind": "concat_where",
                 "branches": (
@@ -165,16 +165,16 @@ map_dict = {# V2E:
                 ),
             },
 
-            # E2C:
+            # E2C: # TODO: maybe change shifts for edge kolor 0 and 2, to reproduce old behavior.
             (ir.OffsetLiteral(value="E2C"), ir.OffsetLiteral(value=0)): {
                 "kind": "concat_where",
                 "branches": (
                     (
                         _kolor_slice(0, 1),  # edge kolor 0 -> cell (i, j, 0)
                         (
-                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=-1),
                             ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
-                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=1),
                         ),
                     ),
                     (
@@ -190,7 +190,7 @@ map_dict = {# V2E:
                         (
                             ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
                             ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
-                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=-2),
+                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=-1),
                         ),
                     ),
                 ),
@@ -201,9 +201,9 @@ map_dict = {# V2E:
                     (
                         _kolor_slice(0, 1),  # edge kolor 0 -> cell (i-1, j, 1)
                         (
-                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=-1),
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
                             ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
-                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=1),
+                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=0),
                         ),
                     ),
                     (
@@ -219,7 +219,7 @@ map_dict = {# V2E:
                         (
                             ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
                             ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
-                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=-1),
+                            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=-2),
                         ),
                     ),
                 ),
