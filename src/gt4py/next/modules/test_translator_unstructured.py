@@ -36,3 +36,31 @@ str = "Cell"
 b_level = 2
 array = np.linspace(0.1, N*0.1, N)
 print(transform_to_unstructured(array, nx, str, b_level))
+
+N = 7 * 7
+nx = 6
+str = "Vertex"
+b_level = 4
+array = np.linspace(0.1, N*0.1, N)
+print(transform_to_unstructured(array, nx, str, b_level))
+
+N = 12 * 12
+nx = 11
+str = "Vertex"
+b_level = 5
+array = np.linspace(0.1, N*0.1, N)
+print(transform_to_unstructured(array, nx, str, b_level))
+
+N = 2 * 11 * 11
+nx = 11
+str = "Cell"
+b_level = 4
+array = np.linspace(0.1, N*0.1, N)
+print(transform_to_unstructured(array, nx, str, b_level))
+
+N = 3 * 11 * 11 + 11 + 11
+nx = 11
+str = "Edge"
+b_level = 11
+array = np.linspace(0.1, N*0.1, N)
+print(transform_to_unstructured(array, nx, str, b_level))
