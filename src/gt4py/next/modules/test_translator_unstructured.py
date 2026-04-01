@@ -64,3 +64,11 @@ str = "Edge"
 b_level = 11
 array = np.linspace(0.1, N*0.1, N)
 print(transform_to_unstructured(array, nx, str, b_level))
+
+nx = 13
+ny = 16
+N = (nx + 1) * (ny + 1)
+str = "Vertex"
+b_level = 5
+array = np.linspace(0.1, N*0.1, N)
+print(transform_to_unstructured(array, nx, str, b_level))

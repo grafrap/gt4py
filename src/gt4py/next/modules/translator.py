@@ -781,7 +781,7 @@ def transform_to_unstructured(field: np.ndarray, nx: int, grid_obj: str = "Edge"
             # cycle through the edges in the current boundary level, then fill the interior edges
             transform_array[idx:idx+nx - 2*level] = np.arange(0+level*(nx+1), nx+level*(nx-1), 1)  # south boundary edges
             idx += nx-2*level
-            transform_array[idx:idx+ny - 2*level] = np.arange(kolor_1_start + nx + level * nx, kolor_2_start - level*(nx-1), nx+1) # east boundary edges
+            transform_array[idx:idx+ny - 2*level] = np.arange(kolor_1_start + nx + level * nx, kolor_2_start - level*(nx), nx+1) # east boundary edges
             idx += ny - 2*level
             transform_array[idx:idx+nx - 2*level] = np.arange(kolor_1_start-1 - level * (nx+1), kolor_1_start - 1 - nx - level * (nx - 1), -1)  # north boundary edges
             idx += nx - 2*level
@@ -885,7 +885,7 @@ def transform_to_unstructured(field: np.ndarray, nx: int, grid_obj: str = "Edge"
             transform_array[idx:idx+nx - 2 * level] = np.arange(N - 1 - level * (nx + 2), N - nx-1 - level * nx, -1)
             idx += nx - 2 * level
             # west boundary vertices:
-            transform_array[idx:idx+ny - 2 * level] = np.arange(N - nx - 1 - level * nx, 1 + level * (nx + 1), -nx - 1)
+            transform_array[idx:idx+ny - 2 * level] = np.arange(N - nx - 1 - level * nx, 1 + level * (nx + 2), -nx - 1)
             idx += ny - 2 * level
             if level + 1 == complete_levels:
                 print(f"Reached complete level at {level+1}, filling remaining vertices ascending.")
