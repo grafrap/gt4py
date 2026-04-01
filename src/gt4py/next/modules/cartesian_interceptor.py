@@ -414,7 +414,8 @@ class GenericStructuredWrapper:
         self.allocator = allocator
         self.operator_name = getattr(operator, "id", None) or getattr(operator, "__name__", "")
         self.debug_enabled = os.environ.get("GT4PY_STRUCTURED_DEBUG", "0") == "1"
-        self.max_i = int(remap_sizes.max_i)
+        self.remap_sizes = remap_sizes
+        self.max_i = int(self.remap_sizes.max_i)
         self.max_j = int(remap_sizes.max_j)
         
         # 1. Dynamically extract connectivities from the offset_provider.
@@ -490,7 +491,10 @@ class GenericStructuredWrapper:
                 return value.asnumpy()
         return None
 
-    def _sanitize_sparse_connectivity(self, conn: np.ndarray | None) -> np.ndarray | None:
+    def _sanitize_sparse_connectivity(
+        self,
+        conn: np.ndarray | None,
+    ) -> np.ndarray | None:
         if conn is None:
             return None
         sanitized = np.array(conn, copy=True)
@@ -499,7 +503,8 @@ class GenericStructuredWrapper:
             return sanitized
 
         row_max = sanitized.max(axis=1, keepdims=True)
-        # Keep fully-invalid rows untouched; fill partial invalid entries with last valid neighbor.
+        # Keep fully-invalid rows untouched; fill partial invalid entries with a
+        # valid placeholder for connectivities that do not encode masking via -1.
         has_valid = row_max >= 0
         fill_values = np.where(has_valid, 0, sanitized)
         # print(f"[structured-debug] fill values: {fill_values}")
@@ -707,13 +712,26 @@ class GenericStructuredWrapper:
                 return np.full((ni, nj, n_kolor, n_local, *tail_shape), -1, dtype=coeff.dtype)
             return np.zeros((ni, nj, n_kolor, n_local, *tail_shape), dtype=coeff.dtype)
 
-        return pack_sparse_local_field_to_structured(
+        packed = pack_sparse_local_field_to_structured(
             coeff=coeff,
             connectivity=conn,
             index_map=self.index_map,
             local_dim_name=local_dim,
             cell_to_ijk=self.cell_to_ijk,
         )
+
+        if local_dim in {"E2C2E", "E2C2EO"}:
+            # Keep sparse coefficients zero on clipped edge-shape center lines.
+            ni, nj, nk = packed.shape[:3]
+            i_idx = np.arange(ni, dtype=np.int32)[:, None, None]
+            j_idx = np.arange(nj, dtype=np.int32)[None, :, None]
+            k_idx = np.arange(nk, dtype=np.int32)[None, None, :]
+            invalid_center = np.zeros((ni, nj, nk), dtype=bool)
+            invalid_center |= np.isin(k_idx, (1, 2)) & (i_idx >= (self.remap_sizes.end_i - 1))
+            invalid_center |= np.isin(k_idx, (0, 2)) & (j_idx >= (self.remap_sizes.end_j - 1))
+            packed[invalid_center, ...] = 0
+
+        return packed
 
     def _pack_argument(self, field):
         if not getattr(field, "domain", None):
@@ -822,11 +840,6 @@ class GenericStructuredWrapper:
             else:
                 # print(f"Packing argument '{arg_name}' for operator '{self.operator_name}'")
                 packed_arg = self._pack_argument(arg_val)
-                if (
-                    isinstance(packed_arg, (int, np.integer))
-                    and arg_name.startswith("horizontal_start")
-                ):
-                    packed_arg = type(packed_arg)(0)
                 structured_kwargs[arg_name] = packed_arg
                 if getattr(arg_val, "domain", None) is not None:
                     packed_fields.append((arg_val, packed_arg))

@@ -397,8 +397,25 @@ def _collect_and_check_dimensions(input_: ts.TypeSpec) -> list[common.Dimension]
     return common.promote_dims(*all_input_dims)
 
 
+def _domain_dims_from_type(domain: ts.TypeSpec) -> list[common.Dimension]:
+    """Extract domain dimensions from a DomainType or tuple of DomainType.
+
+    Some transformed cartesian programs can temporarily represent the domain as a
+    tuple of DomainType values. In that case we promote all member dimensions.
+    """
+    if isinstance(domain, ts.DomainType):
+        return domain.dims
+
+    if isinstance(domain, ts.TupleType):
+        domain_members = [member for member in domain.types if isinstance(member, ts.DomainType)]
+        if domain_members:
+            return common.promote_dims(*(member.dims for member in domain_members))
+
+    raise TypeError(f"Expected DomainType (or tuple of DomainType), got {type(domain)!r}.")
+
+
 def _convert_as_fieldop_input_to_iterator(
-    domain: ts.DomainType, input_: ts.TypeSpec
+    domain: ts.TypeSpec, input_: ts.TypeSpec
 ) -> it_ts.IteratorType:
     """
     Convert a field operation input into an iterator type, preserving its dimensions and data type.
@@ -409,7 +426,9 @@ def _convert_as_fieldop_input_to_iterator(
     )
 
     return it_ts.IteratorType(
-        position_dims=domain.dims, defined_dims=input_dims, element_type=element_type
+        position_dims=_domain_dims_from_type(domain),
+        defined_dims=input_dims,
+        element_type=element_type,
     )
 
 
@@ -607,7 +626,7 @@ def as_fieldop(
 
         return type_info.apply_to_primitive_constituents(
             lambda el_type: ts.FieldType(
-                dims=domain.dims,
+                dims=_domain_dims_from_type(domain),
                 dtype=el_type,
             ),
             stencil_return,

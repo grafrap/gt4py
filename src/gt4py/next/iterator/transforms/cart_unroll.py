@@ -65,7 +65,11 @@ def _make_lifted_deref_shift(
 def _needs_edge_shape_bounds(connectivity: str | None) -> bool:
     if connectivity is None:
         return False
-    return connectivity == "E2V"
+    normalized = connectivity.replace("ₒ", "").replace("_o", "")
+    # Any sparse connectivity that dereferences edge neighbors can hit
+    # padded edge slots in structured layout and therefore needs edge-shape
+    # clipping for shifted dereferences.
+    return normalized in {"E2V", "E2C2EO"}
 
 
 
