@@ -120,7 +120,7 @@ map_dict = {# V2E:
                     (
                         _kolor_slice(1, 2),
                         (
-                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=1),
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
                             ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
                             ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=-1),
                         ),
@@ -149,7 +149,7 @@ map_dict = {# V2E:
                     (
                         _kolor_slice(1, 2),
                         (
-                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=1),
                             ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=0),
                             ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=-1),
                         ),

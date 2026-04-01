@@ -218,7 +218,7 @@ def pack_sparse_local_field_to_structured(
         return None
 
     def _neighbor_ijk(neighbor_idx: int) -> tuple[int, int, int] | None:
-        last_char = local_dim_name[-1]
+        last_char = local_dim_name[-1] if local_dim_name[-1] != "O" else local_dim_name[-2]
         ntype = _CENTER_ELEMENT_BY_PREFIX.get(last_char, "Edge")
         if ntype == "Edge":
             ijk = index_map.edge_to_ijk[neighbor_idx]

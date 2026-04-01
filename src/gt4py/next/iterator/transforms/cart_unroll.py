@@ -768,6 +768,18 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
             if axis_name not in kolor_stops: return None
             return ir.OffsetLiteral(value=0), ir.OffsetLiteral(value=kolor_stops[axis_name])
 
+        def _entity_cartesian_bounds(entity_name: str, axis_name: str) -> tuple[ir.Expr, ir.Expr] | None:
+            bounds = _cartesian_axis_bounds(axis_name)
+            if bounds is None:
+                return None
+            lo, hi = bounds
+            # Cell-centered fields live on nx*ny interior cells, not on the full
+            # vertex-like (nx+1)*(ny+1) extent. Clip one extra layer on both
+            # horizontal axes when remapping Cell domains.
+            if entity_name == "Cell":
+                hi = _offset_sub(hi, ir.OffsetLiteral(value=1))
+            return lo, hi
+
         def _axis_name(axis_expr: ir.Expr) -> str | None:
             if isinstance(axis_expr, ir.AxisLiteral) and isinstance(axis_expr.value, str): return axis_expr.value
             if isinstance(axis_expr, common.Dimension): return axis_expr.value
@@ -802,8 +814,8 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
             if cpm.is_call_to(nr, "named_range") and len(nr.args) == 3:
                 axis_name = _axis_name(nr.args[0])
                 if axis_name in {"Edge", "Vertex", "Cell"}:
-                    idim_bounds = _cartesian_axis_bounds("IDim")
-                    jdim_bounds = _cartesian_axis_bounds("JDim")
+                    idim_bounds = _entity_cartesian_bounds(axis_name, "IDim")
+                    jdim_bounds = _entity_cartesian_bounds(axis_name, "JDim")
                     kolor_bounds = _entity_kolor_bounds(axis_name)
                     if idim_bounds is not None and jdim_bounds is not None and kolor_bounds is not None:
                         IDim = common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL)
@@ -823,8 +835,8 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                     axis_name = _axis_name(nr.args[0])
                     # If it's a horizontal unstructured dimension, split it into 3 Cartesian dimensions
                     if axis_name in {"Edge", "Vertex", "Cell"}:
-                        idim_bounds = _cartesian_axis_bounds("IDim")
-                        jdim_bounds = _cartesian_axis_bounds("JDim")
+                        idim_bounds = _entity_cartesian_bounds(axis_name, "IDim")
+                        jdim_bounds = _entity_cartesian_bounds(axis_name, "JDim")
                         kolor_bounds = _entity_kolor_bounds(axis_name)
                         if idim_bounds is not None and jdim_bounds is not None and kolor_bounds is not None:
                             IDim = common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL)
