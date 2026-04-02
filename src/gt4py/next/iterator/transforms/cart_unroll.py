@@ -768,7 +768,12 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
             if axis_name not in kolor_stops: return None
             return ir.OffsetLiteral(value=0), ir.OffsetLiteral(value=kolor_stops[axis_name])
 
-        def _entity_cartesian_bounds(entity_name: str, axis_name: str) -> tuple[ir.Expr, ir.Expr] | None:
+        def _entity_cartesian_bounds(
+            entity_name: str,
+            axis_name: str,
+            *,
+            extra_halo: int = 0,
+        ) -> tuple[ir.Expr, ir.Expr] | None:
             bounds = _cartesian_axis_bounds(axis_name)
             if bounds is None:
                 return None
@@ -778,6 +783,10 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
             # horizontal axes when remapping Cell domains.
             if entity_name == "Cell":
                 hi = _offset_sub(hi, ir.OffsetLiteral(value=1))
+            if axis_name in {"IDim", "JDim"} and extra_halo > 0:
+                extra = ir.OffsetLiteral(value=extra_halo)
+                lo = _offset_add(lo, extra)
+                hi = _offset_sub(hi, extra)
             return lo, hi
 
         def _axis_name(axis_expr: ir.Expr) -> str | None:
@@ -785,9 +794,9 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
             if isinstance(axis_expr, common.Dimension): return axis_expr.value
             return getattr(axis_expr, "value", None) if isinstance(getattr(axis_expr, "value", None), str) else None
 
-        def _structured_entity_condition(entity_name: str) -> ir.Expr | None:
-            idim_bounds = _entity_cartesian_bounds(entity_name, "IDim")
-            jdim_bounds = _entity_cartesian_bounds(entity_name, "JDim")
+        def _structured_entity_condition(entity_name: str, *, extra_halo: int = 0) -> ir.Expr | None:
+            idim_bounds = _entity_cartesian_bounds(entity_name, "IDim", extra_halo=extra_halo)
+            jdim_bounds = _entity_cartesian_bounds(entity_name, "JDim", extra_halo=extra_halo)
             kolor_bounds = _entity_kolor_bounds(entity_name)
             if idim_bounds is None or jdim_bounds is None or kolor_bounds is None:
                 return None
@@ -801,6 +810,11 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                 im.named_range(Kolor, *kolor_bounds),
             )
             return _concat_where_condition_from_domain(domain_expr)
+
+        def _expr_symbol_id(expr: ir.Expr) -> str | None:
+            if isinstance(expr, ir.SymRef):
+                return str(expr.id)
+            return None
 
         # Remap scalar comparisons against unstructured horizontal axes (Edge/Vertex/Cell)
         # to structured IDim/JDim conditions so concat_where predicates stay structured.
@@ -820,7 +834,15 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
 
             if entity_axis is not None:
                 op_name = str(new_node.fun.id)
-                interior_cond = _structured_entity_condition(entity_axis)
+                threshold_expr = rhs if axis_side == "lhs" else lhs
+                threshold_id = _expr_symbol_id(threshold_expr)
+
+                extra_halo = 0
+                if entity_axis == "Edge" and threshold_id == "start_2nd_nudge_line_idx_e":
+                    # Equivalent to translator edge remap with boundary_level=10.
+                    extra_halo = 4
+
+                interior_cond = _structured_entity_condition(entity_axis, extra_halo=extra_halo)
                 if interior_cond is not None:
                     is_positive = (
                         (axis_side == "lhs" and op_name in {"greater_equal", "greater"})
