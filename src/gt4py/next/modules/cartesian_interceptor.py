@@ -807,26 +807,6 @@ class GenericStructuredWrapper:
     def __call__(self, **kwargs):
         structured_kwargs = {}
         packed_fields: list[tuple[object, object]] = []
-        runtime_offset_provider = kwargs.get("offset_provider")
-        debug_tangential = self.debug_enabled and "compute_tangential_wind" in str(self.operator_name)
-
-        debug_vn: np.ndarray | None = None
-        debug_coeff: np.ndarray | None = None
-        debug_e2c2e_raw: np.ndarray | None = None
-        debug_e2c2e_effective: np.ndarray | None = None
-        if debug_tangential and {"vn", "rbf_vec_coeff_e", "vt"}.issubset(kwargs):
-            debug_vn = np.array(kwargs["vn"].asnumpy(), copy=True)
-            debug_coeff = np.array(kwargs["rbf_vec_coeff_e"].asnumpy(), copy=True)
-            runtime_e2c2e_raw = None
-            if runtime_offset_provider:
-                for key, value in runtime_offset_provider.items():
-                    key_name = getattr(key, "value", str(key))
-                    if key_name == "E2C2E" and hasattr(value, "asnumpy"):
-                        runtime_e2c2e_raw = value.asnumpy()
-                        break
-            if runtime_e2c2e_raw is not None:
-                debug_e2c2e_raw = np.array(runtime_e2c2e_raw, copy=True)
-                debug_e2c2e_effective = self._sanitize_sparse_connectivity(runtime_e2c2e_raw)
 
         for arg_name, arg_val in kwargs.items():
             if arg_name == "offset_provider":
@@ -847,18 +827,25 @@ class GenericStructuredWrapper:
         compiled = self._compiled_program
         if isinstance(compiled, functools.partial) and hasattr(compiled.func, "_compiled_programs"):
             bound_kwargs = dict(compiled.keywords or {})
-            offset_provider = bound_kwargs.pop(
-                "offset_provider", self.structured_offset_provider
-            )
+            offset_provider = bound_kwargs.pop("offset_provider", self.structured_offset_provider)
             enable_jit = bound_kwargs.pop("enable_jit", None)
-            bound_kwargs.pop("offset_provider", None)
-            call_kwargs = {**bound_kwargs, **structured_kwargs}
+
+            merged_kwargs = {**bound_kwargs, **structured_kwargs}
+
+            params = getattr(compiled.func.past_stage.past_node, "params", ())
+            ordered_args = []
+            for param in params:
+                name = str(param.id)
+                if name in merged_kwargs:
+                    ordered_args.append(merged_kwargs.pop(name))
+
             compiled.func._compiled_programs(
-                **call_kwargs,
+                *ordered_args,
                 offset_provider=offset_provider,
                 enable_jit=enable_jit,
             )
         else:
+            # Fallback for non-partial wrappers.
             self._compiled_program(**structured_kwargs)
 
         for original_field, packed_field in packed_fields:
