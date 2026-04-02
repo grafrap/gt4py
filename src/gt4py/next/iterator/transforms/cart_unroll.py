@@ -804,6 +804,47 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
             IDim = common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL)
             JDim = common.Dimension("JDim", kind=common.DimensionKind.HORIZONTAL)
             Kolor = common.Dimension("Kolor", kind=common.DimensionKind.HORIZONTAL)
+
+            def _axis_domain(axis: common.Dimension, lo: ir.Expr, hi: ir.Expr) -> ir.Expr:
+                return im.call("cartesian_domain")(
+                    im.named_range(copy.deepcopy(axis), copy.deepcopy(lo), copy.deepcopy(hi))
+                )
+
+            # Edge storage is stacked as three kolors with different valid extents:
+            # k0: nx*(ny+1), k1: (nx+1)*ny, k2: nx*ny.
+            # Keep comparator predicates kolor-aware to avoid carving out wrong
+            # interior stripes when one global IDim/JDim mask is applied.
+            if entity_name == "Edge" and extra_halo > 0:
+                i_lo, i_hi = idim_bounds
+                j_lo, j_hi = jdim_bounds
+                i_lo_k1k2 = _offset_sub(i_lo, ir.OffsetLiteral(value=1))
+                j_lo_k0k2 = _offset_sub(j_lo, ir.OffsetLiteral(value=1))
+                # i_hi_k1k2 = _offset_sub(i_hi, ir.OffsetLiteral(value=1))
+                # j_hi_k0k2 = _offset_sub(j_hi, ir.OffsetLiteral(value=1))
+
+                cond_k0 = im.and_(
+                    _axis_domain(Kolor, ir.OffsetLiteral(value=0), ir.OffsetLiteral(value=1)),
+                    im.and_(
+                        _axis_domain(IDim, i_lo, i_hi),
+                        _axis_domain(JDim, j_lo_k0k2, j_hi),
+                    ),
+                )
+                cond_k1 = im.and_(
+                    _axis_domain(Kolor, ir.OffsetLiteral(value=1), ir.OffsetLiteral(value=2)),
+                    im.and_(
+                        _axis_domain(IDim, i_lo_k1k2, i_hi),
+                        _axis_domain(JDim, j_lo, j_hi),
+                    ),
+                )
+                cond_k2 = im.and_(
+                    _axis_domain(Kolor, ir.OffsetLiteral(value=2), ir.OffsetLiteral(value=3)),
+                    im.and_(
+                        _axis_domain(IDim, i_lo_k1k2, i_hi),
+                        _axis_domain(JDim, j_lo_k0k2, j_hi),
+                    ),
+                )
+                return im.or_(cond_k0, im.or_(cond_k1, cond_k2))
+
             domain_expr = im.call("cartesian_domain")(
                 im.named_range(IDim, *idim_bounds),
                 im.named_range(JDim, *jdim_bounds),
