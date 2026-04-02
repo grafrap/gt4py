@@ -785,6 +785,49 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
             if isinstance(axis_expr, common.Dimension): return axis_expr.value
             return getattr(axis_expr, "value", None) if isinstance(getattr(axis_expr, "value", None), str) else None
 
+        def _structured_entity_condition(entity_name: str) -> ir.Expr | None:
+            idim_bounds = _entity_cartesian_bounds(entity_name, "IDim")
+            jdim_bounds = _entity_cartesian_bounds(entity_name, "JDim")
+            kolor_bounds = _entity_kolor_bounds(entity_name)
+            if idim_bounds is None or jdim_bounds is None or kolor_bounds is None:
+                return None
+
+            IDim = common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL)
+            JDim = common.Dimension("JDim", kind=common.DimensionKind.HORIZONTAL)
+            Kolor = common.Dimension("Kolor", kind=common.DimensionKind.HORIZONTAL)
+            domain_expr = im.call("cartesian_domain")(
+                im.named_range(IDim, *idim_bounds),
+                im.named_range(JDim, *jdim_bounds),
+                im.named_range(Kolor, *kolor_bounds),
+            )
+            return _concat_where_condition_from_domain(domain_expr)
+
+        # Remap scalar comparisons against unstructured horizontal axes (Edge/Vertex/Cell)
+        # to structured IDim/JDim conditions so concat_where predicates stay structured.
+        if cpm.is_call_to(new_node, ("greater_equal", "greater", "less_equal", "less")) and len(new_node.args) == 2:
+            lhs, rhs = new_node.args
+            lhs_axis = _axis_name(lhs)
+            rhs_axis = _axis_name(rhs)
+            axis_side = None
+            entity_axis = None
+
+            if lhs_axis in {"Edge", "Vertex", "Cell"}:
+                axis_side = "lhs"
+                entity_axis = lhs_axis
+            elif rhs_axis in {"Edge", "Vertex", "Cell"}:
+                axis_side = "rhs"
+                entity_axis = rhs_axis
+
+            if entity_axis is not None:
+                op_name = str(new_node.fun.id)
+                interior_cond = _structured_entity_condition(entity_axis)
+                if interior_cond is not None:
+                    is_positive = (
+                        (axis_side == "lhs" and op_name in {"greater_equal", "greater"})
+                        or (axis_side == "rhs" and op_name in {"less_equal", "less"})
+                    )
+                    return interior_cond if is_positive else im.not_(interior_cond)
+
         if cpm.is_call_to(new_node, "get_domain_range") and len(new_node.args) == 2:
             axis_name = _axis_name(new_node.args[1])
             if axis_name is not None and (bounds := _cartesian_axis_bounds(axis_name)) is not None:
