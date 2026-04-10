@@ -990,6 +990,7 @@ def build_index_map_from_lonlat_e2v(
             vertex_to_ij[int(v), 0] = i
             vertex_to_ij[int(v), 1] = local_j
             ij_to_vertex[i, local_j] = int(v)
+    # print(f"vertex_to_ij:\n{vertex_to_ij}\nij_to_vertex:\n{ij_to_vertex}")
 
     # Edge mapping similar to ragged builder but with local_j indices
     edge_to_ijk = np.full((n_edge, 3), -1, dtype=np.int32)

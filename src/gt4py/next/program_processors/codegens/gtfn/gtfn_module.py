@@ -54,7 +54,7 @@ class GTFNTranslationStep(
     enable_itir_transforms: bool = True
     use_imperative_backend: bool = False
     device_type: core_defs.DeviceType = core_defs.DeviceType.CPU
-    symbolic_domain_sizes: Optional[dict[str, str]] = None
+    symbolic_domain_sizes: Optional[dict[str, Any]] = None
 
     def _default_language_settings(self) -> languages.LanguageWithHeaderFilesSettings:
         match self.device_type:
@@ -215,6 +215,7 @@ class GTFNTranslationStep(
 
     def _resolve_symbolic_domain_sizes(
         self,
+        program: itir.Program,
         argument_descriptor_contexts: arguments.ArgStaticDescriptorsContextsByType,
     ) -> Optional[dict[str, Any]]:
         resolved: dict[str, Any] = {}
@@ -223,7 +224,18 @@ class GTFNTranslationStep(
 
         static_arg_descriptors = argument_descriptor_contexts.get(arguments.StaticArg)
         if static_arg_descriptors is not None:
-            for name in ("max_i", "max_j", "domain_max_i", "domain_max_j", "nx", "ny", "lateral"):
+            for name in (
+                "max_i",
+                "max_j",
+                "domain_max_i",
+                "domain_max_j",
+                "nx",
+                "ny",
+                "lateral",
+                "lateral_bounds",
+                "lateral_edge",
+                "edge_phase_size",
+            ):
                 descriptor = static_arg_descriptors.get(name)
                 if not isinstance(descriptor, arguments.StaticArg):
                     continue
@@ -247,7 +259,62 @@ class GTFNTranslationStep(
         ):
             resolved.update(self._resolve_symbolic_domain_sizes_from_mesh_metadata())
 
+        self._route_edge_lateral_symbolic_sizes(program, resolved)
+
         return resolved or None
+
+    @staticmethod
+    def _env_flag_enabled(*names: str) -> bool:
+        for name in names:
+            raw = os.environ.get(name)
+            if raw is None:
+                continue
+            return raw.strip().lower() in {"1", "true", "yes", "on"}
+        return False
+
+    @staticmethod
+    def _program_uses_edge_horizontal_unstructured_axis(program: itir.Program) -> bool:
+        for fun_call in program.pre_walk_values().if_isinstance(itir.FunCall):
+            if not (
+                isinstance(fun_call.fun, itir.SymRef)
+                and fun_call.fun.id == "named_range"
+                and len(fun_call.args) == 3
+            ):
+                continue
+            axis_expr = fun_call.args[0]
+            axis_name = getattr(axis_expr, "value", None)
+            if axis_name == "Edge":
+                return True
+        return False
+
+    def _route_edge_lateral_symbolic_sizes(
+        self,
+        program: itir.Program,
+        resolved: dict[str, Any],
+    ) -> None:
+        use_edge_lateral = self._env_flag_enabled(
+            "GT4PY_TRANSLATOR_EDGE_LATERAL",
+            "GT4PY_TRANSLATOR_USE_EDGE_LATERAL",
+        )
+        if not use_edge_lateral:
+            return
+        if not self._program_uses_edge_horizontal_unstructured_axis(program):
+            return
+
+        lateral_edge = resolved.get("lateral_edge")
+        if lateral_edge is None:
+            lateral_edge = resolved.get("lateral")
+        if lateral_edge is None:
+            return
+
+        resolved["lateral_edge"] = lateral_edge
+
+        if isinstance(lateral_edge, (int, np.integer)):
+            # Preserve current domain-bound behavior: 10->5, 4->2, 3->2, 5->3.
+            reduced_lateral = (int(lateral_edge) + 1) // 2
+            resolved.setdefault("lateral_bounds", reduced_lateral)
+            # Compatibility: some transforms still read `lateral` directly.
+            resolved["lateral"] = int(resolved["lateral_bounds"])
 
     @staticmethod
     def _resolve_symbolic_domain_sizes_from_mesh_metadata() -> dict[str, int]:
@@ -379,7 +446,7 @@ class GTFNTranslationStep(
         if already_preprocessed:
             new_program = program
         elif self.enable_itir_transforms:
-            resolved_symbolic_domain_sizes = self._resolve_symbolic_domain_sizes({})
+            resolved_symbolic_domain_sizes = self._resolve_symbolic_domain_sizes(program, {})
             new_program = self._preprocess_program(
                 program,
                 offset_provider,
@@ -414,6 +481,7 @@ class GTFNTranslationStep(
             program, inp.args.argument_descriptor_contexts
         )
         resolved_symbolic_domain_sizes = self._resolve_symbolic_domain_sizes(
+            program,
             inp.args.argument_descriptor_contexts
         )
 

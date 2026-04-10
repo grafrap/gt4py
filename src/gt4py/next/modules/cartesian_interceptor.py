@@ -463,15 +463,35 @@ class GenericStructuredWrapper:
         self.e2c2e_conn = self._sanitized_conn.get("E2C2E")
         self.structured_offset_provider = self._build_structured_offset_provider(offset_provider)
 
+        edge_lateral_flag = os.environ.get("GT4PY_TRANSLATOR_EDGE_LATERAL")
+        if edge_lateral_flag is None:
+            edge_lateral_flag = os.environ.get("GT4PY_TRANSLATOR_USE_EDGE_LATERAL")
+        use_edge_lateral = (
+            isinstance(edge_lateral_flag, str)
+            and edge_lateral_flag.strip().lower() in {"1", "true", "yes", "on"}
+        )
+        print(f"use edge lateral is: ", edge_lateral_flag)
+
+        symbolic_domain_sizes = {
+            "max_i": int(remap_sizes.max_i),
+            "max_j": int(remap_sizes.max_j),
+        }
+        if use_edge_lateral:
+            lateral_edge = int(remap_sizes.lateral)
+            lateral_bounds = (lateral_edge + 1) // 2
+            symbolic_domain_sizes["lateral_edge"] = lateral_edge
+            symbolic_domain_sizes["lateral_bounds"] = lateral_bounds
+            # Compatibility for transforms that still read `lateral`.
+            symbolic_domain_sizes["lateral"] = lateral_bounds
+        else:
+            symbolic_domain_sizes["lateral"] = int(remap_sizes.lateral)
+
+        print(f"[structured-debug] symbolic_domain_sizes: {symbolic_domain_sizes}")
         # 2. Instantiate the structured backend dynamically using the remap_sizes
         structured_backend = backend_factory(
             cached=True,
             otf_workflow__cached_translation=True,
-            otf_workflow__bare_translation__symbolic_domain_sizes={
-                "max_i": int(remap_sizes.max_i),
-                "max_j": int(remap_sizes.max_j),
-                "lateral": int(remap_sizes.lateral)
-            },
+            otf_workflow__bare_translation__symbolic_domain_sizes=symbolic_domain_sizes,
         )
 
         # 3. Compile the actual program
@@ -734,6 +754,7 @@ class GenericStructuredWrapper:
         return packed
 
     def _pack_argument(self, field):
+        # print(f"packing field:", field)
         if not getattr(field, "domain", None):
             return field 
 
@@ -756,11 +777,12 @@ class GenericStructuredWrapper:
             return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np, allocator=self.allocator)
             
         elif self._is_unstructured(field, "Edge"):
+            # print(f"Packing edge field '{getattr(field, 'name', '')}' with shape {np_data.shape}")
             struct_np = pack_edge_field(np_data, self.index_map)
             trailing_dims = list(field.domain.dims[1:]) if np_data.ndim > 1 else []
             return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np, allocator=self.allocator)
         
-        elif self._is_unstructured(field, "Cell"): # TODO: check if this is actually correct.
+        elif self._is_unstructured(field, "Cell"):
             if self.cell_to_ijk is None or self.ijk_to_cell is None:
                 return field
             struct_np = pack_cell_field_to_structured(np_data, self.cell_to_ijk, self.ijk_to_cell)
@@ -770,6 +792,7 @@ class GenericStructuredWrapper:
         return field 
 
     def _unpack_to_buffer(self, structured_field, original_unstructured_field):
+        # print(f"unpacking field:", structured_field, "to", original_unstructured_field)
         if not getattr(original_unstructured_field, "domain", None):
             return
 
@@ -847,6 +870,7 @@ class GenericStructuredWrapper:
         else:
             # Fallback for non-partial wrappers.
             self._compiled_program(**structured_kwargs)
+
 
         for original_field, packed_field in packed_fields:
             self._unpack_to_buffer(packed_field, original_field)

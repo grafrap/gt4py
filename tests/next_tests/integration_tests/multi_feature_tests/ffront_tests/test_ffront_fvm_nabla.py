@@ -240,9 +240,32 @@ def test_ffront_compute_zavgS_parallelogram_grid(exec_alloc_descriptor):
         edges_size=setup.edges_size,
     )
 
+    if "edge_translation_index" in ds:
+        edge_translator = ds["edge_translation_index"].values - 1
+    else:
+        raise KeyError("edge_translation_index variable not found in dataset")
+
+    if "vertex_translation_index" in ds:
+        vertex_translator = ds["vertex_translation_index"].values - 1
+    else:
+        raise KeyError("vertex_translation_index variable not found in dataset")
+
+    if "cell_translation_index" in ds:
+        cell_translator = ds["cell_translation_index"].values - 1
+    else:
+        raise KeyError("cell_translation_index variable not found in dataset")
+
+    print(f"vertex_translator: ", vertex_translator)
     pp_struct_np = pack_vertex_field_to_structured(setup.input_field.asnumpy(), index_map)
     s_m_struct_np = pack_edge_field_to_structured(setup.S_fields[0].asnumpy(), index_map)
     zavgS_struct_np = np.zeros_like(s_m_struct_np)
+    # pp_struct_np = np.zeros(setup.nodes_size, dtype=setup.input_field.dtype)
+    # print(f"input field: ",setup.input_field.asnumpy())
+    # pp_struct_np[vertex_translator] = setup.input_field.asnumpy()
+    # print(f"pp_struct_np after translation: ", pp_struct_np)
+    # s_m_struct_np = np.zeros((remap_sizes.max_i, remap_sizes.max_j, 3), dtype=setup.S_fields[0].dtype)
+    # s_m_struct_np[edge_translator] = setup.S_fields[0].asnumpy()
+    # zavgS_struct_np = np.zeros_like(s_m_struct_np)
 
     assert pp_struct_np.shape[0] == remap_sizes.max_i
     assert pp_struct_np.shape[1] == remap_sizes.max_j
@@ -288,6 +311,9 @@ def test_ffront_compute_zavgS_parallelogram_grid(exec_alloc_descriptor):
     ref[active] = s_m[active] * 0.5 * (
         pp[e2v_conn[active, 0]] + pp[e2v_conn[active, 1]]
     )
+
+    print(f"numpy solution: ", ref[active])
+    print(f"GT4Py solution: ", zavgS_np)
 
     assert np.isfinite(zavgS_np).all()
     np.testing.assert_allclose(zavgS_np, ref, rtol=1e-12, atol=1e-12)
