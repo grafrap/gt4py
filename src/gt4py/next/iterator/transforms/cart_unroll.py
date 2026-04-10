@@ -760,38 +760,14 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                     return im.ensure_expr(symbolic_size)
             return None
 
+        def _lateral_size() -> ir.Expr:
+            lateral = _pick_size_param("lateral")
+            return ir.OffsetLiteral(value=0) if lateral is None else lateral
+
         def _offset_int_value(expr: ir.Expr) -> int | None:
             if isinstance(expr, ir.OffsetLiteral) and isinstance(expr.value, int):
                 return expr.value
             return None
-
-        def _lateral_size() -> ir.Expr:
-            lateral = _pick_size_param("lateral", "lateral_bounds")
-            if lateral is not None:
-                return lateral
-
-            lateral_edge = _pick_size_param("lateral_edge")
-            lateral_edge_val = _offset_int_value(lateral_edge) if lateral_edge is not None else None
-            if lateral_edge_val is not None:
-                # Map edge lateral levels to domain-bound lateral levels.
-                # Examples: 10->5, 4->2, 3->2, 5->3.
-                return ir.OffsetLiteral(value=(lateral_edge_val + 1) // 2)
-
-            return ir.OffsetLiteral(value=0)
-
-        def _edge_phase_size() -> ir.Expr:
-            edge_phase = _pick_size_param("edge_phase_size", "lateral_edge_phase")
-            if edge_phase is not None:
-                return edge_phase
-
-            lateral_edge = _pick_size_param("lateral_edge")
-            lateral_edge_val = _offset_int_value(lateral_edge) if lateral_edge is not None else None
-            if lateral_edge_val is not None:
-                # Edge levels aligned with vertex/cell are odd; even levels are the
-                # in-between half levels that need additional kolor-specific clipping.
-                return ir.OffsetLiteral(value=1 if lateral_edge_val > 0 and lateral_edge_val % 2 == 0 else 0)
-
-            return ir.OffsetLiteral(value=0)
 
         def _offset_add(lhs: ir.Expr, rhs: ir.Expr) -> ir.Expr:
             lhs_val = _offset_int_value(lhs)
@@ -872,12 +848,7 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
             if isinstance(axis_expr, common.Dimension): return axis_expr.value
             return getattr(axis_expr, "value", None) if isinstance(getattr(axis_expr, "value", None), str) else None
 
-        def _structured_entity_condition(
-            entity_name: str,
-            *,
-            extra_halo: int = 0,
-            edge_phase: ir.Expr | None = None,
-        ) -> ir.Expr | None:
+        def _structured_entity_condition(entity_name: str, *, extra_halo: int = 0) -> ir.Expr | None:
             idim_bounds = _entity_cartesian_bounds(entity_name, "IDim", extra_halo=extra_halo)
             jdim_bounds = _entity_cartesian_bounds(entity_name, "JDim", extra_halo=extra_halo)
             kolor_bounds = _entity_kolor_bounds(entity_name)
@@ -900,20 +871,15 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
             if entity_name == "Edge" and extra_halo > 0:
                 i_lo, i_hi = idim_bounds
                 j_lo, j_hi = jdim_bounds
-                # Preserve legacy stagger-aware masks for edge fields.
                 i_lo_k1k2 = _offset_sub(i_lo, ir.OffsetLiteral(value=1))
                 j_lo_k0k2 = _offset_sub(j_lo, ir.OffsetLiteral(value=1))
-
-                phase = ir.OffsetLiteral(value=0) if edge_phase is None else copy.deepcopy(edge_phase)
-                i_lo_k0 = _offset_add(i_lo, copy.deepcopy(phase))
-                i_hi_k0 = _offset_sub(i_hi, copy.deepcopy(phase))
-                j_lo_k1 = _offset_add(j_lo, copy.deepcopy(phase))
-                j_hi_k1 = _offset_sub(j_hi, copy.deepcopy(phase))
+                # i_hi_k1k2 = _offset_sub(i_hi, ir.OffsetLiteral(value=1))
+                # j_hi_k0k2 = _offset_sub(j_hi, ir.OffsetLiteral(value=1))
 
                 cond_k0 = im.and_(
                     _axis_domain(Kolor, ir.OffsetLiteral(value=0), ir.OffsetLiteral(value=1)),
                     im.and_(
-                        _axis_domain(IDim, i_lo_k0, i_hi_k0),
+                        _axis_domain(IDim, i_lo, i_hi),
                         _axis_domain(JDim, j_lo_k0k2, j_hi),
                     ),
                 )
@@ -921,7 +887,7 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                     _axis_domain(Kolor, ir.OffsetLiteral(value=1), ir.OffsetLiteral(value=2)),
                     im.and_(
                         _axis_domain(IDim, i_lo_k1k2, i_hi),
-                        _axis_domain(JDim, j_lo_k1, j_hi_k1),
+                        _axis_domain(JDim, j_lo, j_hi),
                     ),
                 )
                 cond_k2 = im.and_(
@@ -967,17 +933,11 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                 threshold_id = _expr_symbol_id(threshold_expr)
 
                 extra_halo = 0
-                edge_phase = None
                 if entity_axis == "Edge" and threshold_id == "start_2nd_nudge_line_idx_e":
                     # Equivalent to translator edge remap with boundary_level=10.
                     extra_halo = 4
-                    edge_phase = _edge_phase_size()
 
-                interior_cond = _structured_entity_condition(
-                    entity_axis,
-                    extra_halo=extra_halo,
-                    edge_phase=edge_phase,
-                )
+                interior_cond = _structured_entity_condition(entity_axis, extra_halo=extra_halo)
                 if interior_cond is not None:
                     is_positive = (
                         (axis_side == "lhs" and op_name in {"greater_equal", "greater"})
@@ -1057,7 +1017,6 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                 return im.call("cartesian_domain")(*new_ranges)
         
         return new_node
-
 
 # =====================================================================
 # Pass 2: Unrolling Reductions and Shifts
