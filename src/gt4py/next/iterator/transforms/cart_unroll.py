@@ -549,7 +549,7 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                 return max(0, phase)
             lateral_edge = _pick_symbolic_int("lateral_edge")
             if lateral_edge is not None:
-                return 1 if lateral_edge > 0 and lateral_edge % 2 == 0 else 0
+                return 1 if lateral_edge > 0 and lateral_edge % 2 == 1 else 0
             return 0
 
         def _has_unstructured_axis(type_: ts.TypeSpec | None) -> bool:
@@ -654,10 +654,10 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                 return im.call("and_")(lhs, rhs)
 
             edge_phase = _edge_phase_size_for_setat()
-            i_lo_k0 = _plus_n(copy.deepcopy(i_lo), edge_phase)
-            i_hi_k0 = _minus_n(copy.deepcopy(i_hi), edge_phase)
-            j_lo_k1 = _plus_n(copy.deepcopy(j_lo), edge_phase)
-            j_hi_k1 = _minus_n(copy.deepcopy(j_hi), edge_phase)
+            i_lo_k0 = _plus_n((i_lo), edge_phase)
+            i_hi_k0 = _minus_n((i_hi), edge_phase)
+            j_lo_k1 = _plus_n((j_lo), edge_phase)
+            j_hi_k1 = _minus_n((j_hi), edge_phase)
 
             cond_k0 = _and(
                 _dom(copy.deepcopy(k_axis), ir.OffsetLiteral(value=0), ir.OffsetLiteral(value=1)),
@@ -761,8 +761,21 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
             return None
 
         def _lateral_size() -> ir.Expr:
-            lateral = _pick_size_param("lateral")
-            return ir.OffsetLiteral(value=0) if lateral is None else lateral
+            lateral = _pick_size_param("lateral", "lateral_bounds")
+            if lateral is not None:
+                return lateral
+
+            if symbolic_domain_sizes is not None and "lateral_edge" in symbolic_domain_sizes:
+                lateral_edge = symbolic_domain_sizes["lateral_edge"]
+                if isinstance(lateral_edge, numbers.Integral):
+                    return ir.OffsetLiteral(value=max(0, int(lateral_edge) // 2))
+                if isinstance(lateral_edge, str):
+                    try:
+                        return ir.OffsetLiteral(value=max(0, int(lateral_edge) // 2))
+                    except ValueError:
+                        pass
+
+            return ir.OffsetLiteral(value=0)
 
         def _offset_int_value(expr: ir.Expr) -> int | None:
             if isinstance(expr, ir.OffsetLiteral) and isinstance(expr.value, int):
@@ -868,36 +881,36 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
             # k0: nx*(ny+1), k1: (nx+1)*ny, k2: nx*ny.
             # Keep comparator predicates kolor-aware to avoid carving out wrong
             # interior stripes when one global IDim/JDim mask is applied.
-            if entity_name == "Edge" and extra_halo > 0:
-                i_lo, i_hi = idim_bounds
-                j_lo, j_hi = jdim_bounds
-                i_lo_k1k2 = _offset_sub(i_lo, ir.OffsetLiteral(value=1))
-                j_lo_k0k2 = _offset_sub(j_lo, ir.OffsetLiteral(value=1))
-                # i_hi_k1k2 = _offset_sub(i_hi, ir.OffsetLiteral(value=1))
-                # j_hi_k0k2 = _offset_sub(j_hi, ir.OffsetLiteral(value=1))
+            # if entity_name == "Edge" and extra_halo > 0:
+            #     i_lo, i_hi = idim_bounds
+            #     j_lo, j_hi = jdim_bounds
+            #     i_lo_k1k2 = _offset_sub(i_lo, ir.OffsetLiteral(value=1))
+            #     j_lo_k0k2 = _offset_sub(j_lo, ir.OffsetLiteral(value=1))
+            #     # i_hi_k1k2 = _offset_sub(i_hi, ir.OffsetLiteral(value=1))
+            #     # j_hi_k0k2 = _offset_sub(j_hi, ir.OffsetLiteral(value=1))
 
-                cond_k0 = im.and_(
-                    _axis_domain(Kolor, ir.OffsetLiteral(value=0), ir.OffsetLiteral(value=1)),
-                    im.and_(
-                        _axis_domain(IDim, i_lo, i_hi),
-                        _axis_domain(JDim, j_lo_k0k2, j_hi),
-                    ),
-                )
-                cond_k1 = im.and_(
-                    _axis_domain(Kolor, ir.OffsetLiteral(value=1), ir.OffsetLiteral(value=2)),
-                    im.and_(
-                        _axis_domain(IDim, i_lo_k1k2, i_hi),
-                        _axis_domain(JDim, j_lo, j_hi),
-                    ),
-                )
-                cond_k2 = im.and_(
-                    _axis_domain(Kolor, ir.OffsetLiteral(value=2), ir.OffsetLiteral(value=3)),
-                    im.and_(
-                        _axis_domain(IDim, i_lo_k1k2, i_hi),
-                        _axis_domain(JDim, j_lo_k0k2, j_hi),
-                    ),
-                )
-                return im.or_(cond_k0, im.or_(cond_k1, cond_k2))
+            #     cond_k0 = im.and_(
+            #         _axis_domain(Kolor, ir.OffsetLiteral(value=0), ir.OffsetLiteral(value=1)),
+            #         im.and_(
+            #             _axis_domain(IDim, i_lo, i_hi),
+            #             _axis_domain(JDim, j_lo_k0k2, j_hi),
+            #         ),
+            #     )
+            #     cond_k1 = im.and_(
+            #         _axis_domain(Kolor, ir.OffsetLiteral(value=1), ir.OffsetLiteral(value=2)),
+            #         im.and_(
+            #             _axis_domain(IDim, i_lo_k1k2, i_hi),
+            #             _axis_domain(JDim, j_lo, j_hi),
+            #         ),
+            #     )
+            #     cond_k2 = im.and_(
+            #         _axis_domain(Kolor, ir.OffsetLiteral(value=2), ir.OffsetLiteral(value=3)),
+            #         im.and_(
+            #             _axis_domain(IDim, i_lo_k1k2, i_hi),
+            #             _axis_domain(JDim, j_lo_k0k2, j_hi),
+            #         ),
+            #     )
+            #     return im.or_(cond_k0, im.or_(cond_k1, cond_k2))
 
             domain_expr = im.call("cartesian_domain")(
                 im.named_range(IDim, *idim_bounds),
@@ -935,7 +948,7 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                 extra_halo = 0
                 if entity_axis == "Edge" and threshold_id == "start_2nd_nudge_line_idx_e":
                     # Equivalent to translator edge remap with boundary_level=10.
-                    extra_halo = 4
+                    extra_halo = 3
 
                 interior_cond = _structured_entity_condition(entity_axis, extra_halo=extra_halo)
                 if interior_cond is not None:

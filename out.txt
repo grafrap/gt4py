@@ -1745,3 +1745,15 @@ Output of pnabla_cartesian:
  [435.5 666.  672.  678.  684.  690.  696.  702.  708.  714.  484.5]
  [479.5 732.  738.  744.  750.  756.  762.  768.  774.  780.  528.5]
  [386.  521.5 525.5 529.5 533.5 537.5 541.5 545.5 549.5 553.5 278. ]]
+
+
+_calculate_fourth_order_divdamp_scaling_coeff
+_calculate_reduced_fourth_order_divdamp_coeff_at_nest_boundary
+_add_analysis_increments_to_vn
+_add_temporal_tendencies_to_vn_by_interpolating_between_time_levels
+_add_vertical_wind_derivative_to_divergence_damping
+_apply_2nd_order_divergence_damping
+_apply_4th_order_divergence_damping
+_apply_weighted_2nd_and_4th_order_divergence_damping
+_compute_graddiv2_of_vn
+_apply_divergence_damping_and_update_vn

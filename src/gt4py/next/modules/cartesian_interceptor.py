@@ -478,7 +478,7 @@ class GenericStructuredWrapper:
         }
         if use_edge_lateral:
             lateral_edge = int(remap_sizes.lateral)
-            lateral_bounds = (lateral_edge + 1) // 2
+            lateral_bounds = (lateral_edge) // 2
             symbolic_domain_sizes["lateral_edge"] = lateral_edge
             symbolic_domain_sizes["lateral_bounds"] = lateral_bounds
             # Compatibility for transforms that still read `lateral`.
@@ -740,7 +740,9 @@ class GenericStructuredWrapper:
             cell_to_ijk=self.cell_to_ijk,
         )
 
-        if local_dim in {"E2C2E", "E2C2EO"}:
+        # Default OFF: zeroing clipped sparse coefficients was causing false mismatches
+        # for divergence-damping stencils near edge-shape boundaries.
+        if local_dim in {"E2C2E", "E2C2EO"} and os.environ.get("GT4PY_TRANSLATOR_ZERO_CLIPPED_SPARSE", "0") == "1":
             # Keep sparse coefficients zero on clipped edge-shape center lines.
             ni, nj, nk = packed.shape[:3]
             i_idx = np.arange(ni, dtype=np.int32)[:, None, None]

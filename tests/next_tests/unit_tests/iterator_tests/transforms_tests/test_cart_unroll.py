@@ -1101,6 +1101,143 @@ def test_edge_setat_domain_is_masked_by_kolor_specific_validity():
     assert {(0, 1), (1, 2), (2, 3)}.issubset(found_kolor_slices)
 
 
+@pytest.mark.parametrize(
+    ("lateral_edge", "expected_by_kolor"),
+    [
+        (
+            8,
+            {
+                (0, 1): {"IDim": (4, 36), "JDim": (4, 35)},
+                (1, 2): {"IDim": (4, 35), "JDim": (4, 36)},
+                (2, 3): {"IDim": (4, 35), "JDim": (4, 35)},
+            },
+        ),
+        (
+            9,
+            {
+                (0, 1): {"IDim": (5, 35), "JDim": (4, 35)},
+                (1, 2): {"IDim": (4, 35), "JDim": (5, 35)},
+                (2, 3): {"IDim": (4, 35), "JDim": (4, 35)},
+            },
+        ),
+    ],
+)
+def test_edge_domain_remap_with_lateral_edge_has_expected_kolor_specific_bounds(
+    lateral_edge, expected_by_kolor
+):
+    edge_axis = ir.AxisLiteral(value="Edge")
+    domain_expr = im.call("unstructured_domain")(
+        im.call("named_range")(
+            edge_axis,
+            im.ref("horizontal_start"),
+            im.ref("horizontal_end"),
+        )
+    )
+
+    testee = ir.Program(
+        id="testee",
+        function_definitions=[],
+        params=[
+            im.sym("inp"),
+            im.sym("out"),
+            im.sym("horizontal_start"),
+            im.sym("horizontal_end"),
+        ],
+        declarations=[],
+        body=[ir.SetAt(expr=im.ref("inp"), domain=domain_expr, target=im.ref("out"))],
+    )
+
+    actual = NormalizeShifts().visit(
+        CartUnroll.apply(
+            testee,
+            symbolic_domain_sizes={
+                "i_min": 0,
+                "i_max": 40,
+                "j_min": 0,
+                "j_max": 40,
+                "lateral_edge": lateral_edge,
+            },
+        )
+    )
+
+    assert isinstance(actual, ir.Program)
+    assert len(actual.body) == 1
+    assert isinstance(actual.body[0], ir.SetAt)
+
+    # Edge axis must be remapped to IDim/JDim/Kolor with floor(lateral_edge/2) halo.
+    remapped_domain = actual.body[0].domain
+    assert cpm.is_call_to(remapped_domain, "cartesian_domain")
+    remapped_ranges: dict[str, tuple[int, int]] = {}
+    for nr in remapped_domain.args:
+        if not (cpm.is_call_to(nr, "named_range") and len(nr.args) == 3):
+            continue
+        axis = nr.args[0].value if hasattr(nr.args[0], "value") else None
+        lo, hi = nr.args[1], nr.args[2]
+        if axis is None:
+            continue
+        assert isinstance(lo, ir.OffsetLiteral)
+        assert isinstance(hi, ir.OffsetLiteral)
+        remapped_ranges[axis] = (int(lo.value), int(hi.value))
+
+    assert remapped_ranges == {
+        "IDim": (4, 36),
+        "JDim": (4, 36),
+        "Kolor": (0, 3),
+    }
+
+    assert cpm.is_call_to(actual.body[0].expr, "concat_where")
+
+    def _literal_int(expr: ir.Expr) -> int:
+        if isinstance(expr, ir.OffsetLiteral):
+            return int(expr.value)
+        if isinstance(expr, ir.Literal):
+            return int(expr.value)
+        if cpm.is_call_to(expr, "plus") and len(expr.args) == 2:
+            lhs, rhs = expr.args
+            return _literal_int(lhs) + _literal_int(rhs)
+        if cpm.is_call_to(expr, "minus") and len(expr.args) == 2:
+            lhs, rhs = expr.args
+            return _literal_int(lhs) - _literal_int(rhs)
+        raise AssertionError(f"Expected literal bound, got {expr!r}")
+
+    def _collect_axis_domains_from_cond(cond: ir.Expr) -> dict[str, tuple[int, int]]:
+        out: dict[str, tuple[int, int]] = {}
+
+        def _walk(node: ir.Expr) -> None:
+            if cpm.is_call_to(node, "cartesian_domain"):
+                for nr in node.args:
+                    if not (cpm.is_call_to(nr, "named_range") and len(nr.args) == 3):
+                        continue
+                    axis = nr.args[0].value if hasattr(nr.args[0], "value") else None
+                    if axis is None:
+                        continue
+                    out[axis] = (_literal_int(nr.args[1]), _literal_int(nr.args[2]))
+            if isinstance(node, ir.FunCall):
+                _walk(node.fun)
+                for arg in node.args:
+                    _walk(arg)
+            elif isinstance(node, ir.Lambda):
+                _walk(node.expr)
+
+        _walk(cond)
+        return out
+
+    by_kolor: dict[tuple[int, int], dict[str, tuple[int, int]]] = {}
+    work = actual.body[0].expr
+    while cpm.is_call_to(work, "concat_where") and len(work.args) == 3:
+        cond = work.args[0]
+        cond_domains = _collect_axis_domains_from_cond(cond)
+        kolor_interval = cond_domains.get("Kolor")
+        if kolor_interval is not None:
+            by_kolor[kolor_interval] = {
+                "IDim": cond_domains["IDim"],
+                "JDim": cond_domains["JDim"],
+            }
+        work = work.args[2]
+
+    assert by_kolor == expected_by_kolor
+
+
 def test_cartesian_remapped_type_includes_cell_fields():
     Cell = common.Dimension("Cell", kind=common.DimensionKind.HORIZONTAL)
     testee = ts.FieldType(dims=[Cell], dtype=ts.ScalarType(kind=ts.ScalarKind.FLOAT64))
@@ -1663,8 +1800,8 @@ def test_lateral_edge_odd_maps_to_domain_lateral_bounds_via_get_domain_range():
         },
     )
 
-    # (lateral_edge + 1) // 2 => (9 + 1) // 2 = 5
-    expected = im.make_tuple(ir.OffsetLiteral(value=5), ir.OffsetLiteral(value=35))
+    # (lateral_edge) // 2 => (9) // 2 = 4
+    expected = im.make_tuple(ir.OffsetLiteral(value=4), ir.OffsetLiteral(value=36))
     assert actual == expected
 
 

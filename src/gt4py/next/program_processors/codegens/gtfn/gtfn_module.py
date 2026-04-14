@@ -310,8 +310,8 @@ class GTFNTranslationStep(
         resolved["lateral_edge"] = lateral_edge
 
         if isinstance(lateral_edge, (int, np.integer)):
-            # Preserve current domain-bound behavior: 10->5, 4->2, 3->2, 5->3.
-            reduced_lateral = (int(lateral_edge) + 1) // 2
+            # Preserve current domain-bound behavior: 10->interior, 9->nud2->4.5, 8->nud->4, 7->lat8->3.5, 6->lat7->3, 5->lat6->2.5, 4->lat5->2, 3->lat4->1.5, 2->lat3->1, 1->lat2->0.5, 0->lat->0
+            reduced_lateral = (int(lateral_edge)) // 2
             resolved.setdefault("lateral_bounds", reduced_lateral)
             # Compatibility: some transforms still read `lateral` directly.
             resolved["lateral"] = int(resolved["lateral_bounds"])
