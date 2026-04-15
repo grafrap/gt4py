@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import os
+from pathlib import Path
 from typing import Any, Final, Optional
 
 import factory
@@ -21,7 +23,7 @@ from gt4py.next import common
 from gt4py.next.ffront import fbuiltins
 from gt4py.next.iterator import ir as itir
 from gt4py.next.iterator.transforms import pass_manager
-from gt4py.next.otf import code_specs, definitions, stages, workflow
+from gt4py.next.otf import arguments, code_specs, definitions, stages, workflow
 from gt4py.next.otf.binding import cpp_interface, interface
 from gt4py.next.program_processors.codegens.gtfn.codegen import GTFNCodegen, GTFNIMCodegen
 from gt4py.next.program_processors.codegens.gtfn.gtfn_ir_to_gtfn_im_ir import GTFN_IM_lowering
@@ -52,8 +54,9 @@ class GTFNTranslationStep(
     enable_itir_transforms: bool = True
     use_imperative_backend: bool = False
     device_type: core_defs.DeviceType = core_defs.DeviceType.CPU
-    symbolic_domain_sizes: dict[str, itir.Expr] | None = None
+    symbolic_domain_sizes: dict[str, Any] | None = None
     use_max_domain_range_on_unstructured_shift: bool | None = None
+
 
     def _default_code_spec(self) -> code_specs.HeaderAndSourceCodeSpec:
         match self.device_type:
@@ -100,12 +103,17 @@ class GTFNTranslationStep(
         return parameters, arg_exprs
 
     def _process_connectivity_args(
-        self, offset_provider_type: common.OffsetProviderType
+        self,
+        offset_provider_type: common.OffsetProviderType,
+        *,
+        used_offset_tags: Optional[set[str]] = None,
     ) -> tuple[list[interface.Parameter], list[str]]:
         parameters: list[interface.Parameter] = []
         arg_exprs: list[str] = []
 
         for name, connectivity_type in offset_provider_type.items():
+            if used_offset_tags is not None and name not in used_offset_tags:
+                continue
             if isinstance(connectivity_type, common.NeighborConnectivityType):
                 if connectivity_type.dtype.scalar_type not in [np.int32, np.int64]:
                     raise ValueError(
@@ -144,16 +152,43 @@ class GTFNTranslationStep(
 
         return parameters, arg_exprs
 
+    @staticmethod
+    def _collect_used_offset_tags(program: itir.Program) -> set[str]:
+        return (
+            program.walk_values()
+            .if_isinstance(itir.OffsetLiteral)
+            .filter(lambda offset_literal: isinstance(offset_literal.value, str))
+            .getattr("value")
+            .to_set()
+        )
+
+    @staticmethod
+    def _resolve_effective_arg_types(
+        program: itir.Program, arg_types: tuple[ts.TypeSpec, ...]
+    ) -> tuple[ts.TypeSpec, ...]:
+        effective_arg_types: list[ts.TypeSpec] = []
+        for arg_type, param in zip(arg_types, program.params, strict=True):
+            effective_arg_types.append(param.type if param.type is not None else arg_type)
+        return tuple(effective_arg_types)
+
     def _preprocess_program(
         self,
         program: itir.Program,
         offset_provider: common.OffsetProvider | common.OffsetProviderType,
+        cartesian_reduce_axis_ranges: Optional[dict[common.Dimension, tuple[int, int]]] = None,
+        symbolic_domain_sizes: Optional[dict[str, Any]] = None,
     ) -> itir.Program:
+        effective_symbolic_domain_sizes = (
+            self.symbolic_domain_sizes
+            if symbolic_domain_sizes is None
+            else symbolic_domain_sizes
+        )
         apply_common_transforms = functools.partial(
             pass_manager.apply_common_transforms,
             extract_temporaries=True,
             offset_provider=offset_provider,
-            symbolic_domain_sizes=self.symbolic_domain_sizes,
+            symbolic_domain_sizes=effective_symbolic_domain_sizes,
+            cartesian_reduce_axis_ranges=cartesian_reduce_axis_ranges,
             use_max_domain_range_on_unstructured_shift=self.use_max_domain_range_on_unstructured_shift,
         )
 
@@ -171,14 +206,246 @@ class GTFNTranslationStep(
 
         return new_program
 
+    def _resolve_symbolic_domain_sizes(
+        self,
+        program: itir.Program,
+        argument_descriptor_contexts: arguments.ArgStaticDescriptorsContextsByType,
+    ) -> Optional[dict[str, Any]]:
+        resolved: dict[str, Any] = {}
+        if self.symbolic_domain_sizes is not None:
+            resolved.update(self.symbolic_domain_sizes)
+
+        static_arg_descriptors = argument_descriptor_contexts.get(arguments.StaticArg)
+        if static_arg_descriptors is not None:
+            for name in (
+                "max_i",
+                "max_j",
+                "domain_max_i",
+                "domain_max_j",
+                "nx",
+                "ny",
+                "lateral",
+                "lateral_bounds",
+                "lateral_edge",
+                "edge_phase_size",
+            ):
+                descriptor = static_arg_descriptors.get(name)
+                if not isinstance(descriptor, arguments.StaticArg):
+                    continue
+                if isinstance(descriptor.value, (int, np.integer)):
+                    resolved[name] = int(descriptor.value)
+
+        if not any(
+            key in resolved
+            for key in (
+                "i_min",
+                "i_max",
+                "j_min",
+                "j_max",
+                "max_i",
+                "max_j",
+                "domain_max_i",
+                "domain_max_j",
+                "nx",
+                "ny",
+            )
+        ):
+            resolved.update(self._resolve_symbolic_domain_sizes_from_mesh_metadata())
+
+        self._route_edge_lateral_symbolic_sizes(program, resolved)
+
+        return resolved or None
+
+    @staticmethod
+    def _env_flag_enabled(*names: str) -> bool:
+        for name in names:
+            raw = os.environ.get(name)
+            if raw is None:
+                continue
+            return raw.strip().lower() in {"1", "true", "yes", "on"}
+        return False
+
+    @staticmethod
+    def _program_uses_edge_horizontal_unstructured_axis(program: itir.Program) -> bool:
+        for fun_call in program.pre_walk_values().if_isinstance(itir.FunCall):
+            if not (
+                isinstance(fun_call.fun, itir.SymRef)
+                and fun_call.fun.id == "named_range"
+                and len(fun_call.args) == 3
+            ):
+                continue
+            axis_expr = fun_call.args[0]
+            axis_name = getattr(axis_expr, "value", None)
+            if axis_name == "Edge":
+                return True
+        return False
+
+    def _route_edge_lateral_symbolic_sizes(
+        self,
+        program: itir.Program,
+        resolved: dict[str, Any],
+    ) -> None:
+        use_edge_lateral = self._env_flag_enabled(
+            "GT4PY_TRANSLATOR_EDGE_LATERAL",
+            "GT4PY_TRANSLATOR_USE_EDGE_LATERAL",
+        )
+        if not use_edge_lateral:
+            return
+        if not self._program_uses_edge_horizontal_unstructured_axis(program):
+            return
+
+        lateral_edge = resolved.get("lateral_edge")
+        if lateral_edge is None:
+            lateral_edge = resolved.get("lateral")
+        if lateral_edge is None:
+            return
+
+        resolved["lateral_edge"] = lateral_edge
+
+        if isinstance(lateral_edge, (int, np.integer)):
+            # Preserve current domain-bound behavior: 10->interior, 9->nud2->4.5, 8->nud->4, 7->lat8->3.5, 6->lat7->3, 5->lat6->2.5, 4->lat5->2, 3->lat4->1.5, 2->lat3->1, 1->lat2->0.5, 0->lat->0
+            reduced_lateral = (int(lateral_edge)) // 2
+            resolved.setdefault("lateral_bounds", reduced_lateral)
+            # Compatibility: some transforms still read `lateral` directly.
+            resolved["lateral"] = int(resolved["lateral_bounds"])
+
+    @staticmethod
+    def _resolve_symbolic_domain_sizes_from_mesh_metadata() -> dict[str, int]:
+        mesh_path = os.environ.get("GT4PY_TRANSLATOR_MESH")
+        lateral_env = os.environ.get("GT4PY_TRANSLATOR_LATERAL")
+        if lateral_env is None:
+            lateral_env = os.environ.get("LATERAL_BOUNDARY_LEVEL", "1")
+        try:
+            lateral = int(lateral_env)
+        except ValueError:
+            lateral = 1
+        lateral = max(0, lateral)
+
+        if not mesh_path:
+            repo_root = Path(__file__).resolve().parents[6]
+            candidate_paths = (
+                repo_root / "../grid-generator/parallelogram_grid.nc",
+                repo_root / "grid-generator/parallelogram_grid.nc",
+                Path.cwd() / "grid-generator/parallelogram_grid.nc",
+                Path.cwd() / "parallelogram_grid.nc",
+            )
+            for candidate in candidate_paths:
+                resolved_candidate = candidate.resolve()
+                if resolved_candidate.is_file():
+                    mesh_path = str(resolved_candidate)
+                    break
+
+        if not mesh_path:
+            return {}
+
+        try:
+            from gt4py.next.modules.translator import load_structured_remap_sizes_from_netcdf
+
+            sizes = load_structured_remap_sizes_from_netcdf(mesh_path, lateral=lateral)
+        except Exception:
+            return {}
+
+        return {
+            "i_min": 0,
+            "j_min": 0,
+            "i_max": int(sizes.max_i),
+            "j_max": int(sizes.max_j),
+            "max_i": int(sizes.max_i),
+            "max_j": int(sizes.max_j),
+            "domain_max_i": int(sizes.max_i),
+            "domain_max_j": int(sizes.max_j),
+            "nx": int(sizes.nx),
+            "ny": int(sizes.ny),
+            "lateral": int(sizes.lateral),
+        }
+
+    @staticmethod
+    def _infer_kolor_extent_from_program(program: itir.Program) -> Optional[int]:
+        kolor_offset = common.dimension_to_implicit_offset("Kolor")
+        kolor_shift_indices: list[int] = []
+
+        for node in program.pre_walk_values().if_isinstance(itir.FunCall):
+            if not (
+                isinstance(node.fun, itir.SymRef) and node.fun.id == "shift" and len(node.args) == 2
+            ):
+                continue
+
+            axis_offset, index_offset = node.args
+            if not (
+                isinstance(axis_offset, itir.OffsetLiteral)
+                and axis_offset.value == kolor_offset
+                and isinstance(index_offset, itir.OffsetLiteral)
+                and isinstance(index_offset.value, int)
+            ):
+                continue
+
+            kolor_shift_indices.append(index_offset.value)
+
+        if not kolor_shift_indices:
+            return None
+
+        max_backward_offset = max((-idx for idx in kolor_shift_indices if idx < 0), default=0)
+        inferred_extent = max_backward_offset + 1
+        return inferred_extent if inferred_extent >= 2 else None
+
+    @staticmethod
+    def _resolve_cartesian_reduce_axis_ranges(
+        program: itir.Program,
+        argument_descriptor_contexts: arguments.ArgStaticDescriptorsContextsByType,
+    ) -> Optional[dict[common.Dimension, tuple[int, int]]]:
+        inferred_kolor_extent = GTFNTranslationStep._infer_kolor_extent_from_program(program)
+
+        static_arg_descriptors = argument_descriptor_contexts.get(arguments.StaticArg)
+        if static_arg_descriptors is None:
+            if inferred_kolor_extent is not None:
+                return {common.Dimension("Kolor"): (0, inferred_kolor_extent)}
+            return None
+
+        domain_max_kolor = static_arg_descriptors.get("domain_max_kolor")
+        if not isinstance(domain_max_kolor, arguments.StaticArg):
+            if inferred_kolor_extent is not None:
+                return {common.Dimension("Kolor"): (0, inferred_kolor_extent)}
+            return None
+        if not isinstance(domain_max_kolor.value, (int, np.integer)):
+            if inferred_kolor_extent is not None:
+                return {common.Dimension("Kolor"): (0, inferred_kolor_extent)}
+            return None
+
+        domain_max_kolor_value = int(domain_max_kolor.value)
+        if domain_max_kolor_value >= 2:
+            return {common.Dimension("Kolor"): (0, domain_max_kolor_value)}
+
+        if inferred_kolor_extent is not None:
+            return {common.Dimension("Kolor"): (0, inferred_kolor_extent)}
+
+        if domain_max_kolor_value == 1:
+            # In many reduction kernels this static arg reflects the reduced output extent.
+            # Fall back to a 2-color reduction when no stronger signal is available.
+            return {common.Dimension("Kolor"): (0, 2)}
+
+        if domain_max_kolor_value <= 0:
+            return None
+        return None
+
     def generate_stencil_source(
         self,
         program: itir.Program,
         offset_provider: common.OffsetProvider | common.OffsetProviderType,
         column_axis: Optional[common.Dimension],
+        cartesian_reduce_axis_ranges: Optional[dict[common.Dimension, tuple[int, int]]] = None,
+        *,
+        already_preprocessed: bool = False,
     ) -> str:
-        if self.enable_itir_transforms:
-            new_program = self._preprocess_program(program, offset_provider)
+        if already_preprocessed:
+            new_program = program
+        elif self.enable_itir_transforms:
+            resolved_symbolic_domain_sizes = self._resolve_symbolic_domain_sizes(program, {})
+            new_program = self._preprocess_program(
+                program,
+                offset_provider,
+                cartesian_reduce_axis_ranges=cartesian_reduce_axis_ranges,
+                symbolic_domain_sizes=resolved_symbolic_domain_sizes,
+            )
         else:
             assert isinstance(program, itir.Program)
             new_program = program
@@ -202,18 +469,39 @@ class GTFNTranslationStep(
     ) -> stages.ProgramSource[code_specs.HeaderAndSourceCodeSpec]:
         """Generate GTFN C++ code from the ITIR definition."""
         program: itir.Program = inp.data
+        arg_types = inp.args.args
+        cartesian_reduce_axis_ranges = self._resolve_cartesian_reduce_axis_ranges(
+            program, inp.args.argument_descriptor_contexts
+        )
+        resolved_symbolic_domain_sizes = self._resolve_symbolic_domain_sizes(
+            program,
+            inp.args.argument_descriptor_contexts
+        )
+
+        if self.enable_itir_transforms:
+            transformed_program = self._preprocess_program(
+                program,
+                inp.args.offset_provider,
+                cartesian_reduce_axis_ranges=cartesian_reduce_axis_ranges,
+                symbolic_domain_sizes=resolved_symbolic_domain_sizes,
+            )
+        else:
+            transformed_program = program
+
+        used_offset_tags = self._collect_used_offset_tags(transformed_program)
+        effective_arg_types = self._resolve_effective_arg_types(transformed_program, arg_types)
 
         # handle regular parameters and arguments of the program (i.e. what the user defined in
         #  the program)
-        arg_types = inp.args.args
         regular_parameters, regular_args_expr = self._process_regular_arguments(
-            program, arg_types, inp.args.offset_provider_type
+            transformed_program, effective_arg_types, inp.args.offset_provider_type
         )
 
         # handle connectivity parameters and arguments (i.e. what the user provided in the offset
         #  provider)
         connectivity_parameters, connectivity_args_expr = self._process_connectivity_args(
-            inp.args.offset_provider_type
+            inp.args.offset_provider_type,
+            used_offset_tags=used_offset_tags,
         )
 
         # combine into a format that is aligned with what the backend expects
@@ -228,9 +516,11 @@ class GTFNTranslationStep(
         )
         decl_src = cpp_interface.render_function_declaration(function, body=decl_body)
         stencil_src = self.generate_stencil_source(
-            program,
+            transformed_program,
             inp.args.offset_provider,
             inp.args.column_axis,
+            cartesian_reduce_axis_ranges=cartesian_reduce_axis_ranges,
+            already_preprocessed=True,
         )
         source_code = interface.format_source(
             self._code_spec(),

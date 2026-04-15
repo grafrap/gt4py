@@ -1,0 +1,750 @@
+
+============================================================
+=== FINAL GTIR HANDED TO GTFN BACKEND ===
+============================================================
+__field_operator_compute_zavgS(pp, S_M, out) {
+  compute_zavgS = λ(pp, S_M) → 
+    (λ(zavgᐞ0) → (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(S_M, zavgᐞ0))(
+      (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(
+        0.5, (⇑(λ(__arg0, __arg1) → ·__arg0 + ·__arg1))(
+               (⇑(λ(__it) → ·⟪E2Vₒ, 0ₒ⟫(__it)))(pp), (⇑(λ(__it) → ·⟪E2Vₒ, 1ₒ⟫(__it)))(pp)
+             )
+      )
+    );
+  out @ u⟨ Edgeₕ: [get_domain_range(out, Edgeₕ)[0], get_domain_range(out, Edgeₕ)[1][ ⟩
+       ← compute_zavgS(pp, S_M);
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER INLINING FUNDEFS ===
+============================================================
+__field_operator_compute_zavgS(pp, S_M, out) {
+  compute_zavgS = λ(pp, S_M) → 
+    (λ(zavgᐞ0) → (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(S_M, zavgᐞ0))(
+      (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(
+        0.5, (⇑(λ(__arg0, __arg1) → ·__arg0 + ·__arg1))(
+               (⇑(λ(__it) → ·⟪E2Vₒ, 0ₒ⟫(__it)))(pp), (⇑(λ(__it) → ·⟪E2Vₒ, 1ₒ⟫(__it)))(pp)
+             )
+      )
+    );
+  out @ u⟨ Edgeₕ: [get_domain_range(out, Edgeₕ)[0], get_domain_range(out, Edgeₕ)[1][ ⟩
+       ← (λ(pp, S_M) → (λ(zavgᐞ0) → (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(S_M, zavgᐞ0))(
+                         (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(
+                           0.5, (⇑(λ(__arg0, __arg1) → ·__arg0 + ·__arg1))(
+                                  (⇑(λ(__it) → ·⟪E2Vₒ, 0ₒ⟫(__it)))(pp), (⇑(λ(__it) → ·⟪E2Vₒ, 1ₒ⟫(__it)))(pp)
+                                )
+                         )
+                       ))(pp, S_M);
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER PRUNING UNREFERENCED FUNDEFS AND NORMALIZING SHIFTS ===
+============================================================
+__field_operator_compute_zavgS(pp, S_M, out) {
+  out @ u⟨ Edgeₕ: [get_domain_range(out, Edgeₕ)[0], get_domain_range(out, Edgeₕ)[1][ ⟩
+       ← (λ(pp, S_M) → (λ(zavgᐞ0) → (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(S_M, zavgᐞ0))(
+                         (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(
+                           0.5, (⇑(λ(__arg0, __arg1) → ·__arg0 + ·__arg1))(
+                                  (⇑(λ(__it) → ·⟪E2Vₒ, 0ₒ⟫(__it)))(pp), (⇑(λ(__it) → ·⟪E2Vₒ, 1ₒ⟫(__it)))(pp)
+                                )
+                         )
+                       ))(pp, S_M);
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER DEAD CODE ELIMINATION ===
+============================================================
+__field_operator_compute_zavgS(pp, S_M, out) {
+  out @ u⟨ Edgeₕ: [get_domain_range(out, Edgeₕ)[0], get_domain_range(out, Edgeₕ)[1][ ⟩
+       ← (⇑(λ(__arg0_, __arg1_) → ·__arg0_ × ·__arg1_))(
+           S_M, (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(
+                  0.5, (⇑(λ(__arg0, __arg1) → ·__arg0 + ·__arg1))(
+                         (⇑(λ(__it) → ·⟪E2Vₒ, 0ₒ⟫(__it)))(pp), (⇑(λ(__it) → ·⟪E2Vₒ, 1ₒ⟫(__it)))(pp)
+                       )
+                )
+         );
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER CANONICALIZING DOMAIN ARGUMENTS ===
+============================================================
+__field_operator_compute_zavgS(pp, S_M, out) {
+  out @ u⟨ Edgeₕ: [get_domain_range(out, Edgeₕ)[0], get_domain_range(out, Edgeₕ)[1][ ⟩
+       ← (⇑(λ(__arg0_, __arg1_) → ·__arg0_ × ·__arg1_))(
+           S_M, (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(
+                  0.5, (⇑(λ(__arg0, __arg1) → ·__arg0 + ·__arg1))(
+                         (⇑(λ(__it) → ·⟪E2Vₒ, 0ₒ⟫(__it)))(pp), (⇑(λ(__it) → ·⟪E2Vₒ, 1ₒ⟫(__it)))(pp)
+                       )
+                )
+         );
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER COMMON TRANSFORMS BEFORE INFER_DOMAIN ===
+============================================================
+__field_operator_compute_zavgS(pp, S_M, out) {
+  out @ u⟨ Edgeₕ: [get_domain_range(out, Edgeₕ)[0], get_domain_range(out, Edgeₕ)[1][ ⟩
+       ← as_fieldop(λ(__arg0_, __arg1_) → ·__arg0_ × ·__arg1_,
+                    u⟨ Edgeₕ: [get_domain_range(out, Edgeₕ)[0], get_domain_range(out, Edgeₕ)[1][ ⟩)(
+           S_M,
+           as_fieldop(λ(__arg0, __arg1) → ·__arg0 × ·__arg1,
+                      u⟨ Edgeₕ: [get_domain_range(out, Edgeₕ)[0], get_domain_range(out, Edgeₕ)[1][ ⟩)(
+             0.5,
+             as_fieldop(λ(__arg0, __arg1) → ·__arg0 + ·__arg1,
+                        u⟨ Edgeₕ: [get_domain_range(out, Edgeₕ)[0], get_domain_range(out, Edgeₕ)[1][ ⟩)(
+               as_fieldop(λ(__it) → ·⟪E2Vₒ, 0ₒ⟫(__it),
+                          u⟨ Edgeₕ: [get_domain_range(out, Edgeₕ)[0], get_domain_range(out, Edgeₕ)[1][ ⟩)(pp),
+               as_fieldop(λ(__it) → ·⟪E2Vₒ, 1ₒ⟫(__it),
+                          u⟨ Edgeₕ: [get_domain_range(out, Edgeₕ)[0], get_domain_range(out, Edgeₕ)[1][ ⟩)(pp)
+             )
+           )
+         );
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER TRANSFORM AS FIELDOP ===
+============================================================
+__field_operator_compute_zavgS(pp, S_M, out) {
+  out @ u⟨ Edgeₕ: [get_domain_range(out, Edgeₕ)[0], get_domain_range(out, Edgeₕ)[1][ ⟩
+       ← as_fieldop(λ(__arg0_, __arg1_) → ·__arg0_ × ·__arg1_,
+                    u⟨ Edgeₕ: [get_domain_range(out, Edgeₕ)[0], get_domain_range(out, Edgeₕ)[1][ ⟩)(
+           S_M,
+           as_fieldop(λ(__arg0, __arg1) → ·__arg0 × ·__arg1,
+                      u⟨ Edgeₕ: [get_domain_range(out, Edgeₕ)[0], get_domain_range(out, Edgeₕ)[1][ ⟩)(
+             0.5,
+             as_fieldop(λ(__arg0, __arg1) → ·__arg0 + ·__arg1,
+                        u⟨ Edgeₕ: [get_domain_range(out, Edgeₕ)[0], get_domain_range(out, Edgeₕ)[1][ ⟩)(
+               as_fieldop(λ(__it) → ·⟪E2Vₒ, 0ₒ⟫(__it),
+                          u⟨ Edgeₕ: [get_domain_range(out, Edgeₕ)[0], get_domain_range(out, Edgeₕ)[1][ ⟩)(pp),
+               as_fieldop(λ(__it) → ·⟪E2Vₒ, 1ₒ⟫(__it),
+                          u⟨ Edgeₕ: [get_domain_range(out, Edgeₕ)[0], get_domain_range(out, Edgeₕ)[1][ ⟩)(pp)
+             )
+           )
+         );
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER INLINING LIFTS AND LAMBDAS ===
+============================================================
+__field_operator_compute_zavgS(pp, S_M, out) {
+  out @ u⟨ Edgeₕ: [get_domain_range(out, Edgeₕ)[0], get_domain_range(out, Edgeₕ)[1][ ⟩
+       ← as_fieldop(λ(S_M, pp) → (·⟪E2Vₒ, 0ₒ⟫(pp) + ·⟪E2Vₒ, 1ₒ⟫(pp)) × 0.5 × ·S_M,
+                    u⟨ Edgeₕ: [get_domain_range(out, Edgeₕ)[0], get_domain_range(out, Edgeₕ)[1][ ⟩)(S_M, pp);
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER COMMON TRANSFORMS ===
+============================================================
+__field_operator_compute_zavgS(pp, S_M, out) {
+  out @ u⟨ Edgeₕ: [get_domain_range(out, Edgeₕ)[0], get_domain_range(out, Edgeₕ)[1][ ⟩
+       ← as_fieldop(λ(S_M, pp) → (·⟪E2Vₒ, 0ₒ⟫(pp) + ·⟪E2Vₒ, 1ₒ⟫(pp)) × 0.5 × ·S_M,
+                    u⟨ Edgeₕ: [get_domain_range(out, Edgeₕ)[0], get_domain_range(out, Edgeₕ)[1][ ⟩)(S_M, pp);
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER UNROLLING REDUCE ===
+============================================================
+__field_operator_compute_zavgS(pp, S_M, out) {
+  out @ u⟨ Edgeₕ: [get_domain_range(out, Edgeₕ)[0], get_domain_range(out, Edgeₕ)[1][ ⟩
+       ← as_fieldop(λ(S_M, pp) → (·⟪E2Vₒ, 0ₒ⟫(pp) + ·⟪E2Vₒ, 1ₒ⟫(pp)) × 0.5 × ·S_M,
+                    u⟨ Edgeₕ: [get_domain_range(out, Edgeₕ)[0], get_domain_range(out, Edgeₕ)[1][ ⟩)(S_M, pp);
+}
+============================================================
+
+
+============================================================
+=== GTIR END ===
+============================================================
+__field_operator_compute_zavgS(pp, S_M, out) {
+  out @ u⟨ Edgeₕ: [get_domain_range(out, Edgeₕ)[0], get_domain_range(out, Edgeₕ)[1][ ⟩
+       ← as_fieldop(λ(S_M, pp) → (·⟪E2Vₒ, 0ₒ⟫(pp) + ·⟪E2Vₒ, 1ₒ⟫(pp)) × 0.5 × ·S_M,
+                    u⟨ Edgeₕ: [get_domain_range(out, Edgeₕ)[0], get_domain_range(out, Edgeₕ)[1][ ⟩)(S_M, pp);
+}
+============================================================
+
+
+============================================================
+=== FINAL GTIR HANDED TO GTFN BACKEND ===
+============================================================
+__field_operator_compute_pnabla(pp, S_M, sign, vol, out) {
+  compute_zavgS = λ(pp, S_M) → 
+    (λ(zavgᐞ0) → (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(S_M, zavgᐞ0))(
+      (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(
+        0.5, (⇑(λ(__arg0, __arg1) → ·__arg0 + ·__arg1))(
+               (⇑(λ(__it) → ·⟪E2Vₒ, 0ₒ⟫(__it)))(pp), (⇑(λ(__it) → ·⟪E2Vₒ, 1ₒ⟫(__it)))(pp)
+             )
+      )
+    );
+  compute_pnabla = λ(pp, S_M, sign, vol) → 
+    (λ(zavgSᐞ0) → (λ(pnabla_Mᐞ0) → (⇑(λ(__arg0, __arg1) → ·__arg0 / ·__arg1))(pnabla_Mᐞ0, vol))(
+                    (⇑(λ(__arg0) → reduce(plus, 0)(·__arg0)))(
+                      (⇑(λ(__arg0, __arg1) → map_(multiplies)(·__arg0, ·__arg1)))(
+                        (⇑(λ(it) → neighbors(V2Eₒ, it)))(zavgSᐞ0), sign
+                      )
+                    )
+                  ))(compute_zavgS(pp, S_M));
+  out @ u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+       ← compute_pnabla(pp, S_M, sign, vol);
+}
+============================================================
+
+
+============================================================
+=== FINAL GTIR HANDED TO GTFN BACKEND ===
+============================================================
+__field_operator_compute_pnabla(pp, S_M, sign, vol, out) {
+  compute_zavgS = λ(pp, S_M) → 
+    (λ(zavgᐞ0) → (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(S_M, zavgᐞ0))(
+      (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(
+        0.5, (⇑(λ(__arg0, __arg1) → ·__arg0 + ·__arg1))(
+               (⇑(λ(__it) → ·⟪E2Vₒ, 0ₒ⟫(__it)))(pp), (⇑(λ(__it) → ·⟪E2Vₒ, 1ₒ⟫(__it)))(pp)
+             )
+      )
+    );
+  compute_pnabla = λ(pp, S_M, sign, vol) → 
+    (λ(zavgSᐞ0) → (λ(pnabla_Mᐞ0) → (⇑(λ(__arg0, __arg1) → ·__arg0 / ·__arg1))(pnabla_Mᐞ0, vol))(
+                    (⇑(λ(__arg0) → reduce(plus, 0)(·__arg0)))(
+                      (⇑(λ(__arg0, __arg1) → map_(multiplies)(·__arg0, ·__arg1)))(
+                        (⇑(λ(it) → neighbors(V2Eₒ, it)))(zavgSᐞ0), sign
+                      )
+                    )
+                  ))(compute_zavgS(pp, S_M));
+  out @ u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+       ← compute_pnabla(pp, S_M, sign, vol);
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER INLINING FUNDEFS ===
+============================================================
+__field_operator_compute_pnabla(pp, S_M, sign, vol, out) {
+  compute_zavgS = λ(pp, S_M) → 
+    (λ(zavgᐞ0) → (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(S_M, zavgᐞ0))(
+      (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(
+        0.5, (⇑(λ(__arg0, __arg1) → ·__arg0 + ·__arg1))(
+               (⇑(λ(__it) → ·⟪E2Vₒ, 0ₒ⟫(__it)))(pp), (⇑(λ(__it) → ·⟪E2Vₒ, 1ₒ⟫(__it)))(pp)
+             )
+      )
+    );
+  compute_pnabla = λ(pp, S_M, sign, vol) → 
+    (λ(zavgSᐞ0) → (λ(pnabla_Mᐞ0) → (⇑(λ(__arg0, __arg1) → ·__arg0 / ·__arg1))(pnabla_Mᐞ0, vol))(
+                    (⇑(λ(__arg0) → reduce(plus, 0)(·__arg0)))(
+                      (⇑(λ(__arg0, __arg1) → map_(multiplies)(·__arg0, ·__arg1)))(
+                        (⇑(λ(it) → neighbors(V2Eₒ, it)))(zavgSᐞ0), sign
+                      )
+                    )
+                  ))(
+      (λ(pp, S_M) → (λ(zavgᐞ0) → (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(S_M, zavgᐞ0))(
+                      (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(
+                        0.5, (⇑(λ(__arg0, __arg1) → ·__arg0 + ·__arg1))(
+                               (⇑(λ(__it) → ·⟪E2Vₒ, 0ₒ⟫(__it)))(pp), (⇑(λ(__it) → ·⟪E2Vₒ, 1ₒ⟫(__it)))(pp)
+                             )
+                      )
+                    ))(pp, S_M)
+    );
+  out @ u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+       ← (λ(pp, S_M, sign, vol) → 
+            (λ(zavgSᐞ0) → (λ(pnabla_Mᐞ0) → (⇑(λ(__arg0, __arg1) → ·__arg0 / ·__arg1))(pnabla_Mᐞ0, vol))(
+                            (⇑(λ(__arg0) → reduce(plus, 0)(·__arg0)))(
+                              (⇑(λ(__arg0, __arg1) → map_(multiplies)(·__arg0, ·__arg1)))(
+                                (⇑(λ(it) → neighbors(V2Eₒ, it)))(zavgSᐞ0), sign
+                              )
+                            )
+                          ))(
+              (λ(pp, S_M) → (λ(zavgᐞ0) → (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(S_M, zavgᐞ0))(
+                              (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(
+                                0.5, (⇑(λ(__arg0, __arg1) → ·__arg0 + ·__arg1))(
+                                       (⇑(λ(__it) → ·⟪E2Vₒ, 0ₒ⟫(__it)))(pp), (⇑(λ(__it) → ·⟪E2Vₒ, 1ₒ⟫(__it)))(pp)
+                                     )
+                              )
+                            ))(pp, S_M)
+            ))(pp, S_M, sign, vol);
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER INLINING FUNDEFS ===
+============================================================
+__field_operator_compute_pnabla(pp, S_M, sign, vol, out) {
+  compute_zavgS = λ(pp, S_M) → 
+    (λ(zavgᐞ0) → (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(S_M, zavgᐞ0))(
+      (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(
+        0.5, (⇑(λ(__arg0, __arg1) → ·__arg0 + ·__arg1))(
+               (⇑(λ(__it) → ·⟪E2Vₒ, 0ₒ⟫(__it)))(pp), (⇑(λ(__it) → ·⟪E2Vₒ, 1ₒ⟫(__it)))(pp)
+             )
+      )
+    );
+  compute_pnabla = λ(pp, S_M, sign, vol) → 
+    (λ(zavgSᐞ0) → (λ(pnabla_Mᐞ0) → (⇑(λ(__arg0, __arg1) → ·__arg0 / ·__arg1))(pnabla_Mᐞ0, vol))(
+                    (⇑(λ(__arg0) → reduce(plus, 0)(·__arg0)))(
+                      (⇑(λ(__arg0, __arg1) → map_(multiplies)(·__arg0, ·__arg1)))(
+                        (⇑(λ(it) → neighbors(V2Eₒ, it)))(zavgSᐞ0), sign
+                      )
+                    )
+                  ))(
+      (λ(pp, S_M) → (λ(zavgᐞ0) → (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(S_M, zavgᐞ0))(
+                      (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(
+                        0.5, (⇑(λ(__arg0, __arg1) → ·__arg0 + ·__arg1))(
+                               (⇑(λ(__it) → ·⟪E2Vₒ, 0ₒ⟫(__it)))(pp), (⇑(λ(__it) → ·⟪E2Vₒ, 1ₒ⟫(__it)))(pp)
+                             )
+                      )
+                    ))(pp, S_M)
+    );
+  out @ u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+       ← (λ(pp, S_M, sign, vol) → 
+            (λ(zavgSᐞ0) → (λ(pnabla_Mᐞ0) → (⇑(λ(__arg0, __arg1) → ·__arg0 / ·__arg1))(pnabla_Mᐞ0, vol))(
+                            (⇑(λ(__arg0) → reduce(plus, 0)(·__arg0)))(
+                              (⇑(λ(__arg0, __arg1) → map_(multiplies)(·__arg0, ·__arg1)))(
+                                (⇑(λ(it) → neighbors(V2Eₒ, it)))(zavgSᐞ0), sign
+                              )
+                            )
+                          ))(
+              (λ(pp, S_M) → (λ(zavgᐞ0) → (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(S_M, zavgᐞ0))(
+                              (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(
+                                0.5, (⇑(λ(__arg0, __arg1) → ·__arg0 + ·__arg1))(
+                                       (⇑(λ(__it) → ·⟪E2Vₒ, 0ₒ⟫(__it)))(pp), (⇑(λ(__it) → ·⟪E2Vₒ, 1ₒ⟫(__it)))(pp)
+                                     )
+                              )
+                            ))(pp, S_M)
+            ))(pp, S_M, sign, vol);
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER PRUNING UNREFERENCED FUNDEFS AND NORMALIZING SHIFTS ===
+============================================================
+__field_operator_compute_pnabla(pp, S_M, sign, vol, out) {
+  out @ u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+       ← (λ(pp, S_M, sign, vol) → 
+            (λ(zavgSᐞ0) → (λ(pnabla_Mᐞ0) → (⇑(λ(__arg0, __arg1) → ·__arg0 / ·__arg1))(pnabla_Mᐞ0, vol))(
+                            (⇑(λ(__arg0) → reduce(plus, 0)(·__arg0)))(
+                              (⇑(λ(__arg0, __arg1) → map_(multiplies)(·__arg0, ·__arg1)))(
+                                (⇑(λ(it) → neighbors(V2Eₒ, it)))(zavgSᐞ0), sign
+                              )
+                            )
+                          ))(
+              (λ(pp, S_M) → (λ(zavgᐞ0) → (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(S_M, zavgᐞ0))(
+                              (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(
+                                0.5, (⇑(λ(__arg0, __arg1) → ·__arg0 + ·__arg1))(
+                                       (⇑(λ(__it) → ·⟪E2Vₒ, 0ₒ⟫(__it)))(pp), (⇑(λ(__it) → ·⟪E2Vₒ, 1ₒ⟫(__it)))(pp)
+                                     )
+                              )
+                            ))(pp, S_M)
+            ))(pp, S_M, sign, vol);
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER PRUNING UNREFERENCED FUNDEFS AND NORMALIZING SHIFTS ===
+============================================================
+__field_operator_compute_pnabla(pp, S_M, sign, vol, out) {
+  out @ u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+       ← (λ(pp, S_M, sign, vol) → 
+            (λ(zavgSᐞ0) → (λ(pnabla_Mᐞ0) → (⇑(λ(__arg0, __arg1) → ·__arg0 / ·__arg1))(pnabla_Mᐞ0, vol))(
+                            (⇑(λ(__arg0) → reduce(plus, 0)(·__arg0)))(
+                              (⇑(λ(__arg0, __arg1) → map_(multiplies)(·__arg0, ·__arg1)))(
+                                (⇑(λ(it) → neighbors(V2Eₒ, it)))(zavgSᐞ0), sign
+                              )
+                            )
+                          ))(
+              (λ(pp, S_M) → (λ(zavgᐞ0) → (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(S_M, zavgᐞ0))(
+                              (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(
+                                0.5, (⇑(λ(__arg0, __arg1) → ·__arg0 + ·__arg1))(
+                                       (⇑(λ(__it) → ·⟪E2Vₒ, 0ₒ⟫(__it)))(pp), (⇑(λ(__it) → ·⟪E2Vₒ, 1ₒ⟫(__it)))(pp)
+                                     )
+                              )
+                            ))(pp, S_M)
+            ))(pp, S_M, sign, vol);
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER DEAD CODE ELIMINATION ===
+============================================================
+__field_operator_compute_pnabla(pp, S_M, sign, vol, out) {
+  out @ u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+       ← (⇑(λ(__arg0___, __arg1___) → ·__arg0___ / ·__arg1___))(
+           (⇑(λ(__arg0__) → reduce(plus, 0)(·__arg0__)))(
+             (⇑(λ(__arg0__, __arg1__) → map_(multiplies)(·__arg0__, ·__arg1__)))(
+               (⇑(λ(it) → neighbors(V2Eₒ, it)))(
+                 (⇑(λ(__arg0_, __arg1_) → ·__arg0_ × ·__arg1_))(
+                   S_M, (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(
+                          0.5, (⇑(λ(__arg0, __arg1) → ·__arg0 + ·__arg1))(
+                                 (⇑(λ(__it) → ·⟪E2Vₒ, 0ₒ⟫(__it)))(pp), (⇑(λ(__it) → ·⟪E2Vₒ, 1ₒ⟫(__it)))(pp)
+                               )
+                        )
+                 )
+               ), sign
+             )
+           ), vol
+         );
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER DEAD CODE ELIMINATION ===
+============================================================
+__field_operator_compute_pnabla(pp, S_M, sign, vol, out) {
+  out @ u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+       ← (⇑(λ(__arg0___, __arg1___) → ·__arg0___ / ·__arg1___))(
+           (⇑(λ(__arg0__) → reduce(plus, 0)(·__arg0__)))(
+             (⇑(λ(__arg0__, __arg1__) → map_(multiplies)(·__arg0__, ·__arg1__)))(
+               (⇑(λ(it) → neighbors(V2Eₒ, it)))(
+                 (⇑(λ(__arg0_, __arg1_) → ·__arg0_ × ·__arg1_))(
+                   S_M, (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(
+                          0.5, (⇑(λ(__arg0, __arg1) → ·__arg0 + ·__arg1))(
+                                 (⇑(λ(__it) → ·⟪E2Vₒ, 0ₒ⟫(__it)))(pp), (⇑(λ(__it) → ·⟪E2Vₒ, 1ₒ⟫(__it)))(pp)
+                               )
+                        )
+                 )
+               ), sign
+             )
+           ), vol
+         );
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER CANONICALIZING DOMAIN ARGUMENTS ===
+============================================================
+__field_operator_compute_pnabla(pp, S_M, sign, vol, out) {
+  out @ u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+       ← (⇑(λ(__arg0___, __arg1___) → ·__arg0___ / ·__arg1___))(
+           (⇑(λ(__arg0__) → reduce(plus, 0)(·__arg0__)))(
+             (⇑(λ(__arg0__, __arg1__) → map_(multiplies)(·__arg0__, ·__arg1__)))(
+               (⇑(λ(it) → neighbors(V2Eₒ, it)))(
+                 (⇑(λ(__arg0_, __arg1_) → ·__arg0_ × ·__arg1_))(
+                   S_M, (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(
+                          0.5, (⇑(λ(__arg0, __arg1) → ·__arg0 + ·__arg1))(
+                                 (⇑(λ(__it) → ·⟪E2Vₒ, 0ₒ⟫(__it)))(pp), (⇑(λ(__it) → ·⟪E2Vₒ, 1ₒ⟫(__it)))(pp)
+                               )
+                        )
+                 )
+               ), sign
+             )
+           ), vol
+         );
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER CANONICALIZING DOMAIN ARGUMENTS ===
+============================================================
+__field_operator_compute_pnabla(pp, S_M, sign, vol, out) {
+  out @ u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+       ← (⇑(λ(__arg0___, __arg1___) → ·__arg0___ / ·__arg1___))(
+           (⇑(λ(__arg0__) → reduce(plus, 0)(·__arg0__)))(
+             (⇑(λ(__arg0__, __arg1__) → map_(multiplies)(·__arg0__, ·__arg1__)))(
+               (⇑(λ(it) → neighbors(V2Eₒ, it)))(
+                 (⇑(λ(__arg0_, __arg1_) → ·__arg0_ × ·__arg1_))(
+                   S_M, (⇑(λ(__arg0, __arg1) → ·__arg0 × ·__arg1))(
+                          0.5, (⇑(λ(__arg0, __arg1) → ·__arg0 + ·__arg1))(
+                                 (⇑(λ(__it) → ·⟪E2Vₒ, 0ₒ⟫(__it)))(pp), (⇑(λ(__it) → ·⟪E2Vₒ, 1ₒ⟫(__it)))(pp)
+                               )
+                        )
+                 )
+               ), sign
+             )
+           ), vol
+         );
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER COMMON TRANSFORMS BEFORE INFER_DOMAIN ===
+============================================================
+__field_operator_compute_pnabla(pp, S_M, sign, vol, out) {
+  out @ u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+       ← as_fieldop(λ(__arg0___, __arg1___) → ·__arg0___ / ·__arg1___,
+                    u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩)(
+           as_fieldop(λ(__arg0__) → reduce(plus, 0)(·__arg0__),
+                      u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩)(
+             as_fieldop(λ(__arg0__, __arg1__) → map_(multiplies)(·__arg0__, ·__arg1__),
+                        u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩)(
+               as_fieldop(λ(it) → neighbors(V2Eₒ, it),
+                          u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩)(
+                 as_fieldop(λ(__arg0_, __arg1_) → ·__arg0_ × ·__arg1_, u⟨ Edgeₕ: [0, 653[ ⟩)(
+                   S_M, as_fieldop(λ(__arg0, __arg1) → ·__arg0 × ·__arg1, u⟨ Edgeₕ: [0, 653[ ⟩)(
+                          0.5, as_fieldop(λ(__arg0, __arg1) → ·__arg0 + ·__arg1, u⟨ Edgeₕ: [0, 653[ ⟩)(
+                                 as_fieldop(λ(__it) → ·⟪E2Vₒ, 0ₒ⟫(__it), u⟨ Edgeₕ: [0, 653[ ⟩)(pp),
+                                 as_fieldop(λ(__it) → ·⟪E2Vₒ, 1ₒ⟫(__it), u⟨ Edgeₕ: [0, 653[ ⟩)(pp)
+                               )
+                        )
+                 )
+               ), sign
+             )
+           ), vol
+         );
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER COMMON TRANSFORMS BEFORE INFER_DOMAIN ===
+============================================================
+__field_operator_compute_pnabla(pp, S_M, sign, vol, out) {
+  out @ u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+       ← as_fieldop(λ(__arg0___, __arg1___) → ·__arg0___ / ·__arg1___,
+                    u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩)(
+           as_fieldop(λ(__arg0__) → reduce(plus, 0)(·__arg0__),
+                      u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩)(
+             as_fieldop(λ(__arg0__, __arg1__) → map_(multiplies)(·__arg0__, ·__arg1__),
+                        u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩)(
+               as_fieldop(λ(it) → neighbors(V2Eₒ, it),
+                          u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩)(
+                 as_fieldop(λ(__arg0_, __arg1_) → ·__arg0_ × ·__arg1_, u⟨ Edgeₕ: [0, 653[ ⟩)(
+                   S_M, as_fieldop(λ(__arg0, __arg1) → ·__arg0 × ·__arg1, u⟨ Edgeₕ: [0, 653[ ⟩)(
+                          0.5, as_fieldop(λ(__arg0, __arg1) → ·__arg0 + ·__arg1, u⟨ Edgeₕ: [0, 653[ ⟩)(
+                                 as_fieldop(λ(__it) → ·⟪E2Vₒ, 0ₒ⟫(__it), u⟨ Edgeₕ: [0, 653[ ⟩)(pp),
+                                 as_fieldop(λ(__it) → ·⟪E2Vₒ, 1ₒ⟫(__it), u⟨ Edgeₕ: [0, 653[ ⟩)(pp)
+                               )
+                        )
+                 )
+               ), sign
+             )
+           ), vol
+         );
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER TRANSFORM AS FIELDOP ===
+============================================================
+__field_operator_compute_pnabla(pp, S_M, sign, vol, out) {
+  out @ u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+       ← as_fieldop(λ(__arg0___, __arg1___) → ·__arg0___ / ·__arg1___,
+                    u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩)(
+           as_fieldop(λ(__arg0__) → reduce(plus, 0)(·__arg0__),
+                      u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩)(
+             as_fieldop(λ(__arg0__, __arg1__) → map_(multiplies)(·__arg0__, ·__arg1__),
+                        u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩)(
+               as_fieldop(λ(it) → neighbors(V2Eₒ, it),
+                          u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩)(
+                 as_fieldop(λ(__arg0_, __arg1_) → ·__arg0_ × ·__arg1_, u⟨ Edgeₕ: [0, 653[ ⟩)(
+                   S_M, as_fieldop(λ(__arg0, __arg1) → ·__arg0 × ·__arg1, u⟨ Edgeₕ: [0, 653[ ⟩)(
+                          0.5, as_fieldop(λ(__arg0, __arg1) → ·__arg0 + ·__arg1, u⟨ Edgeₕ: [0, 653[ ⟩)(
+                                 as_fieldop(λ(__it) → ·⟪E2Vₒ, 0ₒ⟫(__it), u⟨ Edgeₕ: [0, 653[ ⟩)(pp),
+                                 as_fieldop(λ(__it) → ·⟪E2Vₒ, 1ₒ⟫(__it), u⟨ Edgeₕ: [0, 653[ ⟩)(pp)
+                               )
+                        )
+                 )
+               ), sign
+             )
+           ), vol
+         );
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER TRANSFORM AS FIELDOP ===
+============================================================
+__field_operator_compute_pnabla(pp, S_M, sign, vol, out) {
+  out @ u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+       ← as_fieldop(λ(__arg0___, __arg1___) → ·__arg0___ / ·__arg1___,
+                    u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩)(
+           as_fieldop(λ(__arg0__) → reduce(plus, 0)(·__arg0__),
+                      u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩)(
+             as_fieldop(λ(__arg0__, __arg1__) → map_(multiplies)(·__arg0__, ·__arg1__),
+                        u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩)(
+               as_fieldop(λ(it) → neighbors(V2Eₒ, it),
+                          u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩)(
+                 as_fieldop(λ(__arg0_, __arg1_) → ·__arg0_ × ·__arg1_, u⟨ Edgeₕ: [0, 653[ ⟩)(
+                   S_M, as_fieldop(λ(__arg0, __arg1) → ·__arg0 × ·__arg1, u⟨ Edgeₕ: [0, 653[ ⟩)(
+                          0.5, as_fieldop(λ(__arg0, __arg1) → ·__arg0 + ·__arg1, u⟨ Edgeₕ: [0, 653[ ⟩)(
+                                 as_fieldop(λ(__it) → ·⟪E2Vₒ, 0ₒ⟫(__it), u⟨ Edgeₕ: [0, 653[ ⟩)(pp),
+                                 as_fieldop(λ(__it) → ·⟪E2Vₒ, 1ₒ⟫(__it), u⟨ Edgeₕ: [0, 653[ ⟩)(pp)
+                               )
+                        )
+                 )
+               ), sign
+             )
+           ), vol
+         );
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER INLINING LIFTS AND LAMBDAS ===
+============================================================
+__field_operator_compute_pnabla(pp, S_M, sign, vol, out) {
+  out @ u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+       ← as_fieldop(
+           λ(S_M, pp, sign, vol) → 
+             reduce(plus, 0)(
+               map_(multiplies)(
+                 neighbors(V2Eₒ, (↑(λ(S_M_, pp_) → (·⟪E2Vₒ, 0ₒ⟫(pp_) + ·⟪E2Vₒ, 1ₒ⟫(pp_)) × 0.5 × ·S_M_))(S_M, pp)),
+                 ·sign
+               )
+             ) / ·vol, u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+         )(S_M, pp, sign, vol);
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER INLINING LIFTS AND LAMBDAS ===
+============================================================
+__field_operator_compute_pnabla(pp, S_M, sign, vol, out) {
+  out @ u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+       ← as_fieldop(
+           λ(S_M, pp, sign, vol) → 
+             reduce(plus, 0)(
+               map_(multiplies)(
+                 neighbors(V2Eₒ, (↑(λ(S_M_, pp_) → (·⟪E2Vₒ, 0ₒ⟫(pp_) + ·⟪E2Vₒ, 1ₒ⟫(pp_)) × 0.5 × ·S_M_))(S_M, pp)),
+                 ·sign
+               )
+             ) / ·vol, u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+         )(S_M, pp, sign, vol);
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER COMMON TRANSFORMS ===
+============================================================
+__field_operator_compute_pnabla(pp, S_M, sign, vol, out) {
+  out @ u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+       ← as_fieldop(
+           λ(S_M, pp, sign, vol) → 
+             reduce(plus, 0)(
+               map_(multiplies)(
+                 neighbors(V2Eₒ, (↑(λ(S_M_, pp_) → (·⟪E2Vₒ, 0ₒ⟫(pp_) + ·⟪E2Vₒ, 1ₒ⟫(pp_)) × 0.5 × ·S_M_))(S_M, pp)),
+                 ·sign
+               )
+             ) / ·vol, u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+         )(S_M, pp, sign, vol);
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER COMMON TRANSFORMS ===
+============================================================
+__field_operator_compute_pnabla(pp, S_M, sign, vol, out) {
+  out @ u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+       ← as_fieldop(
+           λ(S_M, pp, sign, vol) → 
+             reduce(plus, 0)(
+               map_(multiplies)(
+                 neighbors(V2Eₒ, (↑(λ(S_M_, pp_) → (·⟪E2Vₒ, 0ₒ⟫(pp_) + ·⟪E2Vₒ, 1ₒ⟫(pp_)) × 0.5 × ·S_M_))(S_M, pp)),
+                 ·sign
+               )
+             ) / ·vol, u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+         )(S_M, pp, sign, vol);
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER UNROLLING REDUCE ===
+============================================================
+__field_operator_compute_pnabla(pp, S_M, sign, vol, out) {
+  out @ u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+       ← as_fieldop(
+           λ(S_M, pp, sign, vol) → 
+             (λ(_step_0) → _step_0(_step_0(_step_0(_step_0(_step_0(_step_0(0, 0ₒ), 1ₒ), 2ₒ), 3ₒ), 4ₒ), 5ₒ))(
+               λ(_acc_0, _i_0) → 
+                 if   can_deref(⟪V2Eₒ, _i_0⟫(S_M)) ∧ can_deref(⟪V2Eₒ, _i_0⟫(pp))
+                 then (λ(_fuse_maps_0, _fuse_maps_2, _fuse_maps_3) → _fuse_maps_0 + _fuse_maps_2 × _fuse_maps_3)(
+                        _acc_0,
+                        (λ(pp_) → (·⟪E2Vₒ, 0ₒ⟫(pp_) + ·⟪E2Vₒ, 1ₒ⟫(pp_)) × 0.5 × ·⟪V2Eₒ, _i_0⟫(S_M))(⟪V2Eₒ, _i_0⟫(pp)),
+                        list_get(_i_0, ·sign)
+                      )
+                 else _acc_0
+             ) / ·vol, u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+         )(S_M, pp, sign, vol);
+}
+============================================================
+
+
+============================================================
+=== GTIR END ===
+============================================================
+__field_operator_compute_pnabla(pp, S_M, sign, vol, out) {
+  out @ u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+       ← as_fieldop(
+           λ(S_M, pp, sign, vol) → 
+             (λ(_step_0) → _step_0(_step_0(_step_0(_step_0(_step_0(_step_0(0, 0ₒ), 1ₒ), 2ₒ), 3ₒ), 4ₒ), 5ₒ))(
+               λ(_acc_0, _i_0) → 
+                 if   can_deref(⟪V2Eₒ, _i_0⟫(S_M)) ∧ can_deref(⟪V2Eₒ, _i_0⟫(pp))
+                 then _acc_0
+                      + (λ(pp_) → (·⟪E2Vₒ, 0ₒ⟫(pp_) + ·⟪E2Vₒ, 1ₒ⟫(pp_)) × 0.5 × ·⟪V2Eₒ, _i_0⟫(S_M))(⟪V2Eₒ, _i_0⟫(pp))
+                        × list_get(_i_0, ·sign)
+                 else _acc_0
+             ) / ·vol, u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+         )(S_M, pp, sign, vol);
+}
+============================================================
+
+
+============================================================
+=== GTIR AFTER UNROLLING REDUCE ===
+============================================================
+__field_operator_compute_pnabla(pp, S_M, sign, vol, out) {
+  out @ u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+       ← as_fieldop(
+           λ(S_M, pp, sign, vol) → 
+             (λ(_step_0) → _step_0(_step_0(_step_0(_step_0(_step_0(_step_0(0, 0ₒ), 1ₒ), 2ₒ), 3ₒ), 4ₒ), 5ₒ))(
+               λ(_acc_0, _i_0) → 
+                 if   can_deref(⟪V2Eₒ, _i_0⟫(S_M)) ∧ can_deref(⟪V2Eₒ, _i_0⟫(pp))
+                 then (λ(_fuse_maps_0, _fuse_maps_2, _fuse_maps_3) → _fuse_maps_0 + _fuse_maps_2 × _fuse_maps_3)(
+                        _acc_0,
+                        (λ(pp_) → (·⟪E2Vₒ, 0ₒ⟫(pp_) + ·⟪E2Vₒ, 1ₒ⟫(pp_)) × 0.5 × ·⟪V2Eₒ, _i_0⟫(S_M))(⟪V2Eₒ, _i_0⟫(pp)),
+                        list_get(_i_0, ·sign)
+                      )
+                 else _acc_0
+             ) / ·vol, u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+         )(S_M, pp, sign, vol);
+}
+============================================================
+
+
+============================================================
+=== GTIR END ===
+============================================================
+__field_operator_compute_pnabla(pp, S_M, sign, vol, out) {
+  out @ u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+       ← as_fieldop(
+           λ(S_M, pp, sign, vol) → 
+             (λ(_step_0) → _step_0(_step_0(_step_0(_step_0(_step_0(_step_0(0, 0ₒ), 1ₒ), 2ₒ), 3ₒ), 4ₒ), 5ₒ))(
+               λ(_acc_0, _i_0) → 
+                 if   can_deref(⟪V2Eₒ, _i_0⟫(S_M)) ∧ can_deref(⟪V2Eₒ, _i_0⟫(pp))
+                 then _acc_0
+                      + (λ(pp_) → (·⟪E2Vₒ, 0ₒ⟫(pp_) + ·⟪E2Vₒ, 1ₒ⟫(pp_)) × 0.5 × ·⟪V2Eₒ, _i_0⟫(S_M))(⟪V2Eₒ, _i_0⟫(pp))
+                        × list_get(_i_0, ·sign)
+                 else _acc_0
+             ) / ·vol, u⟨ Vertexₕ: [get_domain_range(out, Vertexₕ)[0], get_domain_range(out, Vertexₕ)[1][ ⟩
+         )(S_M, pp, sign, vol);
+}
+============================================================
+

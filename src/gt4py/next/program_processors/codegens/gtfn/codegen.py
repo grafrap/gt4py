@@ -160,6 +160,30 @@ class GTFNCodegen(codegen.TemplatedGenerator):
         )
 
     def visit_FunCall(self, node: gtfn_ir.FunCall, **kwargs: Any) -> str:
+        if (
+            isinstance(node.fun, gtfn_ir_common.SymRef)
+            and node.fun.id in {"minimum", "maximum"}
+            and len(node.args) == 2
+            and any(
+                isinstance(arg, gtfn_ir.IntegralConstant)
+                or (isinstance(arg, gtfn_ir.OffsetLiteral) and isinstance(arg.value, int))
+                for arg in node.args
+            )
+        ):
+            normalized_args: list[gtfn_ir_common.Expr] = []
+            for arg in node.args:
+                if isinstance(arg, gtfn_ir.OffsetLiteral) and isinstance(arg.value, int):
+                    normalized_args.append(gtfn_ir.IntegralConstant(value=int(arg.value)))
+                elif (
+                    isinstance(arg, gtfn_ir.Literal)
+                    and arg.type.startswith(("int", "uint"))
+                    and str(arg.value).lstrip("-").isdigit()
+                ):
+                    normalized_args.append(gtfn_ir.IntegralConstant(value=int(arg.value)))
+                else:
+                    normalized_args.append(arg)
+            node = gtfn_ir.FunCall(fun=node.fun, args=normalized_args)
+
         # functions are represented as function objects that need to be instantiated
         instantiate = "{}()" if self.is_functor_call(node) else ""
         return self.generic_visit(node, instantiate=instantiate)
@@ -259,10 +283,26 @@ class GTFNCodegen(codegen.TemplatedGenerator):
         self.user_defined_function_ids = list(
             str(fundef.id) for fundef in node.function_definitions
         )
+        domain_tag_names: list[str] = []
+        for execution in node.executions:
+            backend = getattr(execution, "backend", None)
+            if backend is None:
+                continue
+            domain = getattr(backend, "domain", None)
+            if not isinstance(domain, gtfn_ir.CartesianDomain):
+                continue
+            for tag in domain.tagged_sizes.tags:
+                if isinstance(tag, gtfn_ir.Literal):
+                    tag_name = str(tag.value)
+                else:
+                    tag_name = str(tag)
+                if tag_name not in domain_tag_names:
+                    domain_tag_names.append(tag_name)
+
         return self.generic_visit(
             node,
             grid_type_str=self._grid_type_str[node.grid_type],
-            block_sizes=self._block_sizes(node.offset_definitions),
+            block_sizes=self._block_sizes(node.offset_definitions, domain_tag_names),
             **kwargs,
         )
 
@@ -313,11 +353,23 @@ class GTFNCodegen(codegen.TemplatedGenerator):
     """
     )
 
-    def _block_sizes(self, offset_definitions: list[gtfn_ir.TagDefinition]) -> str:
+    def _block_sizes(
+        self, offset_definitions: list[gtfn_ir.TagDefinition], domain_tag_names: list[str] | None = None
+    ) -> str:
         if self.is_cartesian:
             block_dims = []
-            block_sizes = [32, 8] + [1] * (len(offset_definitions) - 2)
-            for i, tag in enumerate(offset_definitions):
+            if domain_tag_names:
+                domain_tag_name_set = set(domain_tag_names)
+                filtered_offset_definitions = [
+                    tag
+                    for tag in offset_definitions
+                    if str(tag.name.id) in domain_tag_name_set
+                ]
+            else:
+                filtered_offset_definitions = offset_definitions
+
+            block_sizes = [32, 8] + [1] * (len(filtered_offset_definitions) - 2)
+            for i, tag in enumerate(filtered_offset_definitions):
                 if tag.alias is None:
                     block_dims.append(
                         f"gridtools::meta::list<{tag.name.id}_t, "

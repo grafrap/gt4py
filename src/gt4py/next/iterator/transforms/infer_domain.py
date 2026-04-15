@@ -129,6 +129,7 @@ def _extract_accessed_domains(
     symbolic_domain_sizes: Optional[dict[str, itir.Expr]],
 ) -> dict[str, NonTupleDomainAccess]:
     accessed_domains: dict[str, NonTupleDomainAccess] = {}
+    offset_provider_type = common.offset_provider_to_type(offset_provider)
 
     shifts_results = trace_shifts.trace_stencil(stencil, num_args=len(input_ids))
 
@@ -139,12 +140,48 @@ def _extract_accessed_domains(
             accessed_domains[in_field_id] = DomainAccessDescriptor.UNKNOWN
             continue
 
+        translate_domain = target_domain
+        if isinstance(target_domain, domain_utils.SymbolicDomain):
+            extra_ranges: dict[common.Dimension, tuple[int, int]] = {}
+            for shift in shifts_list:
+                if (
+                    len(shift) == 2
+                    and isinstance(shift[0], itir.OffsetLiteral)
+                    and isinstance(shift[0].value, str)
+                    and isinstance(shift[1], itir.OffsetLiteral)
+                    and isinstance(shift[1].value, int)
+                ):
+                    try:
+                        offset_type = common.get_offset_type(offset_provider_type, shift[0].value)
+                    except KeyError:
+                        offset_type = common.Dimension(
+                            value=shift[0].value, kind=common.DimensionKind.HORIZONTAL
+                        )
+                    if (
+                        isinstance(offset_type, common.Dimension)
+                        and offset_type not in target_domain.ranges
+                    ):
+                        minv, maxv = extra_ranges.get(offset_type, (shift[1].value, shift[1].value))
+                        extra_ranges[offset_type] = (
+                            min(minv, shift[1].value),
+                            max(maxv, shift[1].value),
+                        )
+
+            if extra_ranges:
+                ranges = {**target_domain.ranges}
+                for dim, (minv, maxv) in extra_ranges.items():
+                    ranges[dim] = domain_utils.SymbolicRange(
+                        start=itir.OffsetLiteral(value=minv),
+                        stop=itir.OffsetLiteral(value=maxv + 1),
+                    )
+                translate_domain = domain_utils.SymbolicDomain(target_domain.grid_type, ranges)
+
         new_domains = [
             domain_utils.SymbolicDomain.translate(
-                target_domain, shift, offset_provider, symbolic_domain_sizes
+                translate_domain, shift, offset_provider, symbolic_domain_sizes
             )
-            if not isinstance(target_domain, DomainAccessDescriptor)
-            else target_domain
+            if not isinstance(translate_domain, DomainAccessDescriptor)
+            else translate_domain
             for shift in shifts_list
         ]
         accessed_domains[in_field_id] = _domain_union(

@@ -7,6 +7,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import copy
+import dataclasses
 
 from gt4py._core import filecache
 import numpy as np
@@ -156,6 +157,56 @@ def test_gtfn_file_cache(program_example):
         bare_gtfn_translation_step(compilable_program)
         == cached_gtfn_translation_step.cache[cache_key]
     )
+
+
+def test_translation_step_inlines_cartesian_domain_ranges_from_static_sizes():
+    IDim = gtx.Dimension("IDim")
+    JDim = gtx.Dimension("JDim")
+    out = gtx.as_field([IDim, JDim], np.empty((13, 11), dtype=np.float32))
+    out_type = type_translation.from_value(out)
+
+    domain = im.domain(
+        gtx.GridType.CARTESIAN,
+        {
+            IDim: (
+                im.tuple_get(0, im.call("get_domain_range")(im.ref("out"), IDim)),
+                im.tuple_get(1, im.call("get_domain_range")(im.ref("out"), IDim)),
+            ),
+            JDim: (
+                im.tuple_get(0, im.call("get_domain_range")(im.ref("out"), JDim)),
+                im.tuple_get(1, im.call("get_domain_range")(im.ref("out"), JDim)),
+            ),
+        },
+    )
+    program = itir.Program(
+        id="example_domain_inline",
+        function_definitions=[],
+        params=[im.sym("out", out_type)],
+        declarations=[],
+        body=[
+            itir.SetAt(
+                expr=im.as_fieldop("deref", domain)(im.ref("out")),
+                domain=domain,
+                target=im.ref("out"),
+            )
+        ],
+    )
+
+    compile_args = dataclasses.replace(
+        arguments.CompileTimeArgs.from_concrete(out, offset_provider={}),
+        argument_descriptor_contexts={
+            arguments.StaticArg: {
+                "max_i": arguments.StaticArg(value=13),
+                "max_j": arguments.StaticArg(value=11),
+            }
+        },
+    )
+
+    module = gtfn_module.translate_program_cpu(
+        definitions.CompilableProgramDef(data=program, args=compile_args)
+    )
+
+    assert module.source_code.count("get_domain_range(") == 1
 
 
 # TODO(egparedes): we should switch to use the cached backend by default and then remove this test

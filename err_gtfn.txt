@@ -1,0 +1,2 @@
+NoTagError: `git describe --long --dirty --always --tags '--match=v*'` could not find a tag
+NoTagError: `git describe --long --dirty --always --tags '--match=v*'` could not find a tag

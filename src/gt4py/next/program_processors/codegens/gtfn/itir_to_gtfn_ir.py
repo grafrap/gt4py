@@ -126,6 +126,35 @@ def _collect_dimensions_from_domain(
     return offset_definitions
 
 
+def _collect_local_dimensions_from_type(type_spec: ts.TypeSpec | None) -> dict[str, TagDefinition]:
+    offset_definitions: dict[str, TagDefinition] = {}
+
+    if isinstance(type_spec, ts.FieldType):
+        for dim in type_spec.dims:
+            if dim.kind == common.DimensionKind.LOCAL:
+                offset_definitions[dim.value] = TagDefinition(name=Sym(id=dim.value))
+    elif isinstance(type_spec, ts.TupleType):
+        for element_type in type_spec.types:
+            offset_definitions.update(_collect_local_dimensions_from_type(element_type))
+
+    return offset_definitions
+
+
+def _collect_local_dimensions_from_types(
+    params: Iterable[itir.Sym], declarations: Iterable[itir.Temporary]
+) -> dict[str, TagDefinition]:
+    offset_definitions: dict[str, TagDefinition] = {}
+
+    for param in params:
+        offset_definitions.update(_collect_local_dimensions_from_type(param.type))
+
+    for declaration in declarations:
+        declaration_type = getattr(declaration, "type", None)
+        offset_definitions.update(_collect_local_dimensions_from_type(declaration_type))
+
+    return offset_definitions
+
+
 def _collect_offset_definitions(
     node: itir.Node,
     grid_type: common.GridType,
@@ -137,11 +166,12 @@ def _collect_offset_definitions(
         .filter(lambda offset_literal: isinstance(offset_literal.value, str))
         .getattr("value")
     ).to_set()
-    # implicit offsets don't occur in the `offset_provider_type`, get them from the used offset tags
+    # collect only offsets actually used in the IR (including implicit offsets)
+    # to avoid introducing irrelevant connectivity tags into code generation.
     offset_provider_type = {
         offset_name: common.get_offset_type(offset_provider_type, offset_name)
         for offset_name in used_offset_tags
-    } | {**offset_provider_type}
+    }
     offset_definitions = {}
 
     for offset_name, dim_or_connectivity_type in offset_provider_type.items():
@@ -169,6 +199,18 @@ def _collect_offset_definitions(
         elif isinstance(
             connectivity_type := dim_or_connectivity_type, common.NeighborConnectivityType
         ):
+            if grid_type == common.GridType.CARTESIAN:
+                offset_definitions[offset_name] = TagDefinition(name=Sym(id=offset_name))
+                offset_definitions[connectivity_type.source_dim.value] = TagDefinition(
+                    name=Sym(id=connectivity_type.source_dim.value)
+                )
+                offset_definitions[connectivity_type.codomain.value] = TagDefinition(
+                    name=Sym(id=connectivity_type.codomain.value)
+                )
+                offset_definitions[connectivity_type.neighbor_dim.value] = TagDefinition(
+                    name=Sym(id=connectivity_type.neighbor_dim.value)
+                )
+                continue
             assert grid_type == common.GridType.UNSTRUCTURED
             offset_definitions[offset_name] = TagDefinition(name=Sym(id=offset_name))
             if offset_name != connectivity_type.neighbor_dim.value:
@@ -667,6 +709,7 @@ class GTFN_lowering(eve.NodeTranslator, eve.VisitorWithSymbolTableTrait):
         function_definitions = self.visit(node.function_definitions) + extracted_functions
         offset_definitions = {
             **_collect_dimensions_from_domain(node.body),
+            **_collect_local_dimensions_from_types(node.params, node.declarations),
             **_collect_offset_definitions(node, self.grid_type, self.offset_provider_type),
         }
         return Program(

@@ -189,8 +189,13 @@ class SymbolicDomain:
                 assert isinstance(val, itir.OffsetLiteral) and isinstance(val.value, int)
                 current_dim = connectivity_type
                 # cartesian offset
+                if current_dim not in new_ranges:
+                    new_ranges[current_dim] = SymbolicRange(
+                        itir.InfinityLiteral.NEGATIVE,
+                        itir.InfinityLiteral.POSITIVE,
+                    )
                 new_ranges[current_dim] = SymbolicRange.translate(
-                    self.ranges[current_dim], val.value
+                    new_ranges[current_dim], val.value
                 )
             elif isinstance(connectivity_type, common.NeighborConnectivityType):
                 # unstructured shift
@@ -203,6 +208,24 @@ class SymbolicDomain:
                 old_dim = connectivity_type.source_dim
                 new_dim = connectivity_type.codomain
                 assert new_dim not in new_ranges or old_dim == new_dim
+
+                # If the new_dim is not in horizontal_sizes, try to compute it from the connectivity
+                if new_dim.value not in horizontal_sizes:
+                        # Try to extract the size from the offset provider itself
+                        offset_name = off.value if isinstance(off, itir.OffsetLiteral) else None
+                        if offset_name and common.is_offset_provider(offset_provider):
+                            provider = offset_provider.get(offset_name)
+                            if provider is not None and common.is_neighbor_connectivity(provider):
+                                # Extract codomain size from the connectivity array
+                                max_neighbor = int(provider.ndarray.max())  # type: ignore[attr-defined]
+                                horizontal_sizes[new_dim.value] = im.literal(
+                                    str(max_neighbor + 1), builtins.INTEGER_INDEX_BUILTIN
+                                )
+                    
+                        # If still not found, skip this translation - return unchanged domain
+                        if new_dim.value not in horizontal_sizes:
+                            return self
+
                 if symbolic_domain_sizes is not None and new_dim.value in symbolic_domain_sizes:
                     new_range = SymbolicRange(
                         im.literal(str(0), builtins.INTEGER_INDEX_BUILTIN),
@@ -264,10 +287,18 @@ def _reduce_domains(
     Applies range_op to the ranges of a list of domains with same dimensions and grid_type.
     """
     assert all(domain.grid_type == domains[0].grid_type for domain in domains)
-    assert all(domain.ranges.keys() == domains[0].ranges.keys() for domain in domains)
 
-    dims = domains[0].ranges.keys()
-    new_domain_ranges = {dim: range_reduce_op(*(d.ranges[dim] for d in domains)) for dim in dims}
+    dims: list[common.Dimension] = [*domains[0].ranges.keys()]
+    for domain in domains[1:]:
+        for dim in domain.ranges.keys():
+            if dim not in dims:
+                dims.append(dim)
+
+    promoted_domains = [promote_domain(domain, dims) for domain in domains]
+    new_domain_ranges = {
+        dim: range_reduce_op(*(domain.ranges[dim] for domain in promoted_domains))
+        for dim in dims
+    }
 
     return SymbolicDomain(domains[0].grid_type, new_domain_ranges)
 
