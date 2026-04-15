@@ -582,14 +582,22 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
             return not any(name in {"Edge", "Vertex", "Cell"} for name in dim_names)
 
         def _is_unstructured_edge_domain(domain_expr: ir.Expr) -> bool:
-            if not cpm.is_call_to(domain_expr, "unstructured_domain"):
-                return False
-            for nr in domain_expr.args:
-                if not (cpm.is_call_to(nr, "named_range") and len(nr.args) == 3):
+            def _iter_domain_nodes(expr: ir.Expr):
+                if cpm.is_call_to(expr, "make_tuple"):
+                    for arg in expr.args:
+                        yield from _iter_domain_nodes(arg)
+                    return
+                yield expr
+
+            for dom in _iter_domain_nodes(domain_expr):
+                if not cpm.is_call_to(dom, "unstructured_domain"):
                     continue
-                axis_name = _get_axis_name(nr.args[0])
-                if axis_name == "Edge":
-                    return True
+                for nr in dom.args:
+                    if not (cpm.is_call_to(nr, "named_range") and len(nr.args) == 3):
+                        continue
+                    axis_name = _get_axis_name(nr.args[0])
+                    if axis_name == "Edge":
+                        return True
             return False
 
         def _minus_one(expr: ir.Expr) -> ir.Expr:
@@ -616,12 +624,24 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
         def _build_edge_validity_masked_expr(
             expr: ir.Expr, target: ir.Expr, domain_expr: ir.Expr
         ) -> ir.Expr | None:
-            if not cpm.is_call_to(domain_expr, "cartesian_domain"):
+            def _iter_domain_nodes(expr_: ir.Expr):
+                if cpm.is_call_to(expr_, "make_tuple"):
+                    for arg_ in expr_.args:
+                        yield from _iter_domain_nodes(arg_)
+                    return
+                yield expr_
+
+            cart_domain = None
+            for dom in _iter_domain_nodes(domain_expr):
+                if cpm.is_call_to(dom, "cartesian_domain"):
+                    cart_domain = dom
+                    break
+            if cart_domain is None:
                 return None
 
             id_axis = j_axis = k_axis = None
             i_lo = i_hi = j_lo = j_hi = k_lo = k_hi = None
-            for nr in domain_expr.args:
+            for nr in cart_domain.args:
                 if not (cpm.is_call_to(nr, "named_range") and len(nr.args) == 3):
                     continue
                 axis_name = _get_axis_name(nr.args[0])
@@ -881,36 +901,36 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
             # k0: nx*(ny+1), k1: (nx+1)*ny, k2: nx*ny.
             # Keep comparator predicates kolor-aware to avoid carving out wrong
             # interior stripes when one global IDim/JDim mask is applied.
-            # if entity_name == "Edge" and extra_halo > 0:
-            #     i_lo, i_hi = idim_bounds
-            #     j_lo, j_hi = jdim_bounds
-            #     i_lo_k1k2 = _offset_sub(i_lo, ir.OffsetLiteral(value=1))
-            #     j_lo_k0k2 = _offset_sub(j_lo, ir.OffsetLiteral(value=1))
-            #     # i_hi_k1k2 = _offset_sub(i_hi, ir.OffsetLiteral(value=1))
-            #     # j_hi_k0k2 = _offset_sub(j_hi, ir.OffsetLiteral(value=1))
+            if entity_name == "Edge" and extra_halo > 0:
+                i_lo, i_hi = idim_bounds
+                j_lo, j_hi = jdim_bounds
+                i_lo_k1k2 = _offset_sub(i_lo, ir.OffsetLiteral(value=1))
+                j_lo_k0k2 = _offset_sub(j_lo, ir.OffsetLiteral(value=1))
+                # i_hi_k1k2 = _offset_sub(i_hi, ir.OffsetLiteral(value=1))
+                # j_hi_k0k2 = _offset_sub(j_hi, ir.OffsetLiteral(value=1))
 
-            #     cond_k0 = im.and_(
-            #         _axis_domain(Kolor, ir.OffsetLiteral(value=0), ir.OffsetLiteral(value=1)),
-            #         im.and_(
-            #             _axis_domain(IDim, i_lo, i_hi),
-            #             _axis_domain(JDim, j_lo_k0k2, j_hi),
-            #         ),
-            #     )
-            #     cond_k1 = im.and_(
-            #         _axis_domain(Kolor, ir.OffsetLiteral(value=1), ir.OffsetLiteral(value=2)),
-            #         im.and_(
-            #             _axis_domain(IDim, i_lo_k1k2, i_hi),
-            #             _axis_domain(JDim, j_lo, j_hi),
-            #         ),
-            #     )
-            #     cond_k2 = im.and_(
-            #         _axis_domain(Kolor, ir.OffsetLiteral(value=2), ir.OffsetLiteral(value=3)),
-            #         im.and_(
-            #             _axis_domain(IDim, i_lo_k1k2, i_hi),
-            #             _axis_domain(JDim, j_lo_k0k2, j_hi),
-            #         ),
-            #     )
-            #     return im.or_(cond_k0, im.or_(cond_k1, cond_k2))
+                cond_k0 = im.and_(
+                    _axis_domain(Kolor, ir.OffsetLiteral(value=0), ir.OffsetLiteral(value=1)),
+                    im.and_(
+                        _axis_domain(IDim, i_lo, i_hi),
+                        _axis_domain(JDim, j_lo_k0k2, j_hi),
+                    ),
+                )
+                cond_k1 = im.and_(
+                    _axis_domain(Kolor, ir.OffsetLiteral(value=1), ir.OffsetLiteral(value=2)),
+                    im.and_(
+                        _axis_domain(IDim, i_lo_k1k2, i_hi),
+                        _axis_domain(JDim, j_lo, j_hi),
+                    ),
+                )
+                cond_k2 = im.and_(
+                    _axis_domain(Kolor, ir.OffsetLiteral(value=2), ir.OffsetLiteral(value=3)),
+                    im.and_(
+                        _axis_domain(IDim, i_lo_k1k2, i_hi),
+                        _axis_domain(JDim, j_lo_k0k2, j_hi),
+                    ),
+                )
+                return im.or_(cond_k0, im.or_(cond_k1, cond_k2))
 
             domain_expr = im.call("cartesian_domain")(
                 im.named_range(IDim, *idim_bounds),
