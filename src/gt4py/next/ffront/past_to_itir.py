@@ -26,6 +26,7 @@ from gt4py.next.ffront import (
     type_specifications as ts_ffront,
 )
 from gt4py.next.ffront.stages import ConcretePASTProgramDef
+from gt4py.next.iterator import builtins as itir_builtins
 from gt4py.next.iterator import ir as itir
 from gt4py.next.iterator.ir_utils import ir_makers as im
 from gt4py.next.iterator.transforms import remap_symbols, replace_get_domain_range_with_constants
@@ -340,10 +341,11 @@ class ProgramLowering(
             assert isinstance(slice_bound.type, ts.ScalarType) and type_info.is_integral(
                 slice_bound.type
             )
+            index_bound = im.literal(str(slice_bound.value), itir_builtins.INTEGER_INDEX_BUILTIN)
             if slice_bound.value < 0:
-                lowered_bound = im.plus(stop_idx, self.visit(slice_bound, **kwargs))
+                lowered_bound = im.plus(stop_idx, index_bound)
             else:
-                lowered_bound = im.plus(start_idx, self.visit(slice_bound, **kwargs))
+                lowered_bound = im.plus(start_idx, index_bound) # Note: (grafrap) removed the self.visit here
         else:
             raise AssertionError("Expected 'None' or 'past.Constant'.")
         if slice_bound:

@@ -152,7 +152,26 @@ def _(
     if isinstance(rhs, ts.DeferredType):
         return lhs
     if lhs != rhs:
-        raise TypeError(f"Mismatched scalar types in binary operation: lhs={lhs}, rhs={rhs}.")
+        integral_kinds = {
+            ts.ScalarKind.INT8,
+            ts.ScalarKind.UINT8,
+            ts.ScalarKind.INT16,
+            ts.ScalarKind.UINT16,
+            ts.ScalarKind.INT32,
+            ts.ScalarKind.UINT32,
+            ts.ScalarKind.INT64,
+            ts.ScalarKind.UINT64,
+        }
+        if lhs.kind in integral_kinds and rhs.kind in integral_kinds:
+            return ts.ScalarType(kind=max(lhs.kind, rhs.kind))
+        try:
+            promoted = type_info.promote(lhs, rhs)
+        except ValueError as exc:
+            raise TypeError(
+                f"Mismatched scalar types in binary operation: lhs={lhs}, rhs={rhs}."
+            ) from exc
+        assert isinstance(promoted, ts.ScalarType)
+        return promoted
     return lhs
 
 
