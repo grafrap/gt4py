@@ -336,9 +336,9 @@ class GTFNTranslationStep(
             return {}
 
         try:
-            from gt4py.next.modules.translator import load_structured_remap_sizes_from_netcdf
+            import gt4py.next.modules.translator as translator  # type: ignore[import-not-found]
 
-            sizes = load_structured_remap_sizes_from_netcdf(mesh_path, lateral=lateral)
+            sizes = translator.load_structured_remap_sizes_from_netcdf(mesh_path, lateral=lateral)
         except Exception:
             return {}
 

@@ -11,7 +11,7 @@ from typing import Any, cast
 import numpy as np
 
 from gt4py import next as gtx
-from gt4py.next.modules.translator import (
+from gt4py.next.modules.translator import (  # type: ignore[import-not-found]
     IDim,
     IndexMap,
     JDim,

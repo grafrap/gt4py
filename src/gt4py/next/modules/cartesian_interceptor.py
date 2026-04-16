@@ -8,16 +8,17 @@
 
 import functools
 import os
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import xarray as xr
 from icon4py.model.common.dimension import IDim, JDim, Kolor
 
 import gt4py.next as gtx
+from gt4py._core import definitions as core_defs
 from gt4py.next.iterator import ir
 from gt4py.next.iterator.transforms.map_dict import map_dict as _MAP_DICT
-from gt4py.next.modules.translator import (
+from gt4py.next.modules.translator import (  # type: ignore[import-not-found]
     IndexMap,
     StructuredRemapSizes,
     _read_e2v,
@@ -64,12 +65,20 @@ def _parse_map_dict_remap_table() -> dict[str, dict[int, dict[int, tuple[int, in
         # The domain is built as ir.FunCall(fun=..., args=[ir.FunCall(fun=named_range, args=[Kolor, start, stop])])
         # We just need to check if it has the right form; extract start/stop offset literals.
         try:
-            named_ranges = domain.args  # list of named_range calls
+            named_ranges = getattr(domain, "args", [])  # list of named_range calls (best-effort)
             for nr in named_ranges:
-                dim_arg = nr.args[0]
-                if isinstance(dim_arg, ir.AxisLiteral) and dim_arg.value == "Kolor":
-                    start = nr.args[1].value
-                    stop = nr.args[2].value
+                nr_args = getattr(nr, "args", None)
+                if not nr_args or len(nr_args) < 3:
+                    continue
+                dim_arg = nr_args[0]
+                if (
+                    isinstance(dim_arg, ir.AxisLiteral)
+                    and getattr(dim_arg, "value", None) == "Kolor"
+                ):
+                    start = getattr(nr_args[1], "value", None)
+                    stop = getattr(nr_args[2], "value", None)
+                    if start is None or stop is None:
+                        continue
                     return int(start), int(stop)
         except (AttributeError, IndexError, TypeError):
             pass
@@ -387,7 +396,7 @@ def _build_periodic_square_index_map(
     return index_map, remap_sizes
 
 
-def get_global_grid_mapping(e2v_override=None) -> tuple[IndexMap, StructuredRemapSizes]:
+def get_global_grid_mapping(e2v_override: Any = None) -> tuple[IndexMap, StructuredRemapSizes]:
     """Builds or returns the cached index_map and remap_sizes for the current run."""
     global _CACHED_INDEX_MAP, _CACHED_REMAP_SIZES, _CACHED_EDGE_COUNT
 
@@ -437,7 +446,13 @@ def get_global_grid_mapping(e2v_override=None) -> tuple[IndexMap, StructuredRema
 
 class GenericStructuredWrapper:
     def __init__(
-        self, operator, backend_factory, index_map, remap_sizes, allocator, offset_provider
+        self,
+        operator: Any,
+        backend_factory: Any,
+        index_map: Any,
+        remap_sizes: Any,
+        allocator: Any,
+        offset_provider: Any,
     ) -> None:
         self.index_map = index_map
         self.allocator = allocator
@@ -449,9 +464,15 @@ class GenericStructuredWrapper:
 
         # 1. Dynamically extract connectivities from the offset_provider.
         # Store all raw (unsanitized) connectivity arrays keyed by name.
-        self.v2e_conn = offset_provider.get("V2E").asnumpy() if "V2E" in offset_provider else None
-        self.e2v_conn = offset_provider.get("E2V").asnumpy() if "E2V" in offset_provider else None
-        self.c2v_conn = offset_provider.get("C2V").asnumpy() if "C2V" in offset_provider else None
+        self.v2e_conn: np.ndarray | None = (
+            offset_provider.get("V2E").asnumpy() if "V2E" in offset_provider else None
+        )
+        self.e2v_conn: np.ndarray | None = (
+            offset_provider.get("E2V").asnumpy() if "E2V" in offset_provider else None
+        )
+        self.c2v_conn: np.ndarray | None = (
+            offset_provider.get("C2V").asnumpy() if "C2V" in offset_provider else None
+        )
         self.cell_to_ijk = None
         self.ijk_to_cell = None
         if self.c2v_conn is not None:
@@ -459,7 +480,8 @@ class GenericStructuredWrapper:
 
         # Raw connectivity arrays for all sparse local-connectivity types in the offset_provider.
         self._raw_conn: dict[str, np.ndarray] = {}
-        self._sanitized_conn: dict[str, np.ndarray] = {}
+        # Sanitized connectivities may be None when absent or invalid.
+        self._sanitized_conn: dict[str, np.ndarray | None] = {}
         if offset_provider:
             for key, value in offset_provider.items():
                 key_name = getattr(key, "value", str(key))
@@ -492,8 +514,8 @@ class GenericStructuredWrapper:
                         self._sanitized_conn[key_name] = self._sanitize_sparse_connectivity(arr)
 
         # Legacy aliases kept for debug methods that still reference them directly.
-        self.e2c2e_conn_raw = self._raw_conn.get("E2C2E")
-        self.e2c2e_conn = self._sanitized_conn.get("E2C2E")
+        self.e2c2e_conn_raw: np.ndarray | None = self._raw_conn.get("E2C2E")
+        self.e2c2e_conn: np.ndarray | None = self._sanitized_conn.get("E2C2E")
         self.structured_offset_provider = self._build_structured_offset_provider(offset_provider)
 
         edge_lateral_flag = os.environ.get("GT4PY_TRANSLATOR_EDGE_LATERAL")
@@ -629,7 +651,7 @@ class GenericStructuredWrapper:
             structured_offset_provider[key] = gtx.as_connectivity(
                 value.domain.dims,
                 value.codomain,
-                data=sanitized,
+                data=cast(core_defs.NDArrayObject, sanitized),
                 dtype=gtx.int32,
                 skip_value=None,
                 allocator=self.allocator,
@@ -753,7 +775,9 @@ class GenericStructuredWrapper:
         # Must have a connectivity array available
         return local_dim in self._raw_conn
 
-    def _pack_sparse_local_field(self, field: gtx.Field, coeff: np.ndarray) -> np.ndarray:
+    def _pack_sparse_local_field(
+        self, field: gtx.Field, coeff: np.ndarray
+    ) -> core_defs.NDArrayObject:
         """Generic packing of a sparse local-connectivity field into a structured
         (ni, nj, n_kolor, n_local, ...) array, derived from the map_dict remap table.
 
@@ -761,21 +785,30 @@ class GenericStructuredWrapper:
         (e.g. E2C2E, E2C2EO, E2C, C2E, V2E, E2C2V, …).
         """
         local_dim = self._get_local_dim_name(field)
-        conn = self._raw_conn.get(local_dim)
+        conn = None if local_dim is None else self._raw_conn.get(local_dim)
         if conn is None:
             ni, nj, n_kolor = self.index_map.ijk_to_edge.shape
             n_local = coeff.shape[1]
             tail_shape = coeff.shape[2:]
             if np.issubdtype(coeff.dtype, np.integer):
-                return np.full((ni, nj, n_kolor, n_local, *tail_shape), -1, dtype=coeff.dtype)
-            return np.zeros((ni, nj, n_kolor, n_local, *tail_shape), dtype=coeff.dtype)
+                return cast(
+                    core_defs.NDArrayObject,
+                    np.full((ni, nj, n_kolor, n_local, *tail_shape), -1, dtype=coeff.dtype),
+                )
+            return cast(
+                core_defs.NDArrayObject,
+                np.zeros((ni, nj, n_kolor, n_local, *tail_shape), dtype=coeff.dtype),
+            )
 
-        packed = pack_sparse_local_field_to_structured(
-            coeff=coeff,
-            connectivity=conn,
-            index_map=self.index_map,
-            local_dim_name=local_dim,
-            cell_to_ijk=self.cell_to_ijk,
+        packed = cast(
+            core_defs.NDArrayObject,
+            pack_sparse_local_field_to_structured(
+                coeff=coeff,
+                connectivity=conn,
+                index_map=self.index_map,
+                local_dim_name=cast(str, local_dim),
+                cell_to_ijk=self.cell_to_ijk,
+            ),
         )
 
         # Default OFF: zeroing clipped sparse coefficients was causing false mismatches
@@ -792,7 +825,7 @@ class GenericStructuredWrapper:
             invalid_center = np.zeros((ni, nj, nk), dtype=bool)
             invalid_center |= np.isin(k_idx, (1, 2)) & (i_idx >= (self.remap_sizes.end_i - 1))
             invalid_center |= np.isin(k_idx, (0, 2)) & (j_idx >= (self.remap_sizes.end_j - 1))
-            packed[invalid_center, ...] = 0
+            packed[invalid_center, ...] = 0  # type: ignore[index]
 
         return packed
 
@@ -808,9 +841,7 @@ class GenericStructuredWrapper:
             struct_np = self._pack_sparse_local_field(field, np_data)
             trailing_dims = list(field.domain.dims[2:]) if np_data.ndim > 2 else []
             return gtx.as_field(
-                [IDim, JDim, Kolor, local_dim, *trailing_dims],
-                struct_np,
-                allocator=self.allocator,
+                [IDim, JDim, Kolor, local_dim, *trailing_dims], struct_np, allocator=self.allocator
             )
 
         # 2. Standard unstructured fields
@@ -818,7 +849,9 @@ class GenericStructuredWrapper:
             struct_np = pack_vertex_field_to_structured(np_data, self.index_map)
             trailing_dims = list(field.domain.dims[1:]) if np_data.ndim > 1 else []
             return gtx.as_field(
-                [IDim, JDim, Kolor, *trailing_dims], struct_np, allocator=self.allocator
+                [IDim, JDim, Kolor, *trailing_dims],
+                cast(core_defs.NDArrayObject, struct_np),
+                allocator=self.allocator,
             )
 
         elif self._is_unstructured(field, "Edge"):
@@ -826,7 +859,9 @@ class GenericStructuredWrapper:
             struct_np = pack_edge_field(np_data, self.index_map)
             trailing_dims = list(field.domain.dims[1:]) if np_data.ndim > 1 else []
             return gtx.as_field(
-                [IDim, JDim, Kolor, *trailing_dims], struct_np, allocator=self.allocator
+                [IDim, JDim, Kolor, *trailing_dims],
+                cast(core_defs.NDArrayObject, struct_np),
+                allocator=self.allocator,
             )
 
         elif self._is_unstructured(field, "Cell"):
@@ -835,7 +870,9 @@ class GenericStructuredWrapper:
             struct_np = pack_cell_field_to_structured(np_data, self.cell_to_ijk, self.ijk_to_cell)
             trailing_dims = list(field.domain.dims[1:]) if np_data.ndim > 1 else []
             return gtx.as_field(
-                [IDim, JDim, Kolor, *trailing_dims], struct_np, allocator=self.allocator
+                [IDim, JDim, Kolor, *trailing_dims],
+                cast(core_defs.NDArrayObject, struct_np),
+                allocator=self.allocator,
             )
 
         return field
@@ -880,8 +917,8 @@ class GenericStructuredWrapper:
 
         np.copyto(orig_np, unstruct_np)
 
-    def __call__(self, **kwargs) -> None:
-        structured_kwargs = {}
+    def __call__(self, **kwargs: Any) -> None:
+        structured_kwargs: dict[str, Any] = {}
         packed_fields: list[tuple[gtx.Field, gtx.Field]] = []
 
         for arg_name, arg_val in kwargs.items():
@@ -908,7 +945,9 @@ class GenericStructuredWrapper:
 
             merged_kwargs = {**bound_kwargs, **structured_kwargs}
 
-            params = getattr(compiled.func.past_stage.past_node, "params", ())
+            ps = getattr(compiled.func, "past_stage", None)
+            pn = getattr(ps, "past_node", None)
+            params = getattr(pn, "params", ())
             ordered_args = []
             for param in params:
                 name = str(param.id)

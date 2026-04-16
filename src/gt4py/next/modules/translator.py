@@ -28,7 +28,8 @@ def _parse_sparse_remap_table() -> dict[str, dict[int, dict[int, tuple[int, int,
             vals[axis_lit.value] = int(offset_lit.value)
         return vals.get("IDim", 0), vals.get("JDim", 0), vals.get("Kolor", 0)
 
-    def _kolor_range_from_domain(domain) -> tuple[int, int] | None:
+    def _kolor_range_from_domain(domain: Any) -> tuple[int, int] | None:
+        # print(f"Extracting kolor range from domain: {domain}")
         if domain is None:
             return None
         try:
@@ -340,7 +341,7 @@ def load_structured_remap_sizes_from_netcdf(nc_path: str, lateral: int = 0) -> S
             n_cells=int(ds.sizes["cell"]),
             lateral=lateral,
         )
-        print(f"Inferred structured remap sizes from {nc_path}: {sizes}")
+        # print(f"Inferred structured remap sizes from {nc_path}: {sizes}")
 
     return sizes
 

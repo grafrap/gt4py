@@ -333,15 +333,15 @@ def apply_common_transforms(
 
     # ir = cart_unroll.CartUnroll.apply(ir, symbolic_domain_sizes=symbolic_domain_sizes)
     if os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1":
-        ir = cart_unroll.CartesianDomainAndTypeRemapper.apply(
+        ir = cart_unroll.CartesianDomainAndTypeRemapper.apply(  # type: ignore[assignment]
             ir,
-            symbolic_domain_sizes=symbolic_domain_sizes,
+            symbolic_domain_sizes=cast(dict[str, str | int] | None, symbolic_domain_sizes),
             offset_provider=offset_provider,
         )
         _print_ir_block(
             "=== GTIR AFTER CARTESIAN DOMAIN AND TYPE REMAPPING ===", ir, enabled=print_ir
         )
-        ir = cart_unroll.CartesianReductionUnroller.apply(ir)
+        ir = cart_unroll.CartesianReductionUnroller.apply(ir)  # type: ignore[assignment]
         ir = NormalizeShifts().visit(ir)
         _print_ir_block("=== GTIR AFTER CARTESIAN UNROLLING ===", ir, enabled=print_ir)
 
@@ -381,7 +381,7 @@ def apply_common_transforms(
         )  # type: ignore[assignment]  # always an itir.Program
         inlined = InlineScalar.apply(inlined, offset_provider_type=offset_provider_type)
         if os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1":
-            inlined = simplify_cart_shifts.SimplifyCartesianShifts.apply(inlined)
+            inlined = simplify_cart_shifts.SimplifyCartesianShifts.apply(inlined)  # type: ignore[assignment]
 
         # This pass is required to run after CollapseTuple as otherwise we can not inline
         # expressions like `tuple_get(make_tuple(as_fieldop(stencil)(...)))` where stencil returns

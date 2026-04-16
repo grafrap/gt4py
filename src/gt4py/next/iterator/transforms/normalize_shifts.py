@@ -6,7 +6,6 @@
 # Please, refer to the LICENSE file in the root directory.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from typing import cast
 
 from gt4py.eve import NodeTranslator, PreserveLocationVisitor
 from gt4py.next.iterator import ir
@@ -99,7 +98,7 @@ class NormalizeShifts(PreserveLocationVisitor, NodeTranslator):
             )
             stripped_merged = self._strip_zero_shift_pairs(merged)
             if isinstance(stripped_merged, ir.FunCall):
-                merged = cast(ir.FunCall, stripped_merged)
+                merged = stripped_merged
             else:
                 return stripped_merged
             return merged
