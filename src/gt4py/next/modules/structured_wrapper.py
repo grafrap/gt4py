@@ -6,13 +6,17 @@
 # Please, refer to the LICENSE file in the root directory.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from typing import Any, cast
+
 import numpy as np
 
 from gt4py import next as gtx
 from gt4py.next.modules.translator import (
     IDim,
+    IndexMap,
     JDim,
     Kolor,
+    StructuredRemapSizes,
     pack_edge_field_to_structured,
     pack_sparse_local_field_to_structured,
     pack_vertex_field_to_structured,
@@ -25,8 +29,15 @@ from gt4py.next.program_processors.runners import gtfn as gtfn_runner
 
 class StructuredExecutionWrapper:
     def __init__(
-        self, operator, backend, index_map, e2v_conn, v2e_conn, allocator, offset_provider
-    ):
+        self,
+        operator: Any,
+        backend: Any,
+        index_map: IndexMap,
+        e2v_conn: np.ndarray,
+        v2e_conn: np.ndarray,
+        allocator: Any,
+        offset_provider: dict,
+    ) -> None:
         self.index_map = index_map
         self.e2v_conn = e2v_conn
         self.v2e_conn = v2e_conn
@@ -37,12 +48,12 @@ class StructuredExecutionWrapper:
             operator, backend=backend, offset_provider=offset_provider
         )
 
-    def _is_unstructured(self, field, axis_name):
+    def _is_unstructured(self, field: gtx.Field, axis_name: str) -> bool:
         if not getattr(field, "domain", None):
             return False
         return any(d.value == axis_name for d in field.domain.dims)
 
-    def _pack_argument(self, field):
+    def _pack_argument(self, field: gtx.Field) -> gtx.Field:
         if not getattr(field, "domain", None):
             return field
 
@@ -70,7 +81,9 @@ class StructuredExecutionWrapper:
 
         return field
 
-    def _unpack_to_buffer(self, structured_field, original_unstructured_field):
+    def _unpack_to_buffer(
+        self, structured_field: gtx.Field, original_unstructured_field: gtx.Field
+    ) -> None:
         if not getattr(original_unstructured_field, "domain", None):
             return
 
@@ -86,8 +99,8 @@ class StructuredExecutionWrapper:
 
         np.copyto(orig_np, unstruct_np)
 
-    def __call__(self, **kwargs):
-        structured_kwargs = {}
+    def __call__(self, **kwargs: Any) -> None:
+        structured_kwargs: dict[str, Any] = {}
         out_fields = []
 
         for arg_name, arg_val in kwargs.items():
@@ -105,12 +118,19 @@ class StructuredExecutionWrapper:
 
         if isinstance(kwargs["out"], tuple):
             for orig_f, struct_f in zip(out_fields, structured_kwargs["out"]):
-                self._unpack_to_buffer(struct_f, orig_f)
+                self._unpack_to_buffer(cast(gtx.Field, struct_f), orig_f)
         else:
-            self._unpack_to_buffer(structured_kwargs["out"], out_fields[0])
+            self._unpack_to_buffer(cast(gtx.Field, structured_kwargs["out"]), out_fields[0])
 
 
-def setup_smart_program(operator, setup, index_map, remap_sizes, allocator, offset_provider):
+def setup_smart_program(
+    operator: Any,
+    setup: Any,
+    index_map: IndexMap,
+    remap_sizes: StructuredRemapSizes,
+    allocator: Any,
+    offset_provider: dict,
+) -> StructuredExecutionWrapper:
     """Factory to create the structured wrapper."""
     structured_backend = gtfn_runner.GTFNBackendFactory(
         cached=True,

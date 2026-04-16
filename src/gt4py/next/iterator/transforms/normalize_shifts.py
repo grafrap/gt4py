@@ -6,6 +6,8 @@
 # Please, refer to the LICENSE file in the root directory.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from typing import cast
+
 from gt4py.eve import NodeTranslator, PreserveLocationVisitor
 from gt4py.next.iterator import ir
 
@@ -64,33 +66,41 @@ class NormalizeShifts(PreserveLocationVisitor, NodeTranslator):
         )
 
     def visit_FunCall(self, node: ir.FunCall):
-        node = self.generic_visit(node)
+        visited = self.generic_visit(node)
 
-        if isinstance(node, ir.FunCall):
-            stripped = self._strip_zero_shift_pairs(node)
-            if isinstance(stripped, ir.Expr) and not isinstance(stripped, ir.FunCall):
-                return stripped
-            if isinstance(stripped, ir.FunCall):
-                node = stripped
+        if not isinstance(visited, ir.FunCall):
+            return visited
+
+        node_fc = visited
+
+        stripped = self._strip_zero_shift_pairs(node_fc)
+        if isinstance(stripped, ir.Expr) and not isinstance(stripped, ir.FunCall):
+            return stripped
+        if isinstance(stripped, ir.FunCall):
+            node_fc = stripped
 
         if (
-            isinstance(node.fun, ir.FunCall)
-            and isinstance(node.fun.fun, ir.SymRef)
-            and node.fun.fun.id == "shift"
-            and node.args
-            and isinstance(node.args[0], ir.FunCall)
-            and isinstance(node.args[0].fun, ir.FunCall)
-            and isinstance(node.args[0].fun.fun, ir.SymRef)
-            and node.args[0].fun.fun.id == "shift"
+            isinstance(node_fc.fun, ir.FunCall)
+            and isinstance(node_fc.fun.fun, ir.SymRef)
+            and node_fc.fun.fun.id == "shift"
+            and node_fc.args
+            and isinstance(node_fc.args[0], ir.FunCall)
+            and isinstance(node_fc.args[0].fun, ir.FunCall)
+            and isinstance(node_fc.args[0].fun.fun, ir.SymRef)
+            and node_fc.args[0].fun.fun.id == "shift"
         ):
             # shift(args1...)(shift(args2...)(it)) -> shift(args2..., args1...)(it)
-            assert len(node.args) == 1
+            assert len(node_fc.args) == 1
             merged = ir.FunCall(
                 fun=ir.FunCall(
-                    fun=ir.SymRef(id="shift"), args=node.args[0].fun.args + node.fun.args
+                    fun=ir.SymRef(id="shift"), args=node_fc.args[0].fun.args + node_fc.fun.args
                 ),
-                args=node.args[0].args,
+                args=node_fc.args[0].args,
             )
-            merged = self._strip_zero_shift_pairs(merged)
+            stripped_merged = self._strip_zero_shift_pairs(merged)
+            if isinstance(stripped_merged, ir.FunCall):
+                merged = cast(ir.FunCall, stripped_merged)
+            else:
+                return stripped_merged
             return merged
-        return node
+        return node_fc

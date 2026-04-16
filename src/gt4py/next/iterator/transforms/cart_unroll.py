@@ -10,6 +10,7 @@ import copy
 import dataclasses
 import math
 import numbers
+from typing import cast
 
 import gt4py.next.iterator.transforms.map_dict as map_dict_module
 from gt4py.eve import NodeTranslator
@@ -166,6 +167,9 @@ def _build_field_concat_where_from_branches(
         if id_range is None or jd_range is None:
             return None
 
+        # mypy can't always narrow types after the loop checks above; assert to help the type checker
+        assert id_range is not None and jd_range is not None
+
         i_lo, i_hi = copy.deepcopy(id_range.args[1]), copy.deepcopy(id_range.args[2])
         j_lo, j_hi = copy.deepcopy(jd_range.args[1]), copy.deepcopy(jd_range.args[2])
 
@@ -180,9 +184,21 @@ def _build_field_concat_where_from_branches(
                 continue
             axis_name = _get_axis_name(range_expr.args[0])
             if axis_name == "IDim":
-                new_ranges.append(im.named_range(copy.deepcopy(range_expr.args[0]), i_lo, i_hi))
+                new_ranges.append(
+                    im.named_range(
+                        cast(ir.AxisLiteral | common.Dimension, copy.deepcopy(range_expr.args[0])),
+                        i_lo,
+                        i_hi,
+                    )
+                )
             elif axis_name == "JDim":
-                new_ranges.append(im.named_range(copy.deepcopy(range_expr.args[0]), j_lo, j_hi))
+                new_ranges.append(
+                    im.named_range(
+                        cast(ir.AxisLiteral | common.Dimension, copy.deepcopy(range_expr.args[0])),
+                        j_lo,
+                        j_hi,
+                    )
+                )
             else:
                 new_ranges.append(copy.deepcopy(range_expr))
 
@@ -684,6 +700,19 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
             ):
                 return None
 
+            # Help the type checker: all these are now not None
+            assert (
+                id_axis is not None
+                and j_axis is not None
+                and k_axis is not None
+                and i_lo is not None
+                and i_hi is not None
+                and j_lo is not None
+                and j_hi is not None
+                and k_lo is not None
+                and k_hi is not None
+            )
+
             # Only apply this mask for 3-kolor edge cartesian domains.
             if isinstance(k_hi, ir.OffsetLiteral):
                 if k_hi.value != 3:
@@ -696,7 +725,11 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
 
             def _dom(axis: ir.Expr, lo: ir.Expr, hi: ir.Expr) -> ir.Expr:
                 return im.call("cartesian_domain")(
-                    im.named_range(copy.deepcopy(axis), copy.deepcopy(lo), copy.deepcopy(hi))
+                    im.named_range(
+                        cast(ir.AxisLiteral | common.Dimension, copy.deepcopy(axis)),
+                        copy.deepcopy(lo),
+                        copy.deepcopy(hi),
+                    )
                 )
 
             def _and(lhs: ir.Expr, rhs: ir.Expr) -> ir.Expr:
@@ -774,7 +807,7 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
         symbolic_domain_sizes: dict[str, str | int] | None = kwargs.get("symbolic_domain_sizes")
         new_node = copy.deepcopy(self.generic_visit(node, **kwargs))
 
-        def _structured_axis_literals() -> list[ir.AxisLiteral]:
+        def _structured_axis_literals() -> list[ir.Expr]:
             return [
                 ir.AxisLiteral(value="IDim", kind=common.DimensionKind.HORIZONTAL),
                 ir.AxisLiteral(value="JDim", kind=common.DimensionKind.HORIZONTAL),
@@ -1068,7 +1101,8 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                     and tuple_index.value in {0, 1}
                 ):
                     if (bounds := _cartesian_axis_bounds(axis_name)) is not None:
-                        return copy.deepcopy(bounds[tuple_index.value])
+                        idx = int(tuple_index.value)  # mypy: ensure an int index
+                        return copy.deepcopy(bounds[idx])
 
         if cpm.is_call_to(new_node, "cartesian_domain") and len(new_node.args) == 1:
             nr = new_node.args[0]
@@ -1095,7 +1129,7 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
         if cpm.is_call_to(new_node, "unstructured_domain") or cpm.is_call_to(
             new_node, "cartesian_domain"
         ):
-            new_ranges = []
+            new_ranges: list[ir.Expr] = []
             needs_remap = False
             for nr in new_node.args:
                 if cpm.is_call_to(nr, "named_range") and len(nr.args) == 3:
@@ -1214,13 +1248,13 @@ class CartesianReductionUnroller(NodeTranslator):
         neutral_element: ir.Expr,
         domain_bounds: dict[str, tuple[ir.Expr, ir.Expr]] | None = None,
     ) -> ir.Expr | None:
-        def _local_concat_where(ref: ir.Expr, branches: tuple) -> ir.Expr:
+        def _local_concat_where(base_ref: ir.Expr, branches: tuple) -> ir.Expr:
             cond, shift_spec = branches[0]
-            shifted = _bounded_shifted_deref(ref, shift_spec, neutral_element, domain_bounds)
+            shifted = _bounded_shifted_deref(base_ref, shift_spec, neutral_element, domain_bounds)
             if len(branches) == 1 or cond is None:
                 return shifted
             return im.concat_where(
-                copy.deepcopy(cond), shifted, _local_concat_where(ref, branches[1:])
+                copy.deepcopy(cond), shifted, _local_concat_where(base_ref, branches[1:])
             )
 
         if cpm.is_call_to(expr, "neighbors") and len(expr.args) == 2:
@@ -1231,36 +1265,45 @@ class CartesianReductionUnroller(NodeTranslator):
                 and isinstance(it, ir.SymRef)
                 and str(it.id) in bindings
             ):
-                key = (ir.OffsetLiteral(value=conn.value), ir.OffsetLiteral(value=index))
+                key: tuple[ir.OffsetLiteral, ir.OffsetLiteral] = (
+                    ir.OffsetLiteral(value=conn.value),
+                    ir.OffsetLiteral(value=index),
+                )
                 if key in map_dict:
-                    entry = map_dict[key]
-                    ref = copy.deepcopy(bindings[str(it.id)]["ref"])
+                    entry = cast(dict[str, object], map_dict[key])
+                    ref = cast(ir.Expr, copy.deepcopy(bindings[str(it.id)]["ref"]))
                     if entry["kind"] == "shift":
                         return _bounded_shifted_deref(
-                            ref, entry["shifts"], neutral_element, domain_bounds
+                            ref,
+                            cast(tuple[ir.OffsetLiteral, ...], entry["shifts"]),
+                            neutral_element,
+                            domain_bounds,
                         )
                     if entry["kind"] == "concat_where":
-                        return _local_concat_where(ref, entry["branches"])
+                        return _local_concat_where(ref, cast(tuple, entry["branches"]))
             return None
 
         if cpm.is_call_to(expr, "deref") and len(expr.args) == 1:
             it = expr.args[0]
             if isinstance(it, ir.SymRef) and str(it.id) in bindings:
                 binding = bindings[str(it.id)]
-                ref = copy.deepcopy(binding["ref"])
+                ref = cast(ir.Expr, copy.deepcopy(binding["ref"]))
                 kind = binding["kind"]
                 if kind == "neighbors":
-                    conn = binding["conn"]
-                    assert isinstance(conn, str)
-                    key = (ir.OffsetLiteral(value=conn), ir.OffsetLiteral(value=index))
+                    bound_conn = binding["conn"]
+                    assert isinstance(bound_conn, str)
+                    key = (ir.OffsetLiteral(value=bound_conn), ir.OffsetLiteral(value=index))
                     if key in map_dict:
-                        entry = map_dict[key]
+                        entry = cast(dict[str, object], map_dict[key])
                         if entry["kind"] == "shift":
                             return _bounded_shifted_deref(
-                                ref, entry["shifts"], neutral_element, domain_bounds
+                                ref,
+                                cast(tuple[ir.OffsetLiteral, ...], entry["shifts"]),
+                                neutral_element,
+                                domain_bounds,
                             )
                         if entry["kind"] == "concat_where":
-                            return _local_concat_where(ref, entry["branches"])
+                            return _local_concat_where(ref, cast(tuple, entry["branches"]))
                     return None
                 return im.list_get(im.literal(str(index), "int32"), im.deref(ref))
             return None
@@ -1306,16 +1349,23 @@ class CartesianReductionUnroller(NodeTranslator):
                     if isinstance(conn_expr, ir.OffsetLiteral) and isinstance(conn_expr.value, str):
                         conn = conn_expr.value
                         field_expr = expr.args[0]
-                        key = (ir.OffsetLiteral(value=conn), ir.OffsetLiteral(value=idx))
+                        key: tuple[ir.OffsetLiteral, ir.OffsetLiteral] = (
+                            ir.OffsetLiteral(value=conn),
+                            ir.OffsetLiteral(value=idx),
+                        )
                         if key not in map_dict:
                             return None
-                        entry = map_dict[key]
+                        entry = cast(dict[str, object], map_dict[key])
                         if entry["kind"] == "shift":
-                            return _make_lifted_deref_shift(field_expr, entry["shifts"], domain)
+                            return _make_lifted_deref_shift(
+                                field_expr,
+                                cast(tuple[ir.OffsetLiteral, ...], entry["shifts"]),
+                                domain,
+                            )
                         if entry["kind"] == "concat_where":
                             return _build_field_concat_where_from_branches(
                                 field_expr,
-                                entry["branches"],
+                                cast(tuple, entry["branches"]),
                                 domain,
                                 apply_edge_shape_bounds=_needs_edge_shape_bounds(conn),
                             )
@@ -1410,15 +1460,21 @@ class CartesianReductionUnroller(NodeTranslator):
                     )
                 )
 
+                elem_field: ir.Expr | None = None
                 for idx in range(conn_size):
-                    key = (ir.OffsetLiteral(value=conn), ir.OffsetLiteral(value=idx))
+                    key: tuple[ir.OffsetLiteral, ir.OffsetLiteral] = (
+                        ir.OffsetLiteral(value=conn),
+                        ir.OffsetLiteral(value=idx),
+                    )
                     if key not in map_dict:
                         break
-                    entry = map_dict[key]
+                    entry = cast(dict[str, object], map_dict[key])
                     if entry["kind"] != "shift":
                         break
 
-                    elem_field = _make_lifted_deref_shift(input_field, entry["shifts"], domain)
+                    elem_field = _make_lifted_deref_shift(
+                        input_field, cast(tuple[ir.OffsetLiteral, ...], entry["shifts"]), domain
+                    )
                     acc_field = im.as_fieldop(
                         im.lambda_("__a", "__b")(
                             im.call(copy.deepcopy(red_op))(im.deref("__a"), im.deref("__b"))
@@ -1441,7 +1497,6 @@ class CartesianReductionUnroller(NodeTranslator):
                 im.lambda_("__acc_init")(im.deref("__acc_init")),
                 domain,
             )(im.as_fieldop(im.lambda_("__x")(copy.deepcopy(widened_init)), domain)(base_field))
-
             for idx in range(conn_size):
                 elem_field = CartesianReductionUnroller._eval_list_field_at_idx(
                     list_expr, idx, domain, neutral_element
@@ -1484,11 +1539,11 @@ class CartesianReductionUnroller(NodeTranslator):
                             and bound_stencil.expr.args[1].id == bound_stencil.params[0].id
                             and len(bound_arg.args) == 1
                         ):
-                            conn = bound_stencil.expr.args[0].value
-                            if isinstance(conn, str):
+                            stencil_conn = bound_stencil.expr.args[0].value
+                            if isinstance(stencil_conn, str):
                                 bindings[str(param.id)] = {
                                     "kind": "neighbors",
-                                    "conn": conn,
+                                    "conn": stencil_conn,
                                     "ref": local_ref,
                                 }
                                 param_names.append(local_name)
@@ -1550,26 +1605,32 @@ class CartesianReductionUnroller(NodeTranslator):
                 and stencil.expr.args[0].args[0].id == stencil.params[0].id
             ):
                 shift_call = stencil.expr.args[0]
-                key = tuple(shift_call.fun.args)
+                # mypy: cast the runtime tuple of OffsetLiterals to the expected key type
+                key = cast(tuple[ir.OffsetLiteral, ir.OffsetLiteral], tuple(shift_call.fun.args))
                 if key in map_dict:
-                    entry = map_dict[key]
+                    entry = cast(dict[str, object], map_dict[key])
                     rewritten_arg = self.visit(node.args[0], **kwargs)
 
                     # Provide a neutral element (0.0) as fallback for out-of-bounds accesses
-                    neutral_element = im.literal("0.0", "float64")
+                    _neutral_element = im.literal("0.0", "float64")
 
                     if entry["kind"] == "concat_where":
                         return _build_field_concat_where_from_branches(
                             rewritten_arg,
-                            entry["branches"],
+                            cast(tuple, entry["branches"]),
                             current_domain,
                             apply_edge_shape_bounds=_needs_edge_shape_bounds(
-                                key[0].value if isinstance(key[0], ir.OffsetLiteral) else None
+                                key[0].value
+                                if isinstance(key[0], ir.OffsetLiteral)
+                                and isinstance(key[0].value, str)
+                                else None
                             ),
                         )
                     elif entry["kind"] == "shift":
                         return _make_lifted_deref_shift(
-                            rewritten_arg, entry["shifts"], current_domain
+                            rewritten_arg,
+                            cast(tuple[ir.OffsetLiteral, ...], entry["shifts"]),
+                            current_domain,
                         )
 
             if (reduce_inputs := self._extract_generic_reduce_inputs(node)) is not None:
@@ -1582,13 +1643,16 @@ class CartesianReductionUnroller(NodeTranslator):
         new_node = copy.deepcopy(self.generic_visit(node, **kwargs))
 
         if cpm.is_applied_shift(new_node):
-            key = tuple(new_node.fun.args)
+            # mypy: these fun.args are expected to be OffsetLiteral tuples at runtime
+            key = cast(tuple[ir.OffsetLiteral, ir.OffsetLiteral], tuple(new_node.fun.args))
             if key in map_dict:
-                entry = map_dict[key]
+                entry = cast(dict[str, object], map_dict[key])
                 arg = new_node.args[0]
 
                 if entry["kind"] == "shift":
-                    return _apply_shift_chain(copy.deepcopy(arg), entry["shifts"])
+                    return _apply_shift_chain(
+                        copy.deepcopy(arg), cast(tuple[ir.OffsetLiteral, ...], entry["shifts"])
+                    )
 
                 if entry["kind"] == "concat_where":
                     conn_name = None

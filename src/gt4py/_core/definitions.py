@@ -394,14 +394,14 @@ class DeviceType(enum.IntEnum):
 
     CPU = 1
     CUDA = 2
-    # CPU_PINNED = 3    # noqa: ERA001
-    # OPENCL = 4        # noqa: ERA001
-    # VULKAN = 7        # noqa: ERA001
-    # METAL = 8         # noqa: ERA001
-    # VPI = 9           # noqa: ERA001
+    # CPU_PINNED = 3
+    # OPENCL = 4
+    # VULKAN = 7
+    # METAL = 8
+    # VPI = 9
     ROCM = 10
-    # CUDA_MANAGED = 13 # noqa: ERA001
-    # ONE_API = 14      # noqa: ERA001
+    # CUDA_MANAGED = 13
+    # ONE_API = 14
 
 
 CPUDeviceTyping: TypeAlias = Literal[DeviceType.CPU]

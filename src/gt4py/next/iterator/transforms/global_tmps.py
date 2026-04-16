@@ -163,7 +163,7 @@ def _transform_by_pattern(
         # TODO(tehrengruber): extracting the deepest expression first would allow us to fuse
         #  the extracted expressions resulting in fewer kernel calls & better data-locality.
         #  Extracting multiple expressions deepest-first is however not supported right now.
-        # deepest_expr_first=True  # noqa: ERA001
+        # deepest_expr_first=True
     )
 
     if extracted_fields:

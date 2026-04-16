@@ -711,14 +711,14 @@ class _FieldDescriptorMaker:
         data_dims = ()
 
         if isinstance(field_spec, str) or not isinstance(field_spec, collections.abc.Collection):
-            # Field[dtype] # noqa: ERA001 [commented-out-code]
+            # Field[dtype]
             dtype = field_spec
         elif _FieldDescriptorMaker._is_axes_spec(field_spec[0]):
-            # Field[axes, dtype] # noqa: ERA001 [commented-out-code]
+            # Field[axes, dtype]
             assert len(field_spec) == 2
             axes, dtype = field_spec
         elif len(field_spec) == 2 and not _FieldDescriptorMaker._is_axes_spec(field_spec[1]):
-            # Field[high_dimensional_dtype] # noqa: ERA001 [commented-out-code]
+            # Field[high_dimensional_dtype]
             dtype = field_spec
         else:
             raise ValueError("Invalid field type descriptor")

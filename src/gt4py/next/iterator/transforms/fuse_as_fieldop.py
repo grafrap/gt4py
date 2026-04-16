@@ -232,7 +232,7 @@ def _arg_inline_predicate(node: itir.Expr, shifts: set[tuple[itir.OffsetLiteral,
         # if len(shifts) == 1 and not any(
         #     trace_shifts.Sentinel.ALL_NEIGHBORS in access for access in shifts
         # ):
-        #     return True  # noqa: ERA001 [commented-out-code]
+        #     return True
 
     return False
 

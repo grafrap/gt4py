@@ -76,7 +76,7 @@ def inline_lambda(  # see todo above
     fun = node.fun
     if clashes:
         # TODO(tehrengruber): find a better way of generating new symbols in `name_map` that don't collide with each other. E.g. this must still work:
-        # (lambda arg, arg_: (lambda arg_: ...)(arg))(a, b)  # noqa: ERA001 [commented-out-code]
+        # (lambda arg, arg_: (lambda arg_: ...)(arg))(a, b)
         name_map: dict[str, str] = {}
 
         for sym in clashes:

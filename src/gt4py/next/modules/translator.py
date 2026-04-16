@@ -7,15 +7,14 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from dataclasses import dataclass
-from typing import List
+from typing import Any, List, cast
 
 import numpy as np
+import xarray as xr
 
 import gt4py.next as gtx
 from gt4py.next.iterator import atlas_utils, ir
 from gt4py.next.iterator.transforms.map_dict import map_dict as _MAP_DICT
-
-from .ffront_fvm_nabla_structured import IDim, JDim, Kolor  # , pnabla_cartesian
 
 
 def _parse_sparse_remap_table() -> dict[str, dict[int, dict[int, tuple[int, int, int]]]]:
@@ -43,13 +42,14 @@ def _parse_sparse_remap_table() -> dict[str, dict[int, dict[int, tuple[int, int,
         return None
 
     table: dict[str, dict[int, dict[int, tuple[int, int, int]]]] = {}
-    for (conn_lit, slot_lit), entry in _MAP_DICT.items():
-        conn_name = conn_lit.value
+    for (conn_lit, slot_lit), raw_entry in _MAP_DICT.items():
+        entry = cast(dict[str, object], raw_entry)
+        conn_name = cast(str, conn_lit.value)
         slot = int(slot_lit.value)
         table.setdefault(conn_name, {})
 
         if entry["kind"] == "shift":
-            di, dj, dk = _extract_shift(entry["shifts"])
+            di, dj, dk = _extract_shift(cast(tuple, entry["shifts"]))
             for ck in range(max_kolor):
                 table[conn_name].setdefault(ck, {})[slot] = (di, dj, ck + dk)
             continue
@@ -58,8 +58,8 @@ def _parse_sparse_remap_table() -> dict[str, dict[int, dict[int, tuple[int, int,
             covered: set[int] = set()
             else_shift: tuple[int, int, int] | None = None
             resolved: list[tuple[tuple[int, int] | None, tuple[int, int, int]]] = []
-            for domain, shifts in entry["branches"]:
-                shift = _extract_shift(shifts)
+            for domain, shifts in cast(tuple, entry["branches"]):
+                shift = _extract_shift(cast(tuple, shifts))
                 if domain is None:
                     else_shift = shift
                 else:
@@ -232,7 +232,7 @@ class StructuredRemapSizes:
     start_j: int = 0
 
 
-def _first_present(ds, names: list[str], required: bool = True):
+def _first_present(ds: xr.Dataset, names: list[str], required: bool = True) -> Any:
     for name in names:
         if name in ds:
             return ds[name]
@@ -241,7 +241,7 @@ def _first_present(ds, names: list[str], required: bool = True):
     return None
 
 
-def _read_e2v(ds):
+def _read_e2v(ds: xr.Dataset) -> np.ndarray:
     raw = _first_present(ds, ["E2V", "edge_vertices", "edges2nodes", "edge_node_connectivity"])
     arr = np.asarray(raw, dtype=np.int32)
     if arr.ndim != 2:
@@ -253,7 +253,7 @@ def _read_e2v(ds):
     return np.where(arr > 0, arr - 1, -1)
 
 
-def _read_v2e(ds):
+def _read_v2e(ds: xr.Dataset) -> np.ndarray | None:
     raw = _first_present(
         ds,
         ["V2E", "vertex_edges", "nodes2edges", "node_edge_connectivity", "edges_of_vertex"],
@@ -269,7 +269,7 @@ def _read_v2e(ds):
     return np.where(arr > 0, arr - 1, -1)
 
 
-def _read_lonlat(ds):
+def _read_lonlat(ds: xr.Dataset) -> np.ndarray | None:
     if "longitude_vertices" in ds and "latitude_vertices" in ds:
         lon = ds["longitude_vertices"].values.astype(np.float64)
         lat = ds["latitude_vertices"].values.astype(np.float64)
@@ -324,8 +324,7 @@ def infer_structured_remap_sizes(
     )
 
 
-def load_structured_remap_sizes_from_netcdf(nc_path: str, lateral=0) -> StructuredRemapSizes:
-    import xarray as xr
+def load_structured_remap_sizes_from_netcdf(nc_path: str, lateral: int = 0) -> StructuredRemapSizes:
 
     with xr.open_dataset(nc_path) as ds:
         if "domain_length" not in ds.attrs or "mean_edge_length" not in ds.attrs:
@@ -482,15 +481,12 @@ def unpack_vertex_field_to_unstructured(struct_values: np.ndarray, m: IndexMap) 
     return out
 
 
-import numpy as np
-
-
 # from icon4py.model.common import dimension as dims
 
 # Structured Dimensions
-IDim = gtx.Dimension("IDim")
-JDim = gtx.Dimension("JDim")
-Kolor = gtx.Dimension("Kolor")
+# IDim = gtx.Dimension("IDim")
+# JDim = gtx.Dimension("JDim")
+# Kolor = gtx.Dimension("Kolor")
 KDim = gtx.Dimension("KDim", kind=gtx.DimensionKind.VERTICAL)
 
 
@@ -553,7 +549,7 @@ def unpack_edge_field(struct_values: np.ndarray, m: "IndexMap", n_edge: int) -> 
     return out
 
 
-def pack_vertex_field(vertex_values: np.ndarray, m) -> np.ndarray:
+def pack_vertex_field(vertex_values: np.ndarray, m: IndexMap) -> np.ndarray:
     """Packs an unstructured vertex field into [IDim, JDim, Kolor=1, (KDim)]."""
     has_k = vertex_values.ndim == 2
     ni, nj = m.ij_to_vertex.shape
@@ -572,7 +568,7 @@ def pack_vertex_field(vertex_values: np.ndarray, m) -> np.ndarray:
 # --- Cartesian Cell Helpers ---
 
 
-def build_cell_to_ijk(m: IndexMap, ds) -> np.ndarray:
+def build_cell_to_ijk(m: IndexMap, ds: xr.Dataset) -> np.ndarray:
     """Maps unstructured 1D cell index from netcdf into Cartesian [I, J, Kolor] layout."""
     import numpy as np
 
@@ -763,9 +759,6 @@ def pack_c2e2co_field(field_np: np.ndarray, ijk_to_cell: np.ndarray) -> tuple[np
     return out_s
 
 
-from typing import Any
-
-
 def _rounded_unique(vals: np.ndarray, decimals: int = 10) -> np.ndarray:
     return np.unique(np.round(vals.astype(np.float64), decimals=decimals))
 
@@ -811,7 +804,6 @@ def transform_to_unstructured(
         kolor_1_start = nx * (ny + 1)
         kolor_2_start = (2 * nx * ny) + nx + ny
         complete_levels = 10
-        needs_completion = False
         if min(nx, ny) < 2 * n_levels:
             n_levels = (np.ceil(min(nx, ny) / 2)).astype(int)
             complete_levels = min(complete_levels, min(nx, ny))
@@ -843,7 +835,6 @@ def transform_to_unstructured(
                 print(
                     f"Reached complete level at {2 * level + 1}, filling remaining edges with interior mapping."
                 )
-                needs_completion = True
                 break
             # even levels are more interior edges
             transform_array[idx : idx + nx - 1 - 2 * level] = np.arange(
@@ -888,7 +879,6 @@ def transform_to_unstructured(
         idx = 0
         kolor_1_start = nx * ny
         complete_levels = 5
-        needs_completion = False
         if min(nx, ny) < 2 * n_levels:
             n_levels = (np.ceil(min(nx, ny) / 2)).astype(int)
             complete_levels = min(complete_levels, min(nx, ny)) // 2
@@ -940,7 +930,6 @@ def transform_to_unstructured(
             idx += ny - 1 - 2 * level
             if level + 1 == complete_levels:
                 print(f"Reached complete level at {level + 1}, filling remaining cells ascending.")
-                needs_completion = True
                 break
         if boundary_level == n_levels + 1:
             start_at_b_level = idx
@@ -952,7 +941,6 @@ def transform_to_unstructured(
         ny = int((N) / (nx + 1) - 1)
         idx = 0
         complete_levels = 5
-        needs_completion = False
         if min(nx, ny) < 2 * n_levels:
             n_levels = (np.ceil(min(nx, ny) / 2)).astype(int)
             complete_levels = min(complete_levels, min(nx + 1, ny + 1)) // 2
@@ -986,7 +974,6 @@ def transform_to_unstructured(
                 print(
                     f"Reached complete level at {level + 1}, filling remaining vertices ascending."
                 )
-                needs_completion = True
                 break
         if boundary_level == n_levels + 1:
             start_at_b_level = idx
@@ -1133,7 +1120,7 @@ def build_index_map_from_lonlat_e2v(
     )
 
 
-def build_index_map_from_ds_regular(ds, e2v):
+def build_index_map_from_ds_regular(ds: xr.Dataset, e2v: np.ndarray) -> IndexMap:
     """
     If dataset ds encodes a regular parallelogram grid (same as test_simple_structured),
     compute nx, ny and build the structured index map via lonlat + e2v.

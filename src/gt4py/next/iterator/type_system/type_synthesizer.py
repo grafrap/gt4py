@@ -256,7 +256,7 @@ def if_(
     # TODO(tehrengruber): Enable this or a similar check. In case the true- and false-branch are
     #  iterators defined on different positions this fails. For the GTFN backend we also don't
     #  want this, but for roundtrip it is totally fine.
-    # assert true_branch == false_branch  # noqa: ERA001
+    # assert true_branch == false_branch
 
     return true_branch
 

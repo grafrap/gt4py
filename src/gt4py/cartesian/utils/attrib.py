@@ -217,7 +217,7 @@ def attribute(of, optional=False, **kwargs):
         attr_type_hint = of.type_hint
 
     elif isinstance(of, type):
-        # assert of in (bool, float, str, int, enum.Enum) # noqa: ERA001 [commented-out-code]
+        # assert of in (bool, float, str, int, enum.Enum)
         attr_validator = attr.validators.instance_of(of)
         attr_type_hint = of
 

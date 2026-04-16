@@ -8,6 +8,7 @@
 
 import functools
 import os
+from typing import cast
 
 import numpy as np
 import xarray as xr
@@ -55,7 +56,7 @@ def _parse_map_dict_remap_table() -> dict[str, dict[int, dict[int, tuple[int, in
             vals[axis] = int(offset)
         return vals.get("IDim", 0), vals.get("JDim", 0), vals.get("Kolor", 0)
 
-    def _kolor_range_from_domain(domain) -> tuple[int, int]:
+    def _kolor_range_from_domain(domain: ir.FunCall | None) -> tuple[int, int] | None:
         """Return (start, stop) kolor range from a _kolor_slice domain node, or None for else branch."""
         if domain is None:
             return None
@@ -76,8 +77,9 @@ def _parse_map_dict_remap_table() -> dict[str, dict[int, dict[int, tuple[int, in
 
     table: dict[str, dict[int, dict[int, tuple[int, int, int]]]] = {}
 
-    for (conn_lit, slot_lit), entry in _MAP_DICT.items():
-        conn_name: str = conn_lit.value
+    for (conn_lit, slot_lit), raw_entry in _MAP_DICT.items():
+        entry = cast(dict[str, object], raw_entry)
+        conn_name: str = cast(str, conn_lit.value)
         slot: int = int(slot_lit.value)
 
         if conn_name not in table:
@@ -86,21 +88,21 @@ def _parse_map_dict_remap_table() -> dict[str, dict[int, dict[int, tuple[int, in
         kind = entry["kind"]
 
         if kind == "shift":
-            di, dj, dk = _extract_shift(entry["shifts"])
+            di, dj, dk = _extract_shift(cast(tuple, entry["shifts"]))
             # Same mapping for all center kolors
             for ck in range(_MAX_KOLOR):
                 nk = ck + dk
                 table[conn_name].setdefault(ck, {})[slot] = (di, dj, nk)
 
         elif kind == "concat_where":
-            branches = entry["branches"]
+            branches = cast(tuple, entry["branches"])
             # Each branch is (domain_or_None, shifts_tuple)
             # Collect (kolor_range, shift) pairs, then resolve the "else" branch
             resolved: list[tuple[tuple[int, int] | None, tuple[int, int, int]]] = []
             else_shift: tuple[int, int, int] | None = None
 
             for domain, shifts in branches:
-                di, dj, dk = _extract_shift(shifts)
+                di, dj, dk = _extract_shift(cast(tuple, shifts))
                 if domain is None:
                     else_shift = (di, dj, dk)
                 else:
@@ -315,7 +317,7 @@ def _build_periodic_square_index_map(
 ) -> tuple[IndexMap, StructuredRemapSizes] | None:
     n_edge = int(e2v.shape[0])
     n_vertex = int(e2v.max()) + 1 if e2v.size else 0
-    side = int(round(np.sqrt(n_vertex)))
+    side = round(np.sqrt(n_vertex))
     if side * side != n_vertex or n_edge != 3 * n_vertex:
         return None
 
@@ -385,7 +387,7 @@ def _build_periodic_square_index_map(
     return index_map, remap_sizes
 
 
-def get_global_grid_mapping(e2v_override=None):
+def get_global_grid_mapping(e2v_override=None) -> tuple[IndexMap, StructuredRemapSizes]:
     """Builds or returns the cached index_map and remap_sizes for the current run."""
     global _CACHED_INDEX_MAP, _CACHED_REMAP_SIZES, _CACHED_EDGE_COUNT
 
@@ -436,7 +438,7 @@ def get_global_grid_mapping(e2v_override=None):
 class GenericStructuredWrapper:
     def __init__(
         self, operator, backend_factory, index_map, remap_sizes, allocator, offset_provider
-    ):
+    ) -> None:
         self.index_map = index_map
         self.allocator = allocator
         self.operator_name = getattr(operator, "id", None) or getattr(operator, "__name__", "")
@@ -533,7 +535,7 @@ class GenericStructuredWrapper:
             operator, backend=structured_backend, offset_provider=self.structured_offset_provider
         )
 
-    def _get_connectivity(self, offset_provider, name: str):
+    def _get_connectivity(self, offset_provider: dict, name: str) -> np.ndarray | None:
         if not offset_provider:
             return None
         for key, value in offset_provider.items():
@@ -609,7 +611,7 @@ class GenericStructuredWrapper:
 
         return normalized
 
-    def _build_structured_offset_provider(self, offset_provider):
+    def _build_structured_offset_provider(self, offset_provider: dict) -> dict:
         if not offset_provider:
             return offset_provider
 
@@ -726,19 +728,19 @@ class GenericStructuredWrapper:
                 f"coeff={coeff[edge].tolist()} neighbors={neighbors} neighbor_ijk={neighbor_ijk}"
             )
 
-    def _is_unstructured(self, field, axis_name):
+    def _is_unstructured(self, field: gtx.Field, axis_name: str) -> bool:
         if not getattr(field, "domain", None):
             return False
         return any(d.value == axis_name for d in field.domain.dims)
 
-    def _get_local_dim_name(self, field) -> str | None:
+    def _get_local_dim_name(self, field: gtx.Field) -> str | None:
         """Return the local-connectivity dimension name (e.g. 'E2C2E') from a sparse-local field, or None."""
         dims = list(getattr(field.domain, "dims", ()))
         if len(dims) < 2:
             return None
         return getattr(dims[1], "value", None)
 
-    def _is_sparse_local_field(self, field, np_data: np.ndarray) -> bool:
+    def _is_sparse_local_field(self, field: gtx.Field, np_data: np.ndarray) -> bool:
         """Return True if the field is a sparse local-connectivity field whose connectivity is
         known in the map_dict remap table and for which we have the raw connectivity array."""
         if np_data.ndim < 2:
@@ -751,7 +753,7 @@ class GenericStructuredWrapper:
         # Must have a connectivity array available
         return local_dim in self._raw_conn
 
-    def _pack_sparse_local_field(self, field, coeff: np.ndarray) -> np.ndarray:
+    def _pack_sparse_local_field(self, field: gtx.Field, coeff: np.ndarray) -> np.ndarray:
         """Generic packing of a sparse local-connectivity field into a structured
         (ni, nj, n_kolor, n_local, ...) array, derived from the map_dict remap table.
 
@@ -794,7 +796,7 @@ class GenericStructuredWrapper:
 
         return packed
 
-    def _pack_argument(self, field):
+    def _pack_argument(self, field: gtx.Field) -> gtx.Field:
         # print(f"packing field:", field)
         if not getattr(field, "domain", None):
             return field
@@ -838,7 +840,9 @@ class GenericStructuredWrapper:
 
         return field
 
-    def _unpack_to_buffer(self, structured_field, original_unstructured_field):
+    def _unpack_to_buffer(
+        self, structured_field: gtx.Field, original_unstructured_field: gtx.Field
+    ) -> None:
         # print(f"unpacking field:", structured_field, "to", original_unstructured_field)
         if not getattr(original_unstructured_field, "domain", None):
             return
@@ -876,9 +880,9 @@ class GenericStructuredWrapper:
 
         np.copyto(orig_np, unstruct_np)
 
-    def __call__(self, **kwargs):
+    def __call__(self, **kwargs) -> None:
         structured_kwargs = {}
-        packed_fields: list[tuple[object, object]] = []
+        packed_fields: list[tuple[gtx.Field, gtx.Field]] = []
 
         for arg_name, arg_val in kwargs.items():
             if arg_name == "offset_provider":

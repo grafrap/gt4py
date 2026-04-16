@@ -85,14 +85,23 @@ try:
             for arg in ctx.type.args:
                 argname = getattr(arg, "name", "unknown")
                 if argname not in DIM_MAP:
-                    DIM_MAP[argname] = ctx.api.analyze_type(
-                        ctx.api.named_type(f"{module_name}.{next(dims)}", [])
-                    )
+                    # named_type / analyze_type may raise AssertionError when the
+                    # target module/type is not available from the current analysis
+                    # context. Guard against that and fall back to `Any`.
+                    try:
+                        DIM_MAP[argname] = ctx.api.analyze_type(
+                            ctx.api.named_type(f"{module_name}.{next(dims)}", [])
+                        )
+                    except AssertionError:
+                        DIM_MAP[argname] = types.AnyType(types.TypeOfAny.explicit)
                 args.append(DIM_MAP[argname])
         else:
             # do not accidentally replace 'Dims' -> 'Dims[Any]' (the former matches any number of dims, the latter only one)
             args = [types.UnpackType(typ=types.AnyType(types.TypeOfAny.explicit))]
-        result = ctx.api.analyze_type(ctx.api.named_type("gt4py.next.common.Dims", args))
+        try:
+            result = ctx.api.analyze_type(ctx.api.named_type("gt4py.next.common.Dims", args))
+        except AssertionError:
+            result = types.AnyType(types.TypeOfAny.explicit)
         return result
 
     def fixup_dims_from_typealiases(ctx: mplugin.AnalyzeTypeContext) -> types.Type:
