@@ -1,3 +1,5 @@
+# TODO: This license is not consistent with the license used in the project.
+#       Delete the inconsistent license and above line and rerun pre-commit to insert a good license.
 # # GT4Py - GridTools Framework
 # #
 # # Copyright (c) 2014-2024, ETH Zurich

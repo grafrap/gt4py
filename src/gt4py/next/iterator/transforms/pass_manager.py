@@ -15,8 +15,8 @@ from gt4py.next import common, utils
 from gt4py.next.iterator import ir as itir, pretty_printer
 from gt4py.next.iterator.ir_utils import common_pattern_matcher as cpm, ir_makers as im
 from gt4py.next.iterator.transforms import (
-    concat_where,
     cart_unroll,
+    concat_where,
     dead_code_elimination,
     fuse_as_fieldop,
     global_tmps,
@@ -39,7 +39,6 @@ from gt4py.next.iterator.transforms.inline_lambdas import InlineLambdas
 from gt4py.next.iterator.transforms.inline_scalar import InlineScalar
 from gt4py.next.iterator.transforms.merge_let import MergeLet
 from gt4py.next.iterator.transforms.normalize_shifts import NormalizeShifts
-from gt4py.next.iterator.transforms.unroll_cartesian_reduce import UnrollCartesianReduce
 from gt4py.next.iterator.transforms.unroll_reduce import UnrollReduce
 from gt4py.next.iterator.type_system.inference import infer
 
@@ -103,18 +102,7 @@ def _print_ir_block(title: str, ir: itir.Program, *, enabled: bool) -> None:
     if not enabled:
         return
 
-    text = (
-        "\n"
-        + "=" * 60
-        + "\n"
-        + title
-        + "\n"
-        + "=" * 60
-        + "\n"
-        + f"{ir}\n"
-        + "=" * 60
-        + "\n\n"
-    )
+    text = "\n" + "=" * 60 + "\n" + title + "\n" + "=" * 60 + "\n" + f"{ir}\n" + "=" * 60 + "\n\n"
     _write_debug_output(text)
 
 
@@ -324,7 +312,11 @@ def apply_common_transforms(
 
     ir = inline_fundefs.prune_unreferenced_fundefs(ir)
     ir = NormalizeShifts().visit(ir)
-    _print_ir_block("=== GTIR AFTER PRUNING UNREFERENCED FUNDEFS AND NORMALIZING SHIFTS ===", ir, enabled=print_ir)
+    _print_ir_block(
+        "=== GTIR AFTER PRUNING UNREFERENCED FUNDEFS AND NORMALIZING SHIFTS ===",
+        ir,
+        enabled=print_ir,
+    )
 
     # TODO(tehrengruber): Many iterator test contain lifts that need to be inlined, e.g.
     #  test_can_deref. We didn't notice previously as FieldOpFusion did this implicitly everywhere.
@@ -346,11 +338,13 @@ def apply_common_transforms(
             symbolic_domain_sizes=symbolic_domain_sizes,
             offset_provider=offset_provider,
         )
-        _print_ir_block("=== GTIR AFTER CARTESIAN DOMAIN AND TYPE REMAPPING ===", ir, enabled=print_ir)
+        _print_ir_block(
+            "=== GTIR AFTER CARTESIAN DOMAIN AND TYPE REMAPPING ===", ir, enabled=print_ir
+        )
         ir = cart_unroll.CartesianReductionUnroller.apply(ir)
         ir = NormalizeShifts().visit(ir)
         _print_ir_block("=== GTIR AFTER CARTESIAN UNROLLING ===", ir, enabled=print_ir)
-    
+
     ir = infer_domain_ops.InferDomainOps.apply(ir)
     ir = concat_where.canonicalize_domain_argument(ir)
     _print_ir_block("=== GTIR AFTER CANONICALIZING DOMAIN ARGUMENTS ===", ir, enabled=print_ir)
@@ -367,7 +361,9 @@ def apply_common_transforms(
     ir = prune_empty_concat_where.prune_empty_concat_where(ir)
     ir = remove_broadcast.RemoveBroadcast.apply(ir)
     ir = cast(itir.Program, ConstantFolding.apply(ir))
-    _print_ir_block("=== GTIR AFTER COMMON TRANSFORMS BEFORE INFER_DOMAIN ===", ir, enabled=print_ir)
+    _print_ir_block(
+        "=== GTIR AFTER COMMON TRANSFORMS BEFORE INFER_DOMAIN ===", ir, enabled=print_ir
+    )
     ir = concat_where.transform_to_as_fieldop(ir)
     _print_ir_block("=== GTIR AFTER TRANSFORM AS FIELDOP ===", ir, enabled=print_ir)
     for _ in range(10):
@@ -385,7 +381,6 @@ def apply_common_transforms(
         )  # type: ignore[assignment]  # always an itir.Program
         inlined = InlineScalar.apply(inlined, offset_provider_type=offset_provider_type)
         if os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1":
-
             inlined = simplify_cart_shifts.SimplifyCartesianShifts.apply(inlined)
 
         # This pass is required to run after CollapseTuple as otherwise we can not inline
@@ -450,10 +445,10 @@ def apply_common_transforms(
 
 
 def apply_fieldview_transforms(
-    ir: itir.Program, 
-    *, 
+    ir: itir.Program,
+    *,
     offset_provider: common.OffsetProvider,
-    unroll_reduce: bool = False, 
+    unroll_reduce: bool = False,
     cartesian_reduce_axis_ranges: Optional[dict[common.Dimension, tuple[int, int]]] = None,
     use_max_domain_range_on_unstructured_shift: Optional[bool] = None,
 ) -> itir.Program:

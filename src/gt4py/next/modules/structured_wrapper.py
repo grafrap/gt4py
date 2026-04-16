@@ -1,30 +1,40 @@
-import os
+# GT4Py - GridTools Framework
+#
+# Copyright (c) 2014-2024, ETH Zurich
+# All rights reserved.
+#
+# Please, refer to the LICENSE file in the root directory.
+# SPDX-License-Identifier: BSD-3-Clause
+
 import numpy as np
+
 from gt4py import next as gtx
+from gt4py.next.modules.translator import (
+    IDim,
+    JDim,
+    Kolor,
+    pack_edge_field_to_structured,
+    pack_sparse_local_field_to_structured,
+    pack_vertex_field_to_structured,
+    unpack_edge_field,
+    unpack_vertex_field_to_unstructured,
+)
 from gt4py.next.program_processors.program_setup_utils import setup_program
 from gt4py.next.program_processors.runners import gtfn as gtfn_runner
 
-from gt4py.next.modules.translator import (
-    IDim, JDim, Kolor,
-    pack_vertex_field_to_structured,
-    pack_edge_field_to_structured,
-    unpack_vertex_field_to_unstructured,
-    unpack_edge_field,
-    pack_sparse_local_field_to_structured,
-)
 
 class StructuredExecutionWrapper:
-    def __init__(self, operator, backend, index_map, e2v_conn, v2e_conn, allocator, offset_provider):
+    def __init__(
+        self, operator, backend, index_map, e2v_conn, v2e_conn, allocator, offset_provider
+    ):
         self.index_map = index_map
         self.e2v_conn = e2v_conn
         self.v2e_conn = v2e_conn
         self.allocator = allocator
-        
+
         # Compile the actual structured GT4Py program under the hood
         self._compiled_program = setup_program(
-            operator,
-            backend=backend,
-            offset_provider=offset_provider
+            operator, backend=backend, offset_provider=offset_provider
         )
 
     def _is_unstructured(self, field, axis_name):
@@ -34,31 +44,31 @@ class StructuredExecutionWrapper:
 
     def _pack_argument(self, field):
         if not getattr(field, "domain", None):
-            return field 
+            return field
 
         np_data = field.asnumpy()
-        
+
         # 1. Sparse fields (e.g., Sign: [Vertex, V2EDim])
         if self._is_unstructured(field, "Vertex") and np_data.ndim == 2:
-            local_dim = field.domain.dims[1] 
+            local_dim = field.domain.dims[1]
             struct_np = pack_sparse_local_field_to_structured(
                 coeff=np_data,
                 connectivity=self.v2e_conn,
                 index_map=self.index_map,
-                local_dim_name=getattr(local_dim, "value", "V2E"), # TODO: make this more general
+                local_dim_name=getattr(local_dim, "value", "V2E"),  # TODO: make this more general
             )
             return gtx.as_field([IDim, JDim, Kolor, local_dim], struct_np, allocator=self.allocator)
-            
+
         # 2. Standard unstructured fields
         if self._is_unstructured(field, "Vertex"):
             struct_np = pack_vertex_field_to_structured(np_data, self.index_map)
             return gtx.as_field([IDim, JDim, Kolor], struct_np, allocator=self.allocator)
-            
+
         elif self._is_unstructured(field, "Edge"):
             struct_np = pack_edge_field_to_structured(np_data, self.index_map)
             return gtx.as_field([IDim, JDim, Kolor], struct_np, allocator=self.allocator)
 
-        return field 
+        return field
 
     def _unpack_to_buffer(self, structured_field, original_unstructured_field):
         if not getattr(original_unstructured_field, "domain", None):
@@ -66,13 +76,13 @@ class StructuredExecutionWrapper:
 
         struct_np = structured_field.asnumpy()
         orig_np = original_unstructured_field.asnumpy()
-        
+
         if self._is_unstructured(original_unstructured_field, "Vertex"):
             unstruct_np = unpack_vertex_field_to_unstructured(struct_np, self.index_map)
         elif self._is_unstructured(original_unstructured_field, "Edge"):
             unstruct_np = unpack_edge_field(struct_np, self.index_map, orig_np.shape[0])
         else:
-            return 
+            return
 
         np.copyto(orig_np, unstruct_np)
 
@@ -110,7 +120,7 @@ def setup_smart_program(operator, setup, index_map, remap_sizes, allocator, offs
             "max_j": int(remap_sizes.max_j),
         },
     )
-    
+
     return StructuredExecutionWrapper(
         operator=operator,
         backend=structured_backend,
@@ -118,5 +128,5 @@ def setup_smart_program(operator, setup, index_map, remap_sizes, allocator, offs
         e2v_conn=setup.edges2node_connectivity.asnumpy(),
         v2e_conn=setup.nodes2edge_connectivity.asnumpy(),
         allocator=allocator,
-        offset_provider=offset_provider
+        offset_provider=offset_provider,
     )

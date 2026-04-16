@@ -1,3 +1,11 @@
+# GT4Py - GridTools Framework
+#
+# Copyright (c) 2014-2024, ETH Zurich
+# All rights reserved.
+#
+# Please, refer to the LICENSE file in the root directory.
+# SPDX-License-Identifier: BSD-3-Clause
+
 import os
 
 import numpy as np
@@ -6,9 +14,13 @@ import pytest
 pytest.importorskip("atlas4py")
 
 from gt4py import next as gtx
-from next_tests.integration_tests.feature_tests.ffront_tests.ffront_test_utils import exec_alloc_descriptor
+from next_tests.integration_tests.feature_tests.ffront_tests.ffront_test_utils import (
+    exec_alloc_descriptor,
+)
 from next_tests.integration_tests.multi_feature_tests.fvm_nabla_setup import nabla_setup
-from next_tests.integration_tests.multi_feature_tests.ffront_tests.test_ffront_fvm_nabla import pnabla
+from next_tests.integration_tests.multi_feature_tests.ffront_tests.test_ffront_fvm_nabla import (
+    pnabla,
+)
 from gt4py.next.iterator import atlas_utils
 
 from gt4py.next.modules.translator import (
@@ -29,6 +41,7 @@ def _first_present(ds, names, required=True):
         raise KeyError(f"None of the variables {names} found in dataset.")
     return None
 
+
 def _get_lonlat(ds):
     # ICON files store lon/lat separately
     if "longitude_vertices" in ds and "latitude_vertices" in ds:
@@ -37,6 +50,7 @@ def _get_lonlat(ds):
         return np.stack([lon, lat], axis=1)
     # fall back to any single combined array
     return _first_present(ds, ["lonlat", "vertex_lonlat", "node_lonlat"], required=False)
+
 
 def _get_dual_normals(ds):
     # pick whichever pair exists
@@ -51,6 +65,7 @@ def _get_dual_normals(ds):
         required=False,
     )
     return normals
+
 
 def _read_e2v(ds):
     raw = _first_present(
@@ -72,7 +87,7 @@ def _read_e2v(ds):
     return arr
 
 
-'''
+"""
 Connectivities by MPI mesh generator:
 - C2V: "vertex_of_cell"
 - C2E: "edge_of_cell"
@@ -84,7 +99,8 @@ Connectivities by MPI mesh generator:
 Domain size: 
   nx = 10
   ny = 12
-'''
+"""
+
 
 def _read_v2e(ds):
     raw = _first_present(
@@ -107,6 +123,7 @@ def _read_v2e(ds):
     arr = np.where(arr > 0, arr - 1, -1)
     return arr
 
+
 def print_structured_vertex_edges(v, m, S_field):
     i, j = m.vertex_to_ij[v]
     ni, nj, _ = m.ijk_to_edge.shape
@@ -115,35 +132,49 @@ def print_structured_vertex_edges(v, m, S_field):
     if j < nj - 1:
         edge_idx = m.ijk_to_edge[i, j, 0]
         if edge_idx >= 0:
-            print(f"  Kolor 0 (east): edge_idx={edge_idx}, value={S_field[edge_idx]}, connects ({i},{j}) <-> ({i},{j+1})")
+            print(
+                f"  Kolor 0 (east): edge_idx={edge_idx}, value={S_field[edge_idx]}, connects ({i},{j}) <-> ({i},{j + 1})"
+            )
     if j > 0:
-        edge_idx = m.ijk_to_edge[i, j-1, 0]
+        edge_idx = m.ijk_to_edge[i, j - 1, 0]
         if edge_idx >= 0:
-            print(f"  Kolor 0 (west): edge_idx={edge_idx}, value={S_field[edge_idx]}, connects ({i},{j-1}) <-> ({i},{j})")
+            print(
+                f"  Kolor 0 (west): edge_idx={edge_idx}, value={S_field[edge_idx]}, connects ({i},{j - 1}) <-> ({i},{j})"
+            )
     # Kolor 1: edge at (i, j, 1) and (i-1, j, 1) if i > 0
     if i < ni - 1:
         edge_idx = m.ijk_to_edge[i, j, 1]
         if edge_idx >= 0:
-            print(f"  Kolor 1 (NE): edge_idx={edge_idx}, value={S_field[edge_idx]}, connects ({i},{j}) <-> ({i+1},{j})")
+            print(
+                f"  Kolor 1 (NE): edge_idx={edge_idx}, value={S_field[edge_idx]}, connects ({i},{j}) <-> ({i + 1},{j})"
+            )
     if i > 0:
-        edge_idx = m.ijk_to_edge[i-1, j, 1]
+        edge_idx = m.ijk_to_edge[i - 1, j, 1]
         if edge_idx >= 0:
-            print(f"  Kolor 1 (SW): edge_idx={edge_idx}, value={S_field[edge_idx]}, connects ({i-1},{j}) <-> ({i},{j})")
+            print(
+                f"  Kolor 1 (SW): edge_idx={edge_idx}, value={S_field[edge_idx]}, connects ({i - 1},{j}) <-> ({i},{j})"
+            )
     # Kolor 2: edge at (i, j, 2) and (i-1, j+1, 2) if i > 0 and j < nj-1
     if i < ni - 1 and j > 0:
-        edge_idx = m.ijk_to_edge[i, j-1, 2]
+        edge_idx = m.ijk_to_edge[i, j - 1, 2]
         if edge_idx >= 0:
-            print(f"  Kolor 2 (NW): edge_idx={edge_idx}, value={S_field[edge_idx]}, connects ({i},{j}) <-> ({i+1},{j-1})")
+            print(
+                f"  Kolor 2 (NW): edge_idx={edge_idx}, value={S_field[edge_idx]}, connects ({i},{j}) <-> ({i + 1},{j - 1})"
+            )
     if i > 0 and j < nj - 1:
-        edge_idx = m.ijk_to_edge[i-1, j, 2]
+        edge_idx = m.ijk_to_edge[i - 1, j, 2]
         if edge_idx >= 0:
-            print(f"  Kolor 2 (SE): edge_idx={edge_idx}, value={S_field[edge_idx]}, connects ({i-1},{j+1}) <-> ({i},{j})")
-
+            print(
+                f"  Kolor 2 (SE): edge_idx={edge_idx}, value={S_field[edge_idx]}, connects ({i - 1},{j + 1}) <-> ({i},{j})"
+            )
 
 
 @pytest.mark.requires_atlas
 def test_structured_bridge_matches_unstructured(exec_alloc_descriptor):
-    mesh_nc = os.environ.get("GT4PY_TRANSLATOR_MESH") or "/home/raphael/Documents/Studium/Msc_thesis/grid-generator/parallelogram_grid.nc"
+    mesh_nc = (
+        os.environ.get("GT4PY_TRANSLATOR_MESH")
+        or "/home/raphael/Documents/Studium/Msc_thesis/grid-generator/parallelogram_grid.nc"
+    )
     if mesh_nc:
         xr = pytest.importorskip("xarray")
         with xr.open_dataset(mesh_nc) as ds:
@@ -164,13 +195,9 @@ def test_structured_bridge_matches_unstructured(exec_alloc_descriptor):
                 m = build_index_map_for_ragged_lonlat_e2v(lonlat, e2v)
     else:
         setup = nabla_setup(allocator=exec_alloc_descriptor.allocator)
-        
-        e2v = atlas_utils.AtlasTable(
-            setup.mesh.edges.node_connectivity
-        ).asnumpy()
-        v2e = atlas_utils.AtlasTable(
-            setup.mesh.nodes.edge_connectivity
-        ).asnumpy()
+
+        e2v = atlas_utils.AtlasTable(setup.mesh.edges.node_connectivity).asnumpy()
+        v2e = atlas_utils.AtlasTable(setup.mesh.nodes.edge_connectivity).asnumpy()
         lonlat = None
         dual_volumes = None
         dual_normals = None
@@ -193,17 +220,26 @@ def test_structured_bridge_matches_unstructured(exec_alloc_descriptor):
         if lonlat is None:
             raise RuntimeError("need lonlat info to build structured index map")
         m = build_index_map_from_lonlat_e2v(lonlat, e2v)
-    
+
     # Unstructured reference
-    ref0 = gtx.zeros({setup.input_field.domain.dims[0]: setup.nodes_size}, allocator=exec_alloc_descriptor.allocator)
-    ref1 = gtx.zeros({setup.input_field.domain.dims[0]: setup.nodes_size}, allocator=exec_alloc_descriptor.allocator)
+    ref0 = gtx.zeros(
+        {setup.input_field.domain.dims[0]: setup.nodes_size},
+        allocator=exec_alloc_descriptor.allocator,
+    )
+    ref1 = gtx.zeros(
+        {setup.input_field.domain.dims[0]: setup.nodes_size},
+        allocator=exec_alloc_descriptor.allocator,
+    )
     pnabla.with_backend(None if exec_alloc_descriptor.executor is None else exec_alloc_descriptor)(
         setup.input_field,
         setup.S_fields,
         setup.sign_field,
         setup.vol_field,
         out=(ref0, ref1),
-        offset_provider={"E2V": setup.edges2node_connectivity, "V2E": setup.nodes2edge_connectivity},
+        offset_provider={
+            "E2V": setup.edges2node_connectivity,
+            "V2E": setup.nodes2edge_connectivity,
+        },
     )
 
     # 3) Build structured sign from unstructured sign + V2E

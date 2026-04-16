@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import dataclasses
 import functools
-import os
 import inspect
+import os
 from typing import TypeVar, cast, overload
 
 from gt4py.eve import utils as eve_utils

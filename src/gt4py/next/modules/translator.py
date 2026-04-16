@@ -1,15 +1,21 @@
+# GT4Py - GridTools Framework
+#
+# Copyright (c) 2014-2024, ETH Zurich
+# All rights reserved.
+#
+# Please, refer to the LICENSE file in the root directory.
+# SPDX-License-Identifier: BSD-3-Clause
+
 from dataclasses import dataclass
+from typing import List
+
 import numpy as np
+
 import gt4py.next as gtx
-from gt4py.next.iterator import atlas_utils
-from gt4py.next.iterator import ir
+from gt4py.next.iterator import atlas_utils, ir
 from gt4py.next.iterator.transforms.map_dict import map_dict as _MAP_DICT
 
-from .ffront_fvm_nabla_structured import IDim, JDim, Kolor#, pnabla_cartesian
-from gt4py.next.program_processors.program_setup_utils import setup_program
-
-
-from typing import List
+from .ffront_fvm_nabla_structured import IDim, JDim, Kolor  # , pnabla_cartesian
 
 
 def _parse_sparse_remap_table() -> dict[str, dict[int, dict[int, tuple[int, int, int]]]]:
@@ -78,7 +84,9 @@ def _parse_sparse_remap_table() -> dict[str, dict[int, dict[int, tuple[int, int,
     return table
 
 
-_SPARSE_REMAP_TABLE: dict[str, dict[int, dict[int, tuple[int, int, int]]]] = _parse_sparse_remap_table()
+_SPARSE_REMAP_TABLE: dict[str, dict[int, dict[int, tuple[int, int, int]]]] = (
+    _parse_sparse_remap_table()
+)
 _CENTER_ELEMENT_BY_PREFIX: dict[str, str] = {"E": "Edge", "C": "Cell", "V": "Vertex"}
 
 
@@ -197,14 +205,15 @@ def pack_sparse_local_field_to_structured(
                     out[ci, cj, ck, slot, ...] = coeff[elem, local, ...]
     return out
 
+
 @dataclass(frozen=True)
 class IndexMap:
-    vertex_to_ij: np.ndarray      # (n_vertex, 2) -> (row_i, local_j)
-    row_lengths: np.ndarray       # (ni,) lengths per row
-    row_offsets: np.ndarray       # (ni,) cumulative offsets
-    ij_to_vertex: np.ndarray      # (ni, max_nj) ragged padded with -1
-    edge_to_ijk: np.ndarray       # (n_edge, 3) -> (i, j, k) j is local_j
-    ijk_to_edge: np.ndarray       # (ni, max_nj, 3) padded with -1
+    vertex_to_ij: np.ndarray  # (n_vertex, 2) -> (row_i, local_j)
+    row_lengths: np.ndarray  # (ni,) lengths per row
+    row_offsets: np.ndarray  # (ni,) cumulative offsets
+    ij_to_vertex: np.ndarray  # (ni, max_nj) ragged padded with -1
+    edge_to_ijk: np.ndarray  # (n_edge, 3) -> (i, j, k) j is local_j
+    ijk_to_edge: np.ndarray  # (ni, max_nj, 3) padded with -1
 
 
 @dataclass(frozen=True)
@@ -230,6 +239,7 @@ def _first_present(ds, names: list[str], required: bool = True):
     if required:
         raise KeyError(f"None of the dataset variables are present: {names}")
     return None
+
 
 def _read_e2v(ds):
     raw = _first_present(ds, ["E2V", "edge_vertices", "edges2nodes", "edge_node_connectivity"])
@@ -265,6 +275,7 @@ def _read_lonlat(ds):
         lat = ds["latitude_vertices"].values.astype(np.float64)
         return np.stack([lon, lat], axis=1)
     return _first_present(ds, ["lonlat", "vertex_lonlat", "node_lonlat"], required=False)
+
 
 def infer_structured_remap_sizes(
     *,
@@ -333,6 +344,7 @@ def load_structured_remap_sizes_from_netcdf(nc_path: str, lateral=0) -> Structur
         print(f"Inferred structured remap sizes from {nc_path}: {sizes}")
 
     return sizes
+
 
 def build_index_map_for_ragged_lonlat_e2v(
     lonlat_deg: np.ndarray,
@@ -422,6 +434,7 @@ def build_index_map_for_ragged_lonlat_e2v(
         ijk_to_edge=ijk_to_edge,
     )
 
+
 def pack_vertex_field_to_structured(vertex_values: np.ndarray, m: IndexMap) -> np.ndarray:
     ni, max_nj = m.ij_to_vertex.shape
     trailing_shape = vertex_values.shape[1:]
@@ -431,6 +444,7 @@ def pack_vertex_field_to_structured(vertex_values: np.ndarray, m: IndexMap) -> n
         if i >= 0:
             out[i, local_j, 0, ...] = vertex_values[v, ...]
     return out
+
 
 # def pack_edge_field_to_structured(edge_values: np.ndarray, m: IndexMap) -> np.ndarray:
 #     ni, max_nj, _ = m.ijk_to_edge.shape
@@ -457,6 +471,7 @@ def pack_edge_field_to_structured(edge_values: np.ndarray, m: IndexMap) -> np.nd
                     out[i, j, k] = edge_values[e]
     return out
 
+
 def unpack_vertex_field_to_unstructured(struct_values: np.ndarray, m: IndexMap) -> np.ndarray:
     n_vertex = m.vertex_to_ij.shape[0]
     trailing_shape = struct_values.shape[3:]
@@ -466,8 +481,10 @@ def unpack_vertex_field_to_unstructured(struct_values: np.ndarray, m: IndexMap) 
         out[v, ...] = struct_values[i, local_j, 0, ...]
     return out
 
+
 import numpy as np
-import gt4py.next as gtx
+
+
 # from icon4py.model.common import dimension as dims
 
 # Structured Dimensions
@@ -476,18 +493,19 @@ JDim = gtx.Dimension("JDim")
 Kolor = gtx.Dimension("Kolor")
 KDim = gtx.Dimension("KDim", kind=gtx.DimensionKind.VERTICAL)
 
-def pack_edge_field(edge_values: np.ndarray, m: 'IndexMap') -> np.ndarray:
+
+def pack_edge_field(edge_values: np.ndarray, m: "IndexMap") -> np.ndarray:
     """Packs 1D or 2D unstructured edge fields into structured [I, J, Kolor, (K)]."""
     ni, max_nj, n_kolor = m.ijk_to_edge.shape
     has_k = edge_values.ndim == 2
     n_edge = edge_values.shape[0]
-    
+
     if has_k:
         nk = edge_values.shape[1]
         out = np.zeros((ni, max_nj, n_kolor, nk), dtype=edge_values.dtype)
     else:
         out = np.zeros((ni, max_nj, n_kolor), dtype=edge_values.dtype)
-        
+
     for i in range(ni):
         for j in range(max_nj):
             for k in range(n_kolor):
@@ -505,16 +523,17 @@ def pack_edge_field(edge_values: np.ndarray, m: 'IndexMap') -> np.ndarray:
                     out[i, j, k] = edge_values[e]
     return out
 
-def unpack_edge_field(struct_values: np.ndarray, m: 'IndexMap', n_edge: int) -> np.ndarray:
+
+def unpack_edge_field(struct_values: np.ndarray, m: "IndexMap", n_edge: int) -> np.ndarray:
     """Unpacks structured [I, J, Kolor, (K)] fields back to unstructured."""
     has_k = struct_values.ndim == 4
-    
+
     if has_k:
         nk = struct_values.shape[3]
         out = np.zeros((n_edge, nk), dtype=struct_values.dtype)
     else:
         out = np.zeros((n_edge,), dtype=struct_values.dtype)
-        
+
     ni, max_nj, n_kolor = m.ijk_to_edge.shape
     for i in range(ni):
         for j in range(max_nj):
@@ -533,11 +552,12 @@ def unpack_edge_field(struct_values: np.ndarray, m: 'IndexMap', n_edge: int) -> 
                     out[e] = struct_values[i, j, k]
     return out
 
+
 def pack_vertex_field(vertex_values: np.ndarray, m) -> np.ndarray:
     """Packs an unstructured vertex field into [IDim, JDim, Kolor=1, (KDim)]."""
     has_k = vertex_values.ndim == 2
     ni, nj = m.ij_to_vertex.shape
-    
+
     # Allocate with Kolor dimension of size 1
     out = np.zeros((ni, nj, 1, vertex_values.shape[1] if has_k else 1), dtype=vertex_values.dtype)
     for i in range(ni):
@@ -548,38 +568,44 @@ def pack_vertex_field(vertex_values: np.ndarray, m) -> np.ndarray:
                 out[i, j, 0, :] = vertex_values[v, :] if has_k else vertex_values[v]
     return out if has_k else out[:, :, :, 0]
 
+
 # --- Cartesian Cell Helpers ---
+
 
 def build_cell_to_ijk(m: IndexMap, ds) -> np.ndarray:
     """Maps unstructured 1D cell index from netcdf into Cartesian [I, J, Kolor] layout."""
     import numpy as np
+
     c2v = np.where(
         ds["vertex_of_cell"].transpose("cell", "nv").values.astype(np.int32) > 0,
-        ds["vertex_of_cell"].transpose("cell", "nv").values.astype(np.int32) - 1, -1
+        ds["vertex_of_cell"].transpose("cell", "nv").values.astype(np.int32) - 1,
+        -1,
     )
     n_cells = c2v.shape[0]
     ni, nj = m.ij_to_vertex.shape
-    
+
     ijk_to_cell = np.full((ni, nj, 2), -1, dtype=np.int32)
-    
+
     for c in range(n_cells):
         v = c2v[c]
-        if np.any(v < 0): continue
-        
+        if np.any(v < 0):
+            continue
+
         i_coords = [m.vertex_to_ij[v[0], 0], m.vertex_to_ij[v[1], 0], m.vertex_to_ij[v[2], 0]]
         j_coords = [m.vertex_to_ij[v[0], 1], m.vertex_to_ij[v[1], 1], m.vertex_to_ij[v[2], 1]]
-        
-        if any(i < 0 for i in i_coords): continue
-        
+
+        if any(i < 0 for i in i_coords):
+            continue
+
         i_min = min(i_coords)
         j_min = min(j_coords)
-        
+
         # Kolor 0 has 2 vertices at i_min, Kolor 1 has 1 vertex at i_min
         kolor = 0 if i_coords.count(i_min) == 2 else 1
-        
+
         if 0 <= i_min < ni and 0 <= j_min < nj:
             ijk_to_cell[i_min, j_min, kolor] = c
-            
+
     return ijk_to_cell
 
 
@@ -612,13 +638,15 @@ def build_cell_ijk_maps(c2v: np.ndarray, m: IndexMap) -> tuple[np.ndarray, np.nd
 
     return cell_to_ijk, ijk_to_cell
 
+
 def pack_cell_field(cell_values: np.ndarray, ijk_to_cell: np.ndarray) -> np.ndarray:
     """Packs 1D/2D unstructured Cell arrays into [IDim, JDim, Kolor, (KDim)]."""
     import numpy as np
+
     ni, nj, n_kolor = ijk_to_cell.shape
     has_k = cell_values.ndim == 2
     out = np.zeros((ni, nj, n_kolor, cell_values.shape[1] if has_k else 1), dtype=cell_values.dtype)
-        
+
     for i in range(ni):
         for j in range(nj):
             for k in range(n_kolor):
@@ -641,12 +669,16 @@ def pack_cell_field_to_structured(
     _ = cell_to_ijk
     return pack_cell_field(cell_values, ijk_to_cell)
 
-def unpack_cell_field(struct_values: np.ndarray, ijk_to_cell: np.ndarray, n_cells: int) -> np.ndarray:
+
+def unpack_cell_field(
+    struct_values: np.ndarray, ijk_to_cell: np.ndarray, n_cells: int
+) -> np.ndarray:
     """Unpacks [IDim, JDim, Kolor, (KDim)] Cell arrays back to unstructured."""
     import numpy as np
+
     has_k = struct_values.ndim == 4
     out = np.zeros((n_cells, struct_values.shape[3] if has_k else 1), dtype=struct_values.dtype)
-        
+
     ni, nj, n_kolor = ijk_to_cell.shape
     for i in range(ni):
         for j in range(nj):
@@ -674,57 +706,62 @@ def unpack_cell_field_from_structured(
 
     return out if has_k else out[:, 0]
 
+
 def build_c2e2co_unstructured(ijk_to_cell: np.ndarray, n_cells: int) -> np.ndarray:
     """Uses Cartesian topology to dynamically build the exact C2E2CO connectivity map."""
     import numpy as np
+
     ni, nj, _ = ijk_to_cell.shape
     c2e2co = np.full((n_cells, 3), -1, dtype=np.int32)
     for i in range(ni):
         for j in range(nj):
             c0, c1 = ijk_to_cell[i, j, 0], ijk_to_cell[i, j, 1]
-            
+
             if c0 >= 0:
-                n0_0 = ijk_to_cell[i, j, 1] if j>=0 else -1
-                n0_1 = ijk_to_cell[i, j-1, 1] if j-1>=0 else -1
-                n0_2 = ijk_to_cell[i-1, j, 1] if i-1>=0 else -1
+                n0_0 = ijk_to_cell[i, j, 1] if j >= 0 else -1
+                n0_1 = ijk_to_cell[i, j - 1, 1] if j - 1 >= 0 else -1
+                n0_2 = ijk_to_cell[i - 1, j, 1] if i - 1 >= 0 else -1
                 c2e2co[c0] = [n0_0, n0_1, n0_2]
-                    
+
             if c1 >= 0:
-                n1_0 = ijk_to_cell[i, j, 0] if j>=0 else -1
-                n1_1 = ijk_to_cell[i, j+1, 0] if j+1<nj else -1
-                n1_2 = ijk_to_cell[i+1, j, 0] if i+1<ni else -1
+                n1_0 = ijk_to_cell[i, j, 0] if j >= 0 else -1
+                n1_1 = ijk_to_cell[i, j + 1, 0] if j + 1 < nj else -1
+                n1_2 = ijk_to_cell[i + 1, j, 0] if i + 1 < ni else -1
                 c2e2co[c1] = [n1_0, n1_1, n1_2]
     return c2e2co
+
 
 def pack_c2e2co_field(field_np: np.ndarray, ijk_to_cell: np.ndarray) -> tuple[np.ndarray, ...]:
     """Packs C2E2CO neighbour lookup tables into a tuple of 3 [IDim, JDim, Kolor] fields."""
     import numpy as np
+
     ni, nj, _ = ijk_to_cell.shape
     n_neighbors = field_np.shape[1]
     out_s = tuple(np.zeros((ni, nj, 2), dtype=field_np.dtype) for _ in range(n_neighbors))
-    
+
     for i in range(ni):
         for j in range(nj):
             c0, c1 = ijk_to_cell[i, j, 0], ijk_to_cell[i, j, 1]
-            
+
             if c0 >= 0:
                 n0_0 = ijk_to_cell[i, j, 1]
-                n0_1 = ijk_to_cell[i, j-1, 1] if j > 0 else -1
-                n0_2 = ijk_to_cell[i-1, j, 1] if i > 0 else -1
+                n0_1 = ijk_to_cell[i, j - 1, 1] if j > 0 else -1
+                n0_2 = ijk_to_cell[i - 1, j, 1] if i > 0 else -1
                 neighbors0 = [n0_0, n0_1, n0_2]
-                for idx in range(n_neighbors): 
+                for idx in range(n_neighbors):
                     if neighbors0[idx] != -1:  # <-- THE FIX: Force 0.0 for out-of-bounds!
                         out_s[idx][i, j, 0] = field_np[c0, idx]
-            
+
             if c1 >= 0:
                 n1_0 = ijk_to_cell[i, j, 0]
-                n1_1 = ijk_to_cell[i, j+1, 0] if j+1 < nj else -1
-                n1_2 = ijk_to_cell[i+1, j, 0] if i+1 < ni else -1
+                n1_1 = ijk_to_cell[i, j + 1, 0] if j + 1 < nj else -1
+                n1_2 = ijk_to_cell[i + 1, j, 0] if i + 1 < ni else -1
                 neighbors1 = [n1_0, n1_1, n1_2]
-                for idx in range(n_neighbors): 
+                for idx in range(n_neighbors):
                     if neighbors1[idx] != -1:  # <-- THE FIX: Force 0.0 for out-of-bounds!
                         out_s[idx][i, j, 1] = field_np[c1, idx]
     return out_s
+
 
 from typing import Any
 
@@ -732,24 +769,27 @@ from typing import Any
 def _rounded_unique(vals: np.ndarray, decimals: int = 10) -> np.ndarray:
     return np.unique(np.round(vals.astype(np.float64), decimals=decimals))
 
-def transform_to_unstructured(field: np.ndarray, nx: int, grid_obj: str = "Edge", boundary_level: int = 0) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+
+def transform_to_unstructured(
+    field: np.ndarray, nx: int, grid_obj: str = "Edge", boundary_level: int = 0
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
     """
-        Transforms a field that is defined on a structured grid with a given boundary level into the classical icon format. 
+    Transforms a field that is defined on a structured grid with a given boundary level into the classical icon format.
 
-        Parameters
+    Parameters
 
-        - field: the field to be transformed, defined on a structured grid with dimensions [Edge/Vertex/Cell, (KDim)]
-        - grid_obj: the type of grid object the field is defined on ("Edge", "Vertex", "Cell")
-        - boundary_level: the level of the boundary to be transformed (0 for the outermost boundary, 1 for the next one, etc.), this might differ for Edge and other grid objects, 
-        - nx: the number of cells in the x direction, needed to determine the size of the structured grid and the mapping to the unstructured grid.        
-        I.e. first loop around domain with all boundary levels, then classical structured layout in the interior. 
+    - field: the field to be transformed, defined on a structured grid with dimensions [Edge/Vertex/Cell, (KDim)]
+    - grid_obj: the type of grid object the field is defined on ("Edge", "Vertex", "Cell")
+    - boundary_level: the level of the boundary to be transformed (0 for the outermost boundary, 1 for the next one, etc.), this might differ for Edge and other grid objects,
+    - nx: the number of cells in the x direction, needed to determine the size of the structured grid and the mapping to the unstructured grid.
+    I.e. first loop around domain with all boundary levels, then classical structured layout in the interior.
 
-        Returns
-        three arrays and an int: 
-        - the transformation array (structured index -> unstructured index),  
-        - the array for the back-transformation (unstructured index -> structured index),
-        - the array with the values of the field in the unstructured layout
-        - and the start index for the asked boundary level.
+    Returns
+    three arrays and an int:
+    - the transformation array (structured index -> unstructured index),
+    - the array for the back-transformation (unstructured index -> structured index),
+    - the array with the values of the field in the unstructured layout
+    - and the start index for the asked boundary level.
     """
     # length of the field in the structured layout
     N = field.shape[0]
@@ -765,7 +805,7 @@ def transform_to_unstructured(field: np.ndarray, nx: int, grid_obj: str = "Edge"
         raise ValueError(f"grid_obj must be one of 'Edge', 'Vertex', 'Cell', got {grid_obj}")
     if grid_obj == "Edge":
         # for edges, we have 3 boundary levels (0, 1, 2) corresponding to the 3 edge types in the structured grid
-        n_levels = 5 # lateral 1 to 8 and two nudging levels, only write 5, because we need to fill two at the time to get the correct mapping for the interior edges
+        n_levels = 5  # lateral 1 to 8 and two nudging levels, only write 5, because we need to fill two at the time to get the correct mapping for the interior edges
         ny = int((N - nx) / (3 * nx + 1))
         idx = 0
         kolor_1_start = nx * (ny + 1)
@@ -775,48 +815,76 @@ def transform_to_unstructured(field: np.ndarray, nx: int, grid_obj: str = "Edge"
         if min(nx, ny) < 2 * n_levels:
             n_levels = (np.ceil(min(nx, ny) / 2)).astype(int)
             complete_levels = min(complete_levels, min(nx, ny))
-            print(f"Warning: Reduced number of boundary levels to {n_levels} due to small grid size (nx={nx}, ny={ny}).")
+            print(
+                f"Warning: Reduced number of boundary levels to {n_levels} due to small grid size (nx={nx}, ny={ny})."
+            )
         for level in range(n_levels):
             # odd levels are single edge boundaries
             # cycle through the edges in the current boundary level, then fill the interior edges
-            transform_array[idx:idx+nx - 2*level] = np.arange(0+level*(nx+1), nx+level*(nx-1), 1)  # south boundary edges
-            idx += nx-2*level
-            transform_array[idx:idx+ny - 2*level] = np.arange(kolor_1_start + nx + level * nx, kolor_2_start - level*(nx), nx+1) # east boundary edges
-            idx += ny - 2*level
-            transform_array[idx:idx+nx - 2*level] = np.arange(kolor_1_start-1 - level * (nx+1), kolor_1_start - 1 - nx - level * (nx - 1), -1)  # north boundary edges
-            idx += nx - 2*level
-            transform_array[idx:idx+ny - 2*level] = np.arange(kolor_2_start - 1 - nx - level * nx, kolor_1_start - 1 + level * (nx+2), -(nx+1)) # west boundary edges
-            idx += ny - 2*level
+            transform_array[idx : idx + nx - 2 * level] = np.arange(
+                0 + level * (nx + 1), nx + level * (nx - 1), 1
+            )  # south boundary edges
+            idx += nx - 2 * level
+            transform_array[idx : idx + ny - 2 * level] = np.arange(
+                kolor_1_start + nx + level * nx, kolor_2_start - level * (nx), nx + 1
+            )  # east boundary edges
+            idx += ny - 2 * level
+            transform_array[idx : idx + nx - 2 * level] = np.arange(
+                kolor_1_start - 1 - level * (nx + 1), kolor_1_start - 1 - nx - level * (nx - 1), -1
+            )  # north boundary edges
+            idx += nx - 2 * level
+            transform_array[idx : idx + ny - 2 * level] = np.arange(
+                kolor_2_start - 1 - nx - level * nx, kolor_1_start - 1 + level * (nx + 2), -(nx + 1)
+            )  # west boundary edges
+            idx += ny - 2 * level
             if boundary_level == 2 * (level + 1):
                 start_at_b_level = idx
             if 2 * level + 1 == complete_levels:
-                print(f"Reached complete level at {2*level+1}, filling remaining edges with interior mapping.")
+                print(
+                    f"Reached complete level at {2 * level + 1}, filling remaining edges with interior mapping."
+                )
                 needs_completion = True
                 break
             # even levels are more interior edges
-            transform_array[idx:idx+nx-1- 2*level] = np.arange(kolor_1_start+1+level*(nx+2), kolor_1_start + nx + level*(nx), 1)
-            idx += nx-1- 2*level
-            transform_array[idx:idx+ny-1- 2*level] = np.arange(2*nx - 1 + level*(nx-1), kolor_1_start - 1 - level * (nx+1),  nx)
-            idx += ny-1- 2*level
-            transform_array[idx:idx+nx-1- 2*level] = np.arange(kolor_2_start - 2 - level * (nx+2), kolor_2_start - 2 - (nx-1) - level * nx, -1)
-            idx += nx-1- 2*level
-            transform_array[idx:idx+ny-1- 2*level] = np.arange(kolor_1_start - 2*nx - level * (nx-1), 0 + level * (nx+1), -nx)
-            idx += ny-1- 2*level
+            transform_array[idx : idx + nx - 1 - 2 * level] = np.arange(
+                kolor_1_start + 1 + level * (nx + 2), kolor_1_start + nx + level * (nx), 1
+            )
+            idx += nx - 1 - 2 * level
+            transform_array[idx : idx + ny - 1 - 2 * level] = np.arange(
+                2 * nx - 1 + level * (nx - 1), kolor_1_start - 1 - level * (nx + 1), nx
+            )
+            idx += ny - 1 - 2 * level
+            transform_array[idx : idx + nx - 1 - 2 * level] = np.arange(
+                kolor_2_start - 2 - level * (nx + 2), kolor_2_start - 2 - (nx - 1) - level * nx, -1
+            )
+            idx += nx - 1 - 2 * level
+            transform_array[idx : idx + ny - 1 - 2 * level] = np.arange(
+                kolor_1_start - 2 * nx - level * (nx - 1), 0 + level * (nx + 1), -nx
+            )
+            idx += ny - 1 - 2 * level
             # kolor 2 edges
-            transform_array[idx:idx+nx- 2*level] = np.arange(kolor_2_start + level * (nx+1), kolor_2_start + nx + level * (nx-1), 1)
-            idx += nx- 2*level
-            transform_array[idx:idx+ny-1- 2*level] = np.arange(kolor_2_start+2*nx-1 + level * (nx-1), N - level*(nx), nx)
-            idx += ny-1- 2*level
-            transform_array[idx:idx+nx-1- 2*level] = np.arange(N-2-level*(nx+1), N - nx - 1 - level * (nx-1), -1)
-            idx += nx-1- 2*level
-            transform_array[idx:idx+ny-2- 2*level] = np.arange(N - 2 * nx - level * (nx-1), kolor_2_start + level * (nx+1), -nx)
-            idx += ny-2- 2*level
+            transform_array[idx : idx + nx - 2 * level] = np.arange(
+                kolor_2_start + level * (nx + 1), kolor_2_start + nx + level * (nx - 1), 1
+            )
+            idx += nx - 2 * level
+            transform_array[idx : idx + ny - 1 - 2 * level] = np.arange(
+                kolor_2_start + 2 * nx - 1 + level * (nx - 1), N - level * (nx), nx
+            )
+            idx += ny - 1 - 2 * level
+            transform_array[idx : idx + nx - 1 - 2 * level] = np.arange(
+                N - 2 - level * (nx + 1), N - nx - 1 - level * (nx - 1), -1
+            )
+            idx += nx - 1 - 2 * level
+            transform_array[idx : idx + ny - 2 - 2 * level] = np.arange(
+                N - 2 * nx - level * (nx - 1), kolor_2_start + level * (nx + 1), -nx
+            )
+            idx += ny - 2 - 2 * level
             if boundary_level == 2 * (level + 1) + 1:
                 start_at_b_level = idx
 
     elif grid_obj == "Cell":
-        n_levels = 5 # lateral 1 to 4 and one nudging levels
-        ny = int(N/(2*nx))
+        n_levels = 5  # lateral 1 to 4 and one nudging levels
+        ny = int(N / (2 * nx))
         idx = 0
         kolor_1_start = nx * ny
         complete_levels = 5
@@ -824,71 +892,100 @@ def transform_to_unstructured(field: np.ndarray, nx: int, grid_obj: str = "Edge"
         if min(nx, ny) < 2 * n_levels:
             n_levels = (np.ceil(min(nx, ny) / 2)).astype(int)
             complete_levels = min(complete_levels, min(nx, ny)) // 2
-            print(f"Warning: Reduced number of full boundary levels to {n_levels} due to small grid size (nx={nx}, ny={ny}).")
+            print(
+                f"Warning: Reduced number of full boundary levels to {n_levels} due to small grid size (nx={nx}, ny={ny})."
+            )
         for level in range(n_levels):
             if boundary_level == level + 1:
                 start_at_b_level = idx
             # south up cells:
-            transform_array[idx:idx+nx-1 - 2 * level] = np.arange(0+level * (nx+1), nx - 1 + level * (nx-1), 1)
+            transform_array[idx : idx + nx - 1 - 2 * level] = np.arange(
+                0 + level * (nx + 1), nx - 1 + level * (nx - 1), 1
+            )
             idx += nx - 1 - 2 * level
             # south down cells:
-            transform_array[idx:idx+nx-1 - 2 * level] = np.arange(kolor_1_start + level * (nx+1), kolor_1_start + nx - 1 + level * (nx-1), 1)
+            transform_array[idx : idx + nx - 1 - 2 * level] = np.arange(
+                kolor_1_start + level * (nx + 1), kolor_1_start + nx - 1 + level * (nx - 1), 1
+            )
             idx += nx - 1 - 2 * level
             # east up cells:
-            transform_array[idx:idx+ny-1 - 2 * level] = np.arange(nx - 1 + level * (nx - 1), kolor_1_start - nx - level * (nx + 1), nx)
+            transform_array[idx : idx + ny - 1 - 2 * level] = np.arange(
+                nx - 1 + level * (nx - 1), kolor_1_start - nx - level * (nx + 1), nx
+            )
             idx += ny - 1 - 2 * level
             # east down cells:
-            transform_array[idx:idx+ny-1 - 2 * level] = np.arange(kolor_1_start + nx - 1 + level * (nx - 1), N - nx - level * (nx + 1), nx)
+            transform_array[idx : idx + ny - 1 - 2 * level] = np.arange(
+                kolor_1_start + nx - 1 + level * (nx - 1), N - nx - level * (nx + 1), nx
+            )
             idx += ny - 1 - 2 * level
-            # north up cells: 
-            transform_array[idx:idx+nx-1 - 2 * level] = np.arange(kolor_1_start - 1 - level * (nx + 1), kolor_1_start - nx - level * (nx - 1), -1)
+            # north up cells:
+            transform_array[idx : idx + nx - 1 - 2 * level] = np.arange(
+                kolor_1_start - 1 - level * (nx + 1), kolor_1_start - nx - level * (nx - 1), -1
+            )
             idx += nx - 1 - 2 * level
             # north down cells:
-            transform_array[idx:idx+nx-1 - 2 * level] = np.arange(N - 1 - level * (nx + 1), N - nx - level * (nx - 1), -1)
+            transform_array[idx : idx + nx - 1 - 2 * level] = np.arange(
+                N - 1 - level * (nx + 1), N - nx - level * (nx - 1), -1
+            )
             idx += nx - 1 - 2 * level
             # west up cells:
-            transform_array[idx:idx+ny-1 - 2 * level] = np.arange(kolor_1_start - nx - level * (nx - 1), 0 + level * (nx + 1), -nx)
+            transform_array[idx : idx + ny - 1 - 2 * level] = np.arange(
+                kolor_1_start - nx - level * (nx - 1), 0 + level * (nx + 1), -nx
+            )
             idx += ny - 1 - 2 * level
             # west down cells:
-            transform_array[idx:idx+ny-1 - 2 * level] = np.arange(N - nx - level * (nx - 1), kolor_1_start + level * (nx + 1), -nx)
+            transform_array[idx : idx + ny - 1 - 2 * level] = np.arange(
+                N - nx - level * (nx - 1), kolor_1_start + level * (nx + 1), -nx
+            )
             idx += ny - 1 - 2 * level
             if level + 1 == complete_levels:
-                print(f"Reached complete level at {level+1}, filling remaining cells ascending.")
+                print(f"Reached complete level at {level + 1}, filling remaining cells ascending.")
                 needs_completion = True
                 break
         if boundary_level == n_levels + 1:
             start_at_b_level = idx
 
-
     elif grid_obj == "Vertex":
-        # for vertices, we have the same boundary levels as for the cells, but only one kolor type. 
+        # for vertices, we have the same boundary levels as for the cells, but only one kolor type.
         # it can be filled the same way as the cell mapping, but with a total size of nx +1 for nx and ny+1 for ny
-        n_levels = 5 # lateral 1 to 4 and one nudging levels
+        n_levels = 5  # lateral 1 to 4 and one nudging levels
         ny = int((N) / (nx + 1) - 1)
         idx = 0
         complete_levels = 5
         needs_completion = False
         if min(nx, ny) < 2 * n_levels:
             n_levels = (np.ceil(min(nx, ny) / 2)).astype(int)
-            complete_levels = min(complete_levels, min(nx+1, ny+1)) // 2
-            print(f"Warning: Reduced number of full boundary levels to {n_levels} due to small grid size (nx={nx}, ny={ny}).")
+            complete_levels = min(complete_levels, min(nx + 1, ny + 1)) // 2
+            print(
+                f"Warning: Reduced number of full boundary levels to {n_levels} due to small grid size (nx={nx}, ny={ny})."
+            )
         for level in range(n_levels):
             if boundary_level == level + 1:
                 start_at_b_level = idx
             # south boundary vertices:
-            transform_array[idx:idx+nx - 2 * level] = np.arange(0 + level * (nx + 2), nx + level * nx, 1)
+            transform_array[idx : idx + nx - 2 * level] = np.arange(
+                0 + level * (nx + 2), nx + level * nx, 1
+            )
             idx += nx - 2 * level
             # east boundary vertices:
-            transform_array[idx:idx+ny - 2 * level] = np.arange(nx + level * nx, N - nx+1 - level * (nx + 2), nx + 1)
+            transform_array[idx : idx + ny - 2 * level] = np.arange(
+                nx + level * nx, N - nx + 1 - level * (nx + 2), nx + 1
+            )
             idx += ny - 2 * level
             # north boundary vertices:
-            transform_array[idx:idx+nx - 2 * level] = np.arange(N - 1 - level * (nx + 2), N - nx-1 - level * nx, -1)
+            transform_array[idx : idx + nx - 2 * level] = np.arange(
+                N - 1 - level * (nx + 2), N - nx - 1 - level * nx, -1
+            )
             idx += nx - 2 * level
             # west boundary vertices:
-            transform_array[idx:idx+ny - 2 * level] = np.arange(N - nx - 1 - level * nx, 1 + level * (nx + 2), -nx - 1)
+            transform_array[idx : idx + ny - 2 * level] = np.arange(
+                N - nx - 1 - level * nx, 1 + level * (nx + 2), -nx - 1
+            )
             idx += ny - 2 * level
             if level + 1 == complete_levels:
-                print(f"Reached complete level at {level+1}, filling remaining vertices ascending.")
+                print(
+                    f"Reached complete level at {level + 1}, filling remaining vertices ascending."
+                )
                 needs_completion = True
                 break
         if boundary_level == n_levels + 1:
@@ -903,17 +1000,17 @@ def transform_to_unstructured(field: np.ndarray, nx: int, grid_obj: str = "Edge"
             transform_array[idx] = i
             back_transform_array[i] = idx
             idx += 1
-    
+
     # fill unstructured field
     unstructured_field[back_transform_array[:N]] = field[:N]
-        
 
     if idx != N:
-        print(f"Warning: Transformation array filled with {idx} entries, expected {N}. Check if mapping is correct.")
-
-                
+        print(
+            f"Warning: Transformation array filled with {idx} entries, expected {N}. Check if mapping is correct."
+        )
 
     return (transform_array, back_transform_array, unstructured_field, start_at_b_level)
+
 
 def build_index_map_from_lonlat_e2v(
     lonlat_deg: np.ndarray,
@@ -935,7 +1032,7 @@ def build_index_map_from_lonlat_e2v(
     e2v_np = np.asarray(e2v)
     if e2v_np.ndim != 2 or e2v_np.shape[1] != 2:
         raise ValueError("e2v must have shape (n_edge, 2).")
-    
+
     # print(f"int(nodes_size)={nodes_size}, ")
 
     n_vertex = int(nodes_size if nodes_size is not None else lonlat.shape[0])
@@ -1063,7 +1160,6 @@ def build_index_map_from_ds_regular(ds, e2v):
     return build_index_map_from_lonlat_e2v(lonlat, e2v, nodes_size=expected_nodes)
 
 
-
 def build_index_map_from_atlas_setup(setup: Any, decimals: int = 10) -> IndexMap:
     """
     Build IndexMap from Atlas mesh.
@@ -1083,7 +1179,7 @@ def build_index_map_from_atlas_setup(setup: Any, decimals: int = 10) -> IndexMap
 # def run_structured_pnabla_from_unstructured(
 #     pp_vertex: np.ndarray,
 #     S_M_edges_3: tuple[np.ndarray, np.ndarray],
-#     sign_struct: tuple[np.ndarray, ...], 
+#     sign_struct: tuple[np.ndarray, ...],
 #     vol_vertex: np.ndarray,
 #     m: IndexMap,
 #     backend,
@@ -1092,7 +1188,7 @@ def build_index_map_from_atlas_setup(setup: Any, decimals: int = 10) -> IndexMap
 #     sm0_s = pack_edge_field_to_structured(S_M_edges_3[0], m)
 #     sm1_s = pack_edge_field_to_structured(S_M_edges_3[1], m)
 #     vol_s = pack_vertex_field_to_structured(vol_vertex, m)
-    
+
 #     # Cast the entire tuple of numpy arrays into gt4py fields in one go!
 #     sign_f = tuple(gtx.as_field([IDim, JDim, Kolor], s) for s in sign_struct)
 

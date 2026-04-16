@@ -107,10 +107,10 @@ class nabla_setup:
         nodes_size: Optional[int] = None,
         v2e: Optional[np.ndarray] = None,
         edges_per_node: Optional[int] = None,
-        lonlat_deg: Optional[np.ndarray] = None,       # (n_vertex,2), optional
-        dual_normals: Optional[np.ndarray] = None,     # (n_edge,2), optional
-        dual_volumes: Optional[np.ndarray] = None,     # (n_vertex,), optional
-        input_values: Optional[np.ndarray] = None,     # (n_vertex,), optional
+        lonlat_deg: Optional[np.ndarray] = None,  # (n_vertex,2), optional
+        dual_normals: Optional[np.ndarray] = None,  # (n_edge,2), optional
+        dual_volumes: Optional[np.ndarray] = None,  # (n_vertex,), optional
+        input_values: Optional[np.ndarray] = None,  # (n_vertex,), optional
     ):
         """
         Build a setup object directly from connectivity (+ optional geometry/fields).
@@ -138,7 +138,7 @@ class nabla_setup:
                 raise ValueError("v2e must have shape (n_vertex, max_deg).")
             max_deg = int(v2e.shape[1])
 
-        obj.edges_per_node = max_deg # should be 6
+        obj.edges_per_node = max_deg  # should be 6
         obj._nodes_size = n_vertex
         obj._edges_size = n_edge
 
@@ -230,10 +230,17 @@ class nabla_setup:
 
             inp = np.zeros((n_vertex,), dtype=np.float64)
             for v in range(n_vertex):
-                zdist = math.sin(zlatc) * rsina[v] + math.cos(zlatc) * rcosa[v] * math.cos(lon[v] - zlonc)
+                zdist = math.sin(zlatc) * rsina[v] + math.cos(zlatc) * rcosa[v] * math.cos(
+                    lon[v] - zlonc
+                )
                 zdist = radius * math.acos(zdist)
                 if zdist < zrad:
-                    inp[v] = 0.5 * zh0 * (1.0 + math.cos(rpi * zdist / zrad)) * (math.cos(rpi * zdist / zeta) ** 2)
+                    inp[v] = (
+                        0.5
+                        * zh0
+                        * (1.0 + math.cos(rpi * zdist / zrad))
+                        * (math.cos(rpi * zdist / zeta) ** 2)
+                    )
         else:
             inp = np.zeros((n_vertex,), dtype=np.float64)
 
@@ -269,7 +276,6 @@ class nabla_setup:
     @property
     def edges_size(self):
         return self._edges_size if self._edges_size is not None else self.fs_edges.size
-
 
     @staticmethod
     def _is_pole_edge(e, edge_flags):

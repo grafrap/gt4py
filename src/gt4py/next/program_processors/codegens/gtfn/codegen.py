@@ -354,16 +354,16 @@ class GTFNCodegen(codegen.TemplatedGenerator):
     )
 
     def _block_sizes(
-        self, offset_definitions: list[gtfn_ir.TagDefinition], domain_tag_names: list[str] | None = None
+        self,
+        offset_definitions: list[gtfn_ir.TagDefinition],
+        domain_tag_names: list[str] | None = None,
     ) -> str:
         if self.is_cartesian:
             block_dims = []
             if domain_tag_names:
                 domain_tag_name_set = set(domain_tag_names)
                 filtered_offset_definitions = [
-                    tag
-                    for tag in offset_definitions
-                    if str(tag.name.id) in domain_tag_name_set
+                    tag for tag in offset_definitions if str(tag.name.id) in domain_tag_name_set
                 ]
             else:
                 filtered_offset_definitions = offset_definitions

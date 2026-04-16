@@ -41,7 +41,6 @@ def test_normalize_shifts_keeps_zero_offsets_on_connectivity_axes():
     assert actual == testee
 
 
-
 def test_V2E():
     # pytest.xfail(
     #     "Not implementeds we don't have an easy way to determine the type of the one literal (type inference is to expensive)."
@@ -89,6 +88,7 @@ def test_V2E():
     actual = NormalizeShifts().visit(actual)
     assert actual == expected
 
+
 def test_V2C():
     testee = im.shift("V2C", 0)("iter")
     expected = im.shift("_OffKolor", 0)(im.shift("_OffJDim", 0)((im.shift("_OffIDim", 0)("iter"))))
@@ -112,7 +112,9 @@ def test_V2C():
     assert actual == expected
 
     testee = im.shift("V2C", 3)("iter")
-    expected = im.shift("_OffKolor", 1)(im.shift("_OffJDim", -1)((im.shift("_OffIDim", -1)("iter"))))
+    expected = im.shift("_OffKolor", 1)(
+        im.shift("_OffJDim", -1)((im.shift("_OffIDim", -1)("iter")))
+    )
     expected = NormalizeShifts().visit(expected)
     actual = CartUnroll.apply(testee)
     actual = NormalizeShifts().visit(actual)
@@ -134,7 +136,7 @@ def test_V2C():
 
 
 def test_E2V():
-    
+
     testee = im.shift("E2V", 0)("iter")
     kolor = common.Dimension("Kolor")
     cond0 = im.domain(
@@ -167,6 +169,7 @@ def test_E2V():
     actual = NormalizeShifts().visit(actual)
     expected = NormalizeShifts().visit(expected)
     assert actual == expected
+
 
 def test_E2C():
     testee = im.shift("E2C", 0)("iter")
@@ -201,10 +204,11 @@ def test_E2C():
     expected = NormalizeShifts().visit(expected)
     assert actual == expected
 
+
 def test_C2V():
     testee = im.shift("C2V", 0)("iter")
     kolor = common.Dimension("Kolor")
-    
+
     cond = im.domain(
         common.GridType.CARTESIAN,
         {kolor: (ir.OffsetLiteral(value=0), ir.OffsetLiteral(value=1))},
@@ -238,6 +242,7 @@ def test_C2V():
     actual = NormalizeShifts().visit(actual)
     expected = NormalizeShifts().visit(expected)
     assert actual == expected
+
 
 def test_C2E():
     testee = im.shift("C2E", 0)("iter")
@@ -275,6 +280,7 @@ def test_C2E():
     actual = NormalizeShifts().visit(actual)
     expected = NormalizeShifts().visit(expected)
     assert actual == expected
+
 
 def test_E2C2V():
     testee = im.shift("E2C2V", 0)("iter")
@@ -333,6 +339,7 @@ def test_E2C2V():
     expected = NormalizeShifts().visit(expected)
     assert actual == expected
 
+
 def test_C2E2C():
     testee = im.shift("C2E2C", 0)("iter")
     kolor = common.Dimension("Kolor")
@@ -369,6 +376,7 @@ def test_C2E2C():
     actual = NormalizeShifts().visit(actual)
     expected = NormalizeShifts().visit(expected)
     assert actual == expected
+
 
 def test_C2E2CO():
     testee = im.shift("C2E2CO", 0)("iter")
@@ -415,6 +423,7 @@ def test_C2E2CO():
     actual = NormalizeShifts().visit(actual)
     assert actual == expected
 
+
 def test_E2C2E():
     testee = im.shift("E2C2E", 0)("iter")
     kolor = common.Dimension("Kolor")
@@ -424,7 +433,7 @@ def test_E2C2E():
     )
     cond1 = im.domain(
         common.GridType.CARTESIAN,
-         {kolor: (ir.OffsetLiteral(value=1), ir.OffsetLiteral(value=2))},
+        {kolor: (ir.OffsetLiteral(value=1), ir.OffsetLiteral(value=2))},
     )
 
     b0 = im.shift("_OffKolor", 2)(im.shift("_OffJDim", 0)(im.shift("_OffIDim", 0)("iter")))
@@ -470,6 +479,7 @@ def test_E2C2E():
     expected = NormalizeShifts().visit(expected)
     assert actual == expected
 
+
 def test_E2C2EO():
     testee = im.shift("E2C2EO", 0)("iter")
     kolor = common.Dimension("Kolor")
@@ -479,7 +489,7 @@ def test_E2C2EO():
     )
     cond1 = im.domain(
         common.GridType.CARTESIAN,
-         {kolor: (ir.OffsetLiteral(value=1), ir.OffsetLiteral(value=2))},
+        {kolor: (ir.OffsetLiteral(value=1), ir.OffsetLiteral(value=2))},
     )
 
     b0 = im.shift("_OffKolor", 2)(im.shift("_OffJDim", 0)(im.shift("_OffIDim", 0)("iter")))
@@ -531,6 +541,7 @@ def test_E2C2EO():
     actual = CartUnroll.apply(testee)
     actual = NormalizeShifts().visit(actual)
     assert actual == expected
+
 
 def test_C2E2C2E():
     testee = im.shift("C2E2C2E", 0)("iter")
@@ -610,7 +621,7 @@ def test_C2E2C2E():
     assert actual == expected
 
     testee = im.shift("C2E2C2E", 7)("iter")
-    b0 = im.shift("_OffKolor", 0)(im.shift("_OffJDim",-1)(im.shift("_OffIDim", 1)("iter")))
+    b0 = im.shift("_OffKolor", 0)(im.shift("_OffJDim", -1)(im.shift("_OffIDim", 1)("iter")))
     b1 = im.shift("_OffKolor", 0)(im.shift("_OffJDim", 0)(im.shift("_OffIDim", 1)("iter")))
 
     expected = im.concat_where(cond0, b0, b1)
@@ -620,7 +631,7 @@ def test_C2E2C2E():
     assert actual == expected
 
     testee = im.shift("C2E2C2E", 8)("iter")
-    b0 = im.shift("_OffKolor", 2)(im.shift("_OffJDim",-1)(im.shift("_OffIDim", 0)("iter")))
+    b0 = im.shift("_OffKolor", 2)(im.shift("_OffJDim", -1)(im.shift("_OffIDim", 0)("iter")))
     b1 = im.shift("_OffKolor", 1)(im.shift("_OffJDim", 0)(im.shift("_OffIDim", 1)("iter")))
 
     expected = im.concat_where(cond0, b0, b1)
@@ -628,6 +639,7 @@ def test_C2E2C2E():
     actual = NormalizeShifts().visit(actual)
     expected = NormalizeShifts().visit(expected)
     assert actual == expected
+
 
 def test_C2E2C2E2C():
     testee = im.shift("C2E2C2E2C", 0)("iter")
@@ -667,7 +679,7 @@ def test_C2E2C2E2C():
     assert actual == expected
 
     testee = im.shift("C2E2C2E2C", 3)("iter")
-    b0 = im.shift("_OffKolor", 1)(im.shift("_OffJDim",-1)(im.shift("_OffIDim", 0)("iter")))
+    b0 = im.shift("_OffKolor", 1)(im.shift("_OffJDim", -1)(im.shift("_OffIDim", 0)("iter")))
     b1 = im.shift("_OffKolor", -1)(im.shift("_OffJDim", 0)(im.shift("_OffIDim", 1)("iter")))
 
     expected = im.concat_where(cond0, b0, b1)
@@ -677,8 +689,8 @@ def test_C2E2C2E2C():
     assert actual == expected
 
     testee = im.shift("C2E2C2E2C", 4)("iter")
-    b0 = im.shift("_OffKolor", 0)(im.shift("_OffJDim", 1)(im.shift("_OffIDim",-1)("iter")))
-    b1 = im.shift("_OffKolor", 0)(im.shift("_OffJDim", 1)(im.shift("_OffIDim",-1)("iter")))
+    b0 = im.shift("_OffKolor", 0)(im.shift("_OffJDim", 1)(im.shift("_OffIDim", -1)("iter")))
+    b1 = im.shift("_OffKolor", 0)(im.shift("_OffJDim", 1)(im.shift("_OffIDim", -1)("iter")))
 
     expected = im.concat_where(cond0, b0, b1)
     actual = CartUnroll.apply(testee)
@@ -688,7 +700,7 @@ def test_C2E2C2E2C():
 
     testee = im.shift("C2E2C2E2C", 5)("iter")
     b0 = im.shift("_OffKolor", 0)(im.shift("_OffJDim", 1)(im.shift("_OffIDim", 0)("iter")))
-    b1 = im.shift("_OffKolor", 0)(im.shift("_OffJDim", 0)(im.shift("_OffIDim",-1)("iter")))
+    b1 = im.shift("_OffKolor", 0)(im.shift("_OffJDim", 0)(im.shift("_OffIDim", -1)("iter")))
 
     expected = im.concat_where(cond0, b0, b1)
     actual = CartUnroll.apply(testee)
@@ -698,7 +710,7 @@ def test_C2E2C2E2C():
 
     testee = im.shift("C2E2C2E2C", 6)("iter")
     b0 = im.shift("_OffKolor", 0)(im.shift("_OffJDim", 0)(im.shift("_OffIDim", 1)("iter")))
-    b1 = im.shift("_OffKolor", 0)(im.shift("_OffJDim",-1)(im.shift("_OffIDim", 0)("iter")))
+    b1 = im.shift("_OffKolor", 0)(im.shift("_OffJDim", -1)(im.shift("_OffIDim", 0)("iter")))
 
     expected = im.concat_where(cond0, b0, b1)
     actual = CartUnroll.apply(testee)
@@ -707,8 +719,8 @@ def test_C2E2C2E2C():
     assert actual == expected
 
     testee = im.shift("C2E2C2E2C", 7)("iter")
-    b0 = im.shift("_OffKolor", 0)(im.shift("_OffJDim",-1)(im.shift("_OffIDim", 1)("iter")))
-    b1 = im.shift("_OffKolor", 0)(im.shift("_OffJDim",-1)(im.shift("_OffIDim", 1)("iter")))
+    b0 = im.shift("_OffKolor", 0)(im.shift("_OffJDim", -1)(im.shift("_OffIDim", 1)("iter")))
+    b1 = im.shift("_OffKolor", 0)(im.shift("_OffJDim", -1)(im.shift("_OffIDim", 1)("iter")))
 
     expected = im.concat_where(cond0, b0, b1)
     actual = CartUnroll.apply(testee)
@@ -717,7 +729,7 @@ def test_C2E2C2E2C():
     assert actual == expected
 
     testee = im.shift("C2E2C2E2C", 8)("iter")
-    b0 = im.shift("_OffKolor", 0)(im.shift("_OffJDim",-1)(im.shift("_OffIDim", 0)("iter")))
+    b0 = im.shift("_OffKolor", 0)(im.shift("_OffJDim", -1)(im.shift("_OffIDim", 0)("iter")))
     b1 = im.shift("_OffKolor", 0)(im.shift("_OffJDim", 0)(im.shift("_OffIDim", 1)("iter")))
 
     expected = im.concat_where(cond0, b0, b1)
@@ -727,7 +739,7 @@ def test_C2E2C2E2C():
     assert actual == expected
 
     testee = im.shift("C2E2C2E2C", 9)("iter")
-    b0 = im.shift("_OffKolor", 0)(im.shift("_OffJDim", 0)(im.shift("_OffIDim",-1)("iter")))
+    b0 = im.shift("_OffKolor", 0)(im.shift("_OffJDim", 0)(im.shift("_OffIDim", -1)("iter")))
     b1 = im.shift("_OffKolor", 0)(im.shift("_OffJDim", 1)(im.shift("_OffIDim", 0)("iter")))
 
     expected = im.concat_where(cond0, b0, b1)
@@ -742,7 +754,9 @@ def test_unstructured_domain_is_not_rewritten_to_cartesian_domain_without_bounds
     out = im.ref("out")
     start = im.tuple_get(0, im.call("get_domain_range")(out, ir.AxisLiteral(value=axis)))
     stop = im.tuple_get(1, im.call("get_domain_range")(out, ir.AxisLiteral(value=axis)))
-    testee = im.call("unstructured_domain")(im.call("named_range")(ir.AxisLiteral(value=axis), start, stop))
+    testee = im.call("unstructured_domain")(
+        im.call("named_range")(ir.AxisLiteral(value=axis), start, stop)
+    )
 
     actual = CartUnroll.apply(testee)
     assert actual == testee
@@ -1297,9 +1311,9 @@ def test_neighbors_reduce_rewritten_for_non_v2e_connection_and_maximum():
         return False
 
     neighbors_applied = im.as_fieldop(im.lambda_("it")(im.neighbors("E2C", "it")))("zavgS")
-    mapped = im.as_fieldop(
-        im.lambda_("a", "b")(im.map_("plus")(im.deref("a"), im.deref("b")))
-    )(neighbors_applied, "sign")
+    mapped = im.as_fieldop(im.lambda_("a", "b")(im.map_("plus")(im.deref("a"), im.deref("b"))))(
+        neighbors_applied, "sign"
+    )
     init = im.literal("0.0", "float64")
     testee = im.as_fieldop(im.lambda_("lst")(im.reduce("maximum", init)(im.deref("lst"))))(mapped)
 
@@ -1416,14 +1430,10 @@ def test_unstructured_domain_inlines_nx_ny_and_kolor_bounds_when_available(axis,
     Kolor = common.Dimension("Kolor", kind=common.DimensionKind.HORIZONTAL)
 
     expected_i_hi = (
-        im.minus(im.ref("max_i"), ir.OffsetLiteral(value=1))
-        if axis == "Cell"
-        else im.ref("max_i")
+        im.minus(im.ref("max_i"), ir.OffsetLiteral(value=1)) if axis == "Cell" else im.ref("max_i")
     )
     expected_j_hi = (
-        im.minus(im.ref("max_j"), ir.OffsetLiteral(value=1))
-        if axis == "Cell"
-        else im.ref("max_j")
+        im.minus(im.ref("max_j"), ir.OffsetLiteral(value=1)) if axis == "Cell" else im.ref("max_j")
     )
 
     expected_domain = im.call("cartesian_domain")(
@@ -1803,5 +1813,3 @@ def test_lateral_edge_odd_maps_to_domain_lateral_bounds_via_get_domain_range():
     # (lateral_edge) // 2 => (9) // 2 = 4
     expected = im.make_tuple(ir.OffsetLiteral(value=4), ir.OffsetLiteral(value=36))
     assert actual == expected
-
-

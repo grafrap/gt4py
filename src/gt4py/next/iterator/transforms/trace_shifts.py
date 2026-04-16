@@ -257,8 +257,10 @@ def _as_fieldop(stencil, domain=None):
 
     return applied_as_fieldop
 
+
 def _concat_where(cond, true_branch, false_branch):
     return _if(Sentinel.VALUE, true_branch, false_branch)
+
 
 def _named_range(*args):
     return Sentinel.VALUE
@@ -278,6 +280,7 @@ def _get_domain_range(*args):
 
 def _index(*args):
     return Sentinel.VALUE
+
 
 _START_CTX: Final = {
     "as_fieldop": _as_fieldop,

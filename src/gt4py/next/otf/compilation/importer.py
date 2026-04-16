@@ -33,7 +33,9 @@ def import_from_path(
     if add_to_sys_modules:
         if sys_modules_prefix and not sys_modules_prefix.endswith("."):
             sys_modules_prefix += "."
-        qualified_module_name = f"{sys_modules_prefix}{module_name}" if sys_modules_prefix else module_name
+        qualified_module_name = (
+            f"{sys_modules_prefix}{module_name}" if sys_modules_prefix else module_name
+        )
 
         # Reuse a previously imported compiled extension instead of re-executing it.
         # Nanobind-backed modules can segfault when imported multiple times in-process.

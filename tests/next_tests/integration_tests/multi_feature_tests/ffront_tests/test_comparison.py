@@ -1,7 +1,17 @@
+# GT4Py - GridTools Framework
+#
+# Copyright (c) 2014-2024, ETH Zurich
+# All rights reserved.
+#
+# Please, refer to the LICENSE file in the root directory.
+# SPDX-License-Identifier: BSD-3-Clause
+
 import xarray as xr
 import numpy as np
 from next_tests.integration_tests.multi_feature_tests.fvm_nabla_setup import nabla_setup
-from next_tests.integration_tests.feature_tests.ffront_tests.ffront_test_utils import exec_alloc_descriptor
+from next_tests.integration_tests.feature_tests.ffront_tests.ffront_test_utils import (
+    exec_alloc_descriptor,
+)
 
 
 ds = xr.open_dataset(
@@ -32,6 +42,7 @@ dual_normals = np.stack(
     ],
     axis=1,
 )
+
 
 def test_build_setup_from_nc(exec_alloc_descriptor):
     setup = nabla_setup.from_connectivity(

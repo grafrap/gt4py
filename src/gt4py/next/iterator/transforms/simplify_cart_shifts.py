@@ -6,16 +6,13 @@
 # Please, refer to the LICENSE file in the root directory.
 # SPDX-License-Identifier: BSD-3-Clause
 
-import dataclasses
-import functools
-import math
 import copy
-import os
+import dataclasses
 
 from gt4py.eve import NodeTranslator
 from gt4py.next.iterator import ir
-from gt4py.next.iterator.ir_utils import ir_makers as im
-from gt4py.next.iterator.ir_utils import common_pattern_matcher as cpm
+from gt4py.next.iterator.ir_utils import common_pattern_matcher as cpm, ir_makers as im
+
 
 @dataclasses.dataclass
 class SimplifyCartesianShifts(NodeTranslator):
@@ -44,10 +41,16 @@ class SimplifyCartesianShifts(NodeTranslator):
                 dim_node = shift_args[i]
                 off_node = shift_args[i + 1]
 
-                if (isinstance(dim_node, ir.OffsetLiteral) and isinstance(dim_node.value, str) and
-                    isinstance(off_node, ir.OffsetLiteral) and isinstance(off_node.value, int)):
+                if (
+                    isinstance(dim_node, ir.OffsetLiteral)
+                    and isinstance(dim_node.value, str)
+                    and isinstance(off_node, ir.OffsetLiteral)
+                    and isinstance(off_node.value, int)
+                ):
                     dim_name = dim_node.value
-                    accumulated_shifts[dim_name] = accumulated_shifts.get(dim_name, 0) + off_node.value
+                    accumulated_shifts[dim_name] = (
+                        accumulated_shifts.get(dim_name, 0) + off_node.value
+                    )
                 else:
                     can_simplify = False
                     break

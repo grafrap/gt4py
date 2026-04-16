@@ -1,9 +1,18 @@
+# GT4Py - GridTools Framework
+#
+# Copyright (c) 2014-2024, ETH Zurich
+# All rights reserved.
+#
+# Please, refer to the LICENSE file in the root directory.
+# SPDX-License-Identifier: BSD-3-Clause
+
 import os
 import numpy as np
 import pytest
 import xarray as xr
 
 from gt4py.next.modules import translator as tr
+
 
 def _read_e2v(ds):
     raw = None
@@ -22,6 +31,7 @@ def _read_e2v(ds):
     arr = np.where(arr > 0, arr - 1, -1)
     return arr
 
+
 def _get_lonlat(ds):
     if "longitude_vertices" in ds and "latitude_vertices" in ds:
         lon = ds["longitude_vertices"].values.astype(np.float64)
@@ -32,8 +42,13 @@ def _get_lonlat(ds):
             return ds[name].values
     return None
 
-@pytest.mark.skipif(not os.path.exists("/home/raphael/Documents/Studium/Msc_thesis/grid-generator/parallelogram_grid.nc"),
-                    reason="mesh not found")
+
+@pytest.mark.skipif(
+    not os.path.exists(
+        "/home/raphael/Documents/Studium/Msc_thesis/grid-generator/parallelogram_grid.nc"
+    ),
+    reason="mesh not found",
+)
 def test_translator_pack_unpack_roundtrip():
     mesh_nc = "/home/raphael/Documents/Studium/Msc_thesis/grid-generator/parallelogram_grid.nc"
     with xr.open_dataset(mesh_nc) as ds:
@@ -55,7 +70,7 @@ def test_translator_pack_unpack_roundtrip():
 
     # vertex roundtrip
     v_struct = tr.pack_vertex_field_to_structured(v_values, m)
-    print("Structured vertex field (packed):", v_struct[...,0])
+    print("Structured vertex field (packed):", v_struct[..., 0])
     v_un = tr.unpack_vertex_field_to_unstructured(v_struct, m)
     print("Unstructured vertex field (unpacked):", v_un)
     assert v_un.shape[0] == n_vertex
@@ -68,6 +83,8 @@ def test_translator_pack_unpack_roundtrip():
         i, j, k = m.edge_to_ijk[e]
         if i < 0 or j < 0 or k < 0:
             continue  # skip unmapped
-        assert e_struct[i, j, k] == e_values[e], f"Edge {e}: got {e_struct[i, j, k]}, expected {e_values[e]}"
+        assert e_struct[i, j, k] == e_values[e], (
+            f"Edge {e}: got {e_struct[i, j, k]}, expected {e_values[e]}"
+        )
 
     print("translator pack/unpack roundtrip passed")

@@ -236,7 +236,7 @@ def test_ffront_compute_zavgS_parallelogram_grid(exec_alloc_descriptor):
         lonlat = _read_lonlat(ds)
         remap_sizes = load_structured_remap_sizes_from_netcdf(mesh_nc, lateral=lateral)
 
-        print(f"remap sies: ",remap_sizes)
+        print(f"remap sies: ", remap_sizes)
 
         setup = nabla_setup.from_connectivity(
             allocator=exec_alloc_descriptor.allocator,
@@ -287,7 +287,9 @@ def test_ffront_compute_zavgS_parallelogram_grid(exec_alloc_descriptor):
     assert pp_struct_np.shape[1] == remap_sizes.max_j
     assert s_m_struct_np.shape[2] == 3
 
-    pp_struct = gtx.as_field([IDim, JDim, Kolor], pp_struct_np, allocator=exec_alloc_descriptor.allocator)
+    pp_struct = gtx.as_field(
+        [IDim, JDim, Kolor], pp_struct_np, allocator=exec_alloc_descriptor.allocator
+    )
     s_m_struct = gtx.as_field(
         [IDim, JDim, Kolor], s_m_struct_np, allocator=exec_alloc_descriptor.allocator
     )
@@ -324,9 +326,7 @@ def test_ffront_compute_zavgS_parallelogram_grid(exec_alloc_descriptor):
     pp = setup.input_field.asnumpy()
     s_m = setup.S_fields[0].asnumpy()
     ref = np.zeros_like(s_m)
-    ref[active] = s_m[active] * 0.5 * (
-        pp[e2v_conn[active, 0]] + pp[e2v_conn[active, 1]]
-    )
+    ref[active] = s_m[active] * 0.5 * (pp[e2v_conn[active, 0]] + pp[e2v_conn[active, 1]])
 
     print(f"numpy solution: ", ref[active])
     print(f"GT4Py solution: ", zavgS_np)
@@ -362,6 +362,7 @@ def test_ffront_nabla(exec_alloc_descriptor):
     assert_close(-3.3540113705465301e-003, np.min(pnabla_MYY.asnumpy()))
     assert_close(3.3540113705465301e-003, np.max(pnabla_MYY.asnumpy()))
 
+
 def test_ffront_nabla_parallelogram_grid(exec_alloc_descriptor):
     mesh_nc = os.environ.get(
         "GT4PY_TRANSLATOR_MESH",
@@ -377,7 +378,7 @@ def test_ffront_nabla_parallelogram_grid(exec_alloc_descriptor):
         remap_sizes = load_structured_remap_sizes_from_netcdf(mesh_nc, lateral=lateral)
         dual_volumes = _first_present(ds, ["dual_area"])
 
-        print(f"remap sies: ",remap_sizes)
+        print(f"remap sies: ", remap_sizes)
 
         setup = nabla_setup.from_connectivity(
             allocator=exec_alloc_descriptor.allocator,
@@ -390,7 +391,7 @@ def test_ffront_nabla_parallelogram_grid(exec_alloc_descriptor):
         assert setup.nodes_size == remap_sizes.vertex_size
         assert setup.edges_size <= remap_sizes.edge_size_padded
         assert int(ds.sizes["cell"]) == remap_sizes.cell_size
-    
+
     index_map = build_index_map_from_lonlat_e2v(
         lonlat,
         e2v,
@@ -400,20 +401,20 @@ def test_ffront_nabla_parallelogram_grid(exec_alloc_descriptor):
 
     # # 1. Extract the raw numpy array (size: max_i x max_j x 1)
     pp_struct_np = pack_vertex_field_to_structured(setup.input_field.asnumpy(), index_map)
-    
+
     # # 2. Create a padded array (+1 in IDim and JDim) initialized to zero
     # pp_struct_np_padded = np.zeros(
-    #     (remap_sizes.max_i + 1, remap_sizes.max_j + 1, 1), 
+    #     (remap_sizes.max_i + 1, remap_sizes.max_j + 1, 1),
     #     dtype=pp_raw.dtype
     # )
-    
+
     # # 3. Insert the raw data into the valid interior of the padded array
     # pp_struct_np_padded[:remap_sizes.max_i, :remap_sizes.max_j, :] = pp_raw
 
     # # 4. Wrap the padded array into a GT4Py field
     # pp_struct = gtx.as_field(
-    #     [IDim, JDim, Kolor], 
-    #     pp_struct_np_padded, 
+    #     [IDim, JDim, Kolor],
+    #     pp_struct_np_padded,
     #     allocator=exec_alloc_descriptor.allocator
     # )
     s_m_struct_np = pack_edge_field_to_structured(setup.S_fields[0].asnumpy(), index_map)
@@ -423,7 +424,7 @@ def test_ffront_nabla_parallelogram_grid(exec_alloc_descriptor):
         index_map=index_map,
         local_dim_name="V2E",
     )
-    
+
     assert sign_struct_np.ndim == 4
     assert sign_struct_np.shape[2] == 3
     assert sign_struct_np.shape[3] == 6
@@ -431,7 +432,9 @@ def test_ffront_nabla_parallelogram_grid(exec_alloc_descriptor):
     pnabla_mxx_struct_np = np.zeros_like(vol_struct_np)
     pnabla_myy_struct_np = np.zeros_like(vol_struct_np)
 
-    pp_struct = gtx.as_field([IDim, JDim, Kolor], pp_struct_np, allocator=exec_alloc_descriptor.allocator)
+    pp_struct = gtx.as_field(
+        [IDim, JDim, Kolor], pp_struct_np, allocator=exec_alloc_descriptor.allocator
+    )
     s_m_struct = gtx.as_field(
         [IDim, JDim, Kolor], s_m_struct_np, allocator=exec_alloc_descriptor.allocator
     )
@@ -494,30 +497,32 @@ def test_ffront_nabla_parallelogram_grid(exec_alloc_descriptor):
     print(pnabla_mxx_np)
     # print(pnabla_myy_np)
 
-        # Numpy reference implementation (use unstructured connectivity from setup)
-    e2v_un = setup.edges2node_connectivity.asnumpy()        # (n_edge, 2)
+    # Numpy reference implementation (use unstructured connectivity from setup)
+    e2v_un = setup.edges2node_connectivity.asnumpy()  # (n_edge, 2)
     valid_e = np.all(e2v_un >= 0, axis=1)
-    pp_un = setup.input_field.asnumpy()                     # (n_vertex,)
-    s_m_un = setup.S_fields[0].asnumpy()                   # (n_edge,)
-    vol_un = setup.vol_field.asnumpy()                     # (n_vertex,)
-    sign_un = setup.sign_field.asnumpy()                   # (n_vertex, max_deg)
-    v2e_un = setup.nodes2edge_connectivity.asnumpy()       # (n_vertex, max_deg)
-    
+    pp_un = setup.input_field.asnumpy()  # (n_vertex,)
+    s_m_un = setup.S_fields[0].asnumpy()  # (n_edge,)
+    vol_un = setup.vol_field.asnumpy()  # (n_vertex,)
+    sign_un = setup.sign_field.asnumpy()  # (n_vertex, max_deg)
+    v2e_un = setup.nodes2edge_connectivity.asnumpy()  # (n_vertex, max_deg)
+
     # zavg on unstructured edges
     zavg_un = np.zeros((s_m_un.shape[0],), dtype=s_m_un.dtype)
-    zavg_un[valid_e] = s_m_un[valid_e] * 0.5 * (pp_un[e2v_un[valid_e, 0]] + pp_un[e2v_un[valid_e, 1]])
-    
+    zavg_un[valid_e] = (
+        s_m_un[valid_e] * 0.5 * (pp_un[e2v_un[valid_e, 0]] + pp_un[e2v_un[valid_e, 1]])
+    )
+
     # accumulate per-vertex neighbor sum
     n_vertex = v2e_un.shape[0]
     pnabla_mxx_numpy = np.zeros((n_vertex,), dtype=float)
     pnabla_myy_numpy = np.zeros((n_vertex,), dtype=float)
-    
+
     interior_vertices = _vertex_interior_mask(index_map, remap_sizes)
 
     for v in range(n_vertex):
         if not interior_vertices[v]:
             continue
-        edges = v2e_un[v]              # list of neighbor edge indices (pad -1)
+        edges = v2e_un[v]  # list of neighbor edge indices (pad -1)
         mask = edges >= 0
         if not np.any(mask):
             continue
@@ -525,24 +530,23 @@ def test_ffront_nabla_parallelogram_grid(exec_alloc_descriptor):
         svals = zavg_un[e_idx]
         sgns = sign_un[v, mask]
         pnabla_mxx_numpy[v] = float((svals * sgns).sum())
-        pnabla_myy_numpy[v] = pnabla_mxx_numpy[v]  # if identical here, else compute from S_MYY similarly
-    
+        pnabla_myy_numpy[v] = pnabla_mxx_numpy[
+            v
+        ]  # if identical here, else compute from S_MYY similarly
+
     # divide by vertex volume
     pnabla_mxx_numpy /= vol_un
     pnabla_myy_numpy /= vol_un
 
     # print(f"numpy pnabla_mxx: ", pnabla_mxx_numpy)
     print(f"pp: ", pp_un)
-    
+
     print(f"difference: ", pnabla_mxx_np - pnabla_mxx_numpy)
     print(f"pnabla_mxx_np: ", pnabla_mxx_np)
 
     # compare to GT4Py result (unstructured)
     assert np.allclose(pnabla_mxx_np, pnabla_mxx_numpy, rtol=1e-9, atol=0)
     assert np.allclose(pnabla_myy_np, pnabla_myy_numpy, rtol=1e-9, atol=0)
-
-    
-
 
     # # TODO this check is not sensitive enough, need to implement a proper numpy reference!
     # assert_close(-3.5455427772566003e-003, np.min(pnabla_mxx_np))
@@ -581,17 +585,17 @@ def _prepare_parallelogram_structured_case(exec_alloc_descriptor):
     pp_struct_np = pack_vertex_field_to_structured(setup.input_field.asnumpy(), index_map)
     # # 2. Create a padded array (+1 in IDim and JDim) initialized to zero
     # pp_struct_np_padded = np.zeros(
-    #     (remap_sizes.max_i + 1, remap_sizes.max_j + 1, 1), 
+    #     (remap_sizes.max_i + 1, remap_sizes.max_j + 1, 1),
     #     dtype=pp_struct_np.dtype
     # )
-    
+
     # # 3. Insert the raw data into the valid interior of the padded array
     # pp_struct_np_padded[:remap_sizes.max_i, :remap_sizes.max_j, :] = pp_struct_np
 
     # # 4. Wrap the padded array into a GT4Py field
     # pp_struct = gtx.as_field(
-    #     [IDim, JDim, Kolor], 
-    #     pp_struct_np_padded, 
+    #     [IDim, JDim, Kolor],
+    #     pp_struct_np_padded,
     #     allocator=exec_alloc_descriptor.allocator
     # )
     s_m_struct_np = pack_edge_field_to_structured(setup.S_fields[0].asnumpy(), index_map)
@@ -603,7 +607,9 @@ def _prepare_parallelogram_structured_case(exec_alloc_descriptor):
     )
     vol_struct_np = pack_vertex_field_to_structured(setup.vol_field.asnumpy(), index_map)
 
-    pp_struct = gtx.as_field([IDim, JDim, Kolor], pp_struct_np, allocator=exec_alloc_descriptor.allocator)
+    pp_struct = gtx.as_field(
+        [IDim, JDim, Kolor], pp_struct_np, allocator=exec_alloc_descriptor.allocator
+    )
     s_m_struct = gtx.as_field(
         [IDim, JDim, Kolor], s_m_struct_np, allocator=exec_alloc_descriptor.allocator
     )
@@ -641,6 +647,7 @@ def _require_gtfn_run_gtfn_backend(request):
     if not param_id.startswith("gtfn.run_gtfn"):
         pytest.skip("decomposition debug test is restricted to gtfn.run_gtfn")
 
+
 @pytest.mark.requires_atlas
 def test_ffront_nabla_parallelogram_part_zavgS(exec_alloc_descriptor, request):
     _require_gtfn_run_gtfn_backend(request)
@@ -663,10 +670,17 @@ def test_ffront_nabla_parallelogram_part_zavgS(exec_alloc_descriptor, request):
     program(pp=case["pp_struct"], S_M=case["s_m_struct"], out=zavgS_struct)
 
     # print(f"pp: ", case["pp_struct"][:,:,0])
-    print(f"zavgS: ", zavgS_struct.asnumpy()[:,:,0], "\n", zavgS_struct.asnumpy()[:,:,1], "\n", zavgS_struct.asnumpy()[:,:,2])
-
+    print(
+        f"zavgS: ",
+        zavgS_struct.asnumpy()[:, :, 0],
+        "\n",
+        zavgS_struct.asnumpy()[:, :, 1],
+        "\n",
+        zavgS_struct.asnumpy()[:, :, 2],
+    )
 
     assert np.isfinite(zavgS_struct.asnumpy()).all()
+
 
 @pytest.mark.requires_atlas
 def test_ffront_nabla_parallelogram_part_neighbor_sum_unweighted(exec_alloc_descriptor, request):
@@ -676,16 +690,16 @@ def test_ffront_nabla_parallelogram_part_neighbor_sum_unweighted(exec_alloc_desc
     max_j = case["remap_sizes"].max_j
     zavgS_struct = gtx.zeros(
         {
-            IDim: int(max_i+1),
-            JDim: int(max_j+1),
+            IDim: int(max_i + 1),
+            JDim: int(max_j + 1),
             Kolor: 3,
         },
         allocator=exec_alloc_descriptor.allocator,
     )
     pnabla_m_struct = gtx.zeros(
         {
-            IDim: int(max_i+1),
-            JDim: int(max_j+1),
+            IDim: int(max_i + 1),
+            JDim: int(max_j + 1),
             Kolor: 1,
         },
         allocator=exec_alloc_descriptor.allocator,
@@ -708,8 +722,17 @@ def test_ffront_nabla_parallelogram_part_neighbor_sum_unweighted(exec_alloc_desc
         # },
     )
 
-    zavg_program(pp=case["pp_struct"], S_M=case["s_m_struct"], out=zavgS_struct, domain={IDim: (0, max_i), JDim: (0, max_j), Kolor: (0, 3)})
-    unweighted_program(zavgS=zavgS_struct, out=pnabla_m_struct, domain={IDim: (0, max_i), JDim: (0, max_j), Kolor: (0, 1)})
+    zavg_program(
+        pp=case["pp_struct"],
+        S_M=case["s_m_struct"],
+        out=zavgS_struct,
+        domain={IDim: (0, max_i), JDim: (0, max_j), Kolor: (0, 3)},
+    )
+    unweighted_program(
+        zavgS=zavgS_struct,
+        out=pnabla_m_struct,
+        domain={IDim: (0, max_i), JDim: (0, max_j), Kolor: (0, 1)},
+    )
 
     # numpy reference implementation of the unweighted neighbor sum
     # with zero-padded boundaries (no negative-index wraparound).
@@ -739,11 +762,18 @@ def test_ffront_nabla_parallelogram_part_neighbor_sum_unweighted(exec_alloc_desc
     # print(zavg_np[:,:,1])
     # print(zavgS_struct.asnumpy()[:,:,2])
     # print(zavg_np[:,:,2])
-    print(f"pp: ", case["pp_struct"][:,:,0])
-    print(f"zavgS difference: \n", (zavgS_struct.asnumpy() - zavg_np)[:,:,0], "\n", (zavgS_struct.asnumpy() - zavg_np)[:,:,1], "\n", (zavgS_struct.asnumpy() - zavg_np)[:,:,2])
+    print(f"pp: ", case["pp_struct"][:, :, 0])
+    print(
+        f"zavgS difference: \n",
+        (zavgS_struct.asnumpy() - zavg_np)[:, :, 0],
+        "\n",
+        (zavgS_struct.asnumpy() - zavg_np)[:, :, 1],
+        "\n",
+        (zavgS_struct.asnumpy() - zavg_np)[:, :, 2],
+    )
     # print(f"numpy pnabla: ", pnabla_numpy[:,:,0])
     # print(f"GT4py pnabla: ", pnabla_m_struct.asnumpy()[:,:,0])
-    print(f"Pnabla difference: \n", pnabla_m_struct.asnumpy()[:,:,0] - pnabla_numpy[:,:,0])
+    print(f"Pnabla difference: \n", pnabla_m_struct.asnumpy()[:, :, 0] - pnabla_numpy[:, :, 0])
     assert np.isfinite(pnabla_m_struct.asnumpy()).all()
     assert np.allclose(pnabla_m_struct.asnumpy(), pnabla_numpy, rtol=1e-10, atol=0)
 
@@ -787,13 +817,31 @@ def test_ffront_nabla_parallelogram_part_neighbor_sum_weighted(exec_alloc_descri
     )
     #         domain={IDim: (0, domain_max_i), JDim: (0, domain_max_j), Kolor: (0, domain_max_kolor)},
     # horizontal_sizes={
-# #         "domain_max_i": gtx.int32(max_i),
-# #         "domain_max_j": gtx.int32(max_j),
-# #         "domain_max_kolor": gtx.int32(3),
-# #     },
+    # #         "domain_max_i": gtx.int32(max_i),
+    # #         "domain_max_j": gtx.int32(max_j),
+    # #         "domain_max_kolor": gtx.int32(3),
+    # #     },
 
-    zavg_program(pp=case["pp_struct"], S_M=case["s_m_struct"], out=zavgS_struct, domain={IDim: (0, case["remap_sizes"].max_i), JDim: (0, case["remap_sizes"].max_j), Kolor: (0, 3)})
-    weighted_program(zavgS=zavgS_struct, sign=case["sign_struct"], out=pnabla_m_struct, domain={IDim: (0, case["remap_sizes"].max_i), JDim: (0, case["remap_sizes"].max_j), Kolor: (0, 1)})
+    zavg_program(
+        pp=case["pp_struct"],
+        S_M=case["s_m_struct"],
+        out=zavgS_struct,
+        domain={
+            IDim: (0, case["remap_sizes"].max_i),
+            JDim: (0, case["remap_sizes"].max_j),
+            Kolor: (0, 3),
+        },
+    )
+    weighted_program(
+        zavgS=zavgS_struct,
+        sign=case["sign_struct"],
+        out=pnabla_m_struct,
+        domain={
+            IDim: (0, case["remap_sizes"].max_i),
+            JDim: (0, case["remap_sizes"].max_j),
+            Kolor: (0, 1),
+        },
+    )
 
     # Numpy reference implementation:
     zavg_np = zavgS_struct.asnumpy()
@@ -805,21 +853,27 @@ def test_ffront_nabla_parallelogram_part_neighbor_sum_weighted(exec_alloc_descri
             return 0.0
         return float(zavg_np[i, j, k])
 
-    
     i_lo, i_hi, j_lo, j_hi = _interior_ij_bounds(case["remap_sizes"])
     for i in range(i_lo, i_hi):
         for j in range(j_lo, j_hi):
             pnabla_numpy[i, j, 0] = (
-                _zavg_or_zero(i, j, 0) * sign_np[i, j,0,0]
-                + _zavg_or_zero(i, j - 1, 0) * sign_np[i, j,0,3]
-                + _zavg_or_zero(i, j, 1) * sign_np[i, j,0,1]
-                + _zavg_or_zero(i - 1, j, 1) * sign_np[i, j,0,4]
-                + _zavg_or_zero(i, j - 1, 2) * sign_np[i, j,0,2]
-                + _zavg_or_zero(i - 1, j, 2) * sign_np[i, j,0,5]
+                _zavg_or_zero(i, j, 0) * sign_np[i, j, 0, 0]
+                + _zavg_or_zero(i, j - 1, 0) * sign_np[i, j, 0, 3]
+                + _zavg_or_zero(i, j, 1) * sign_np[i, j, 0, 1]
+                + _zavg_or_zero(i - 1, j, 1) * sign_np[i, j, 0, 4]
+                + _zavg_or_zero(i, j - 1, 2) * sign_np[i, j, 0, 2]
+                + _zavg_or_zero(i - 1, j, 2) * sign_np[i, j, 0, 5]
             )
 
-    print(f"pp: ", case["pp_struct"][:,:,0])
-    print(f"zavgS difference: \n", (zavgS_struct.asnumpy() - zavg_np)[:,:,0], "\n", (zavgS_struct.asnumpy() - zavg_np)[:,:,1], "\n", (zavgS_struct.asnumpy() - zavg_np)[:,:,2])
+    print(f"pp: ", case["pp_struct"][:, :, 0])
+    print(
+        f"zavgS difference: \n",
+        (zavgS_struct.asnumpy() - zavg_np)[:, :, 0],
+        "\n",
+        (zavgS_struct.asnumpy() - zavg_np)[:, :, 1],
+        "\n",
+        (zavgS_struct.asnumpy() - zavg_np)[:, :, 2],
+    )
     print(f"pnabla difference: \n", pnabla_m_struct.asnumpy() - pnabla_numpy)
     assert np.isfinite(pnabla_m_struct.asnumpy()).all()
     assert np.allclose(pnabla_m_struct.asnumpy(), pnabla_numpy, rtol=1e-10, atol=0)
@@ -885,7 +939,7 @@ def test_ffront_nabla_parallelogram_part_divide(exec_alloc_descriptor, request):
         if i < 0 or j < 0 or i >= zavg_np.shape[0] or j >= zavg_np.shape[1]:
             return 0.0
         return float(zavg_np[i, j, k])
-    
+
     i_lo, i_hi, j_lo, j_hi = _interior_ij_bounds(case["remap_sizes"])
     for i in range(i_lo, i_hi):
         for j in range(j_lo, j_hi):
@@ -898,33 +952,45 @@ def test_ffront_nabla_parallelogram_part_divide(exec_alloc_descriptor, request):
                 + _zavg_or_zero(i - 1, j, 2) * sign_np[i, j, 0, 5]
             )
             out_numpy[i, j, 0] = pnabla_numpy[i, j, 0] / vol_np[i, j, 0]
-    
-    print(f"pp: ", case["pp_struct"][:,:,0])
-    print(f"zavgS difference: \n", (zavgS_struct.asnumpy() - zavg_np)[:,:,0], "\n", (zavgS_struct.asnumpy() - zavg_np)[:,:,1], "\n", (zavgS_struct.asnumpy() - zavg_np)[:,:,2])
+
+    print(f"pp: ", case["pp_struct"][:, :, 0])
+    print(
+        f"zavgS difference: \n",
+        (zavgS_struct.asnumpy() - zavg_np)[:, :, 0],
+        "\n",
+        (zavgS_struct.asnumpy() - zavg_np)[:, :, 1],
+        "\n",
+        (zavgS_struct.asnumpy() - zavg_np)[:, :, 2],
+    )
     print(f"pnabla difference: \n", pnabla_m_struct.asnumpy() - pnabla_numpy)
     print(f"divide difference: \n", out_struct.asnumpy() - out_numpy)
 
     assert np.isfinite(out_struct.asnumpy()).all()
     assert np.allclose(out_struct.asnumpy(), out_numpy, rtol=1e-10, atol=0)
 
+
 from gt4py.next.modules.structured_wrapper import setup_smart_program
+
 
 @pytest.mark.requires_atlas
 def test_ffront_pnabla_clean(exec_alloc_descriptor):
     case = _prepare_parallelogram_structured_case(exec_alloc_descriptor)
     setup = case["setup"]
-    
+
     # 1. Standard Unstructured Allocation!
     out_unstruct = gtx.zeros({Vertex: setup.nodes_size}, allocator=exec_alloc_descriptor.allocator)
 
     # 2. Use the smart setup
     pnabla_program = setup_smart_program(
-        compute_pnabla, 
+        compute_pnabla,
         setup=setup,
         index_map=case["index_map"],
         remap_sizes=case["remap_sizes"],
         allocator=exec_alloc_descriptor.allocator,
-        offset_provider={"E2V": setup.edges2node_connectivity, "V2E": setup.nodes2edge_connectivity}
+        offset_provider={
+            "E2V": setup.edges2node_connectivity,
+            "V2E": setup.nodes2edge_connectivity,
+        },
     )
 
     # 3. Call it! The wrapper intercepts, packs, runs Cartesian, and unpacks automatically.
@@ -933,37 +999,39 @@ def test_ffront_pnabla_clean(exec_alloc_descriptor):
         S_M=setup.S_fields[0],
         sign=setup.sign_field,
         vol=setup.vol_field,
-        out=out_unstruct  
+        out=out_unstruct,
     )
 
     # 4. Assert directly on the unstructured field
     assert np.isfinite(out_unstruct.asnumpy()).all()
 
     # 5. Implement a proper numpy reference and compare
-        # Numpy reference implementation (use unstructured connectivity from setup)
-    e2v_un = setup.edges2node_connectivity.asnumpy()        # (n_edge, 2)
+    # Numpy reference implementation (use unstructured connectivity from setup)
+    e2v_un = setup.edges2node_connectivity.asnumpy()  # (n_edge, 2)
     valid_e = np.all(e2v_un >= 0, axis=1)
-    pp_un = setup.input_field.asnumpy()                     # (n_vertex,)
-    s_m_un = setup.S_fields[0].asnumpy()                   # (n_edge,)
-    vol_un = setup.vol_field.asnumpy()                     # (n_vertex,)
-    sign_un = setup.sign_field.asnumpy()                   # (n_vertex, max_deg)
-    v2e_un = setup.nodes2edge_connectivity.asnumpy()       # (n_vertex, max_deg)
-    
+    pp_un = setup.input_field.asnumpy()  # (n_vertex,)
+    s_m_un = setup.S_fields[0].asnumpy()  # (n_edge,)
+    vol_un = setup.vol_field.asnumpy()  # (n_vertex,)
+    sign_un = setup.sign_field.asnumpy()  # (n_vertex, max_deg)
+    v2e_un = setup.nodes2edge_connectivity.asnumpy()  # (n_vertex, max_deg)
+
     # zavg on unstructured edges
     zavg_un = np.zeros((s_m_un.shape[0],), dtype=s_m_un.dtype)
-    zavg_un[valid_e] = s_m_un[valid_e] * 0.5 * (pp_un[e2v_un[valid_e, 0]] + pp_un[e2v_un[valid_e, 1]])
-    
+    zavg_un[valid_e] = (
+        s_m_un[valid_e] * 0.5 * (pp_un[e2v_un[valid_e, 0]] + pp_un[e2v_un[valid_e, 1]])
+    )
+
     # accumulate per-vertex neighbor sum
     n_vertex = v2e_un.shape[0]
     pnabla_mxx_numpy = np.zeros((n_vertex,), dtype=float)
     pnabla_myy_numpy = np.zeros((n_vertex,), dtype=float)
-    
+
     interior_vertices = _vertex_interior_mask(case["index_map"], case["remap_sizes"])
 
     for v in range(n_vertex):
         if not interior_vertices[v]:
             continue
-        edges = v2e_un[v]              # list of neighbor edge indices (pad -1)
+        edges = v2e_un[v]  # list of neighbor edge indices (pad -1)
         mask = edges >= 0
         if not np.any(mask):
             continue
@@ -971,7 +1039,7 @@ def test_ffront_pnabla_clean(exec_alloc_descriptor):
         svals = zavg_un[e_idx]
         sgns = sign_un[v, mask]
         pnabla_mxx_numpy[v] = float((svals * sgns).sum())
-    
+
     # divide by vertex volume
     pnabla_mxx_numpy /= vol_un
 

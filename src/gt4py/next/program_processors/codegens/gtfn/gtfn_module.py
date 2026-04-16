@@ -57,7 +57,6 @@ class GTFNTranslationStep(
     symbolic_domain_sizes: dict[str, Any] | None = None
     use_max_domain_range_on_unstructured_shift: bool | None = None
 
-
     def _default_code_spec(self) -> code_specs.HeaderAndSourceCodeSpec:
         match self.device_type:
             case core_defs.DeviceType.CUDA:
@@ -179,9 +178,7 @@ class GTFNTranslationStep(
         symbolic_domain_sizes: Optional[dict[str, Any]] = None,
     ) -> itir.Program:
         effective_symbolic_domain_sizes = (
-            self.symbolic_domain_sizes
-            if symbolic_domain_sizes is None
-            else symbolic_domain_sizes
+            self.symbolic_domain_sizes if symbolic_domain_sizes is None else symbolic_domain_sizes
         )
         apply_common_transforms = functools.partial(
             pass_manager.apply_common_transforms,
@@ -474,8 +471,7 @@ class GTFNTranslationStep(
             program, inp.args.argument_descriptor_contexts
         )
         resolved_symbolic_domain_sizes = self._resolve_symbolic_domain_sizes(
-            program,
-            inp.args.argument_descriptor_contexts
+            program, inp.args.argument_descriptor_contexts
         )
 
         if self.enable_itir_transforms:

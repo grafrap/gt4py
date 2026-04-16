@@ -36,10 +36,9 @@ def _is_representable_as_int(s: int | str) -> bool:
 def _set_node_type(node: itir.Node, type_: ts.TypeSpec) -> None:
     if node.type and not isinstance(type_, ts.DeferredType):
         if not type_info.is_compatible_type(node.type, type_):
-            if (
-                os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1"
-                and _is_structured_remap_compatibility_case(node.type, type_)
-            ):
+            if os.environ.get(
+                "USE_STRUCTURED_BACKEND", "0"
+            ) == "1" and _is_structured_remap_compatibility_case(node.type, type_):
                 type_ = node.type
             else:
                 raise AssertionError(
@@ -81,7 +80,9 @@ def _is_structured_remap_compatibility_case(existing: ts.TypeSpec, inferred: ts.
         if tuple(existing.defined_dims) == tuple(inferred.defined_dims):
             return True
 
-        if len(existing.defined_dims) == len(inferred.defined_dims) + 1 and existing.defined_dims[0].value in {
+        if len(existing.defined_dims) == len(inferred.defined_dims) + 1 and existing.defined_dims[
+            0
+        ].value in {
             "Edge",
             "Cell",
             "Vertex",
@@ -433,10 +434,9 @@ class ITIRTypeInference(eve.NodeTranslator):
             if isinstance(result, ts.TypeSpec):
                 if node.type and not isinstance(node.type, ts.DeferredType):
                     if not type_info.is_compatible_type(node.type, result):
-                        if (
-                            os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1"
-                            and _is_structured_remap_compatibility_case(node.type, result)
-                        ):
+                        if os.environ.get(
+                            "USE_STRUCTURED_BACKEND", "0"
+                        ) == "1" and _is_structured_remap_compatibility_case(node.type, result):
                             result = node.type
                         else:
                             raise TypeError(

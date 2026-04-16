@@ -1,28 +1,36 @@
-import os
+# GT4Py - GridTools Framework
+#
+# Copyright (c) 2014-2024, ETH Zurich
+# All rights reserved.
+#
+# Please, refer to the LICENSE file in the root directory.
+# SPDX-License-Identifier: BSD-3-Clause
+
 import functools
-import xarray as xr
-import gt4py.next as gtx
+import os
+
 import numpy as np
+import xarray as xr
 from icon4py.model.common.dimension import IDim, JDim, Kolor
 
+import gt4py.next as gtx
+from gt4py.next.iterator import ir
+from gt4py.next.iterator.transforms.map_dict import map_dict as _MAP_DICT
 from gt4py.next.modules.translator import (
     IndexMap,
     StructuredRemapSizes,
-    load_structured_remap_sizes_from_netcdf,
-    build_index_map_from_lonlat_e2v,
-    build_cell_ijk_maps,
-    pack_vertex_field_to_structured,
-    pack_edge_field_to_structured,
-    pack_edge_field,
-    pack_cell_field_to_structured,
-    unpack_vertex_field_to_unstructured,
-    unpack_edge_field,
-    unpack_cell_field_from_structured,
     _read_e2v,
-    _read_lonlat
+    _read_lonlat,
+    build_cell_ijk_maps,
+    build_index_map_from_lonlat_e2v,
+    load_structured_remap_sizes_from_netcdf,
+    pack_cell_field_to_structured,
+    pack_edge_field,
+    pack_vertex_field_to_structured,
+    unpack_cell_field_from_structured,
+    unpack_edge_field,
+    unpack_vertex_field_to_unstructured,
 )
-from gt4py.next.iterator.transforms.map_dict import map_dict as _MAP_DICT
-from gt4py.next.iterator import ir
 
 
 def _parse_map_dict_remap_table() -> dict[str, dict[int, dict[int, tuple[int, int, int]]]]:
@@ -113,13 +121,19 @@ def _parse_map_dict_remap_table() -> dict[str, dict[int, dict[int, tuple[int, in
                 for ck in range(_MAX_KOLOR):
                     if ck not in covered:
                         nk = ck + else_shift[2]
-                        table[conn_name].setdefault(ck, {})[slot] = (else_shift[0], else_shift[1], nk)
+                        table[conn_name].setdefault(ck, {})[slot] = (
+                            else_shift[0],
+                            else_shift[1],
+                            nk,
+                        )
 
     return table
 
 
 # Built once at module import time; keyed by connectivity name (e.g. "E2C2E", "C2E", "V2E").
-_SPARSE_REMAP_TABLE: dict[str, dict[int, dict[int, tuple[int, int, int]]]] = _parse_map_dict_remap_table()
+_SPARSE_REMAP_TABLE: dict[str, dict[int, dict[int, tuple[int, int, int]]]] = (
+    _parse_map_dict_remap_table()
+)
 
 # Maps local Dim suffix (as it appears in field.domain.dims[1].value) to the connectivity name
 # used in map_dict and in the offset_provider key.
@@ -152,7 +166,9 @@ def pack_sparse_local_field_to_structured(
         cell_to_ijk: Optional cell mapping for cell-centered connectivities.
     """
     if coeff.ndim < 2:
-        raise ValueError("Sparse-local coefficients must have at least 2 dimensions [center, local, ...].")
+        raise ValueError(
+            "Sparse-local coefficients must have at least 2 dimensions [center, local, ...]."
+        )
 
     remap = _SPARSE_REMAP_TABLE.get(local_dim_name)
     if remap is None:
@@ -263,12 +279,15 @@ def pack_sparse_local_field_to_structured(
                     out[ci, cj, ck, slot, ...] = coeff[elem, local, ...]
     return out
 
+
 _CACHED_INDEX_MAP = None
 _CACHED_REMAP_SIZES = None
 _CACHED_EDGE_COUNT = None
 
 
-def _swap_index_map_edge_colors(index_map: IndexMap, color_a: int = 0, color_b: int = 2) -> IndexMap:
+def _swap_index_map_edge_colors(
+    index_map: IndexMap, color_a: int = 0, color_b: int = 2
+) -> IndexMap:
     ijk_to_edge = np.array(index_map.ijk_to_edge, copy=True)
     edge_to_ijk = np.array(index_map.edge_to_ijk, copy=True)
 
@@ -291,7 +310,9 @@ def _swap_index_map_edge_colors(index_map: IndexMap, color_a: int = 0, color_b: 
     )
 
 
-def _build_periodic_square_index_map(e2v: np.ndarray) -> tuple[IndexMap, StructuredRemapSizes] | None:
+def _build_periodic_square_index_map(
+    e2v: np.ndarray,
+) -> tuple[IndexMap, StructuredRemapSizes] | None:
     n_edge = int(e2v.shape[0])
     n_vertex = int(e2v.max()) + 1 if e2v.size else 0
     side = int(round(np.sqrt(n_vertex)))
@@ -363,6 +384,7 @@ def _build_periodic_square_index_map(e2v: np.ndarray) -> tuple[IndexMap, Structu
     )
     return index_map, remap_sizes
 
+
 def get_global_grid_mapping(e2v_override=None):
     """Builds or returns the cached index_map and remap_sizes for the current run."""
     global _CACHED_INDEX_MAP, _CACHED_REMAP_SIZES, _CACHED_EDGE_COUNT
@@ -372,7 +394,9 @@ def get_global_grid_mapping(e2v_override=None):
     if e2v_override is not None:
         normalized_e2v_override = np.asarray(e2v_override, dtype=np.int32)
         if normalized_e2v_override.ndim != 2:
-            raise ValueError(f"Expected 2D E2V connectivity, got shape {normalized_e2v_override.shape}")
+            raise ValueError(
+                f"Expected 2D E2V connectivity, got shape {normalized_e2v_override.shape}"
+            )
         if normalized_e2v_override.shape[1] != 2 and normalized_e2v_override.shape[0] == 2:
             normalized_e2v_override = normalized_e2v_override.T
         if normalized_e2v_override.shape[1] != 2:
@@ -380,7 +404,7 @@ def get_global_grid_mapping(e2v_override=None):
                 f"Expected E2V connectivity with shape (n_edge, 2), got {normalized_e2v_override.shape}"
             )
         override_edge_count = int(normalized_e2v_override.shape[0])
-    
+
     if _CACHED_INDEX_MAP is not None and (
         override_edge_count is None or override_edge_count == _CACHED_EDGE_COUNT
     ):
@@ -389,9 +413,9 @@ def get_global_grid_mapping(e2v_override=None):
     # Read the grid file specified in the environment (or default)
     mesh_nc = os.environ.get(
         "GT4PY_TRANSLATOR_MESH",
-        "/home/raphael/Documents/Studium/Msc_thesis/grid-generator/parallelogram_grid.nc"
+        "/home/raphael/Documents/Studium/Msc_thesis/grid-generator/parallelogram_grid.nc",
     )
-    
+
     # Put your standard reading logic here...
     with xr.open_dataset(mesh_nc) as ds:
         e2v = _read_e2v(ds)
@@ -399,17 +423,20 @@ def get_global_grid_mapping(e2v_override=None):
         lateral = int(os.environ.get("GT4PY_TRANSLATOR_LATERAL", "1"))
         remap_sizes = load_structured_remap_sizes_from_netcdf(mesh_nc, lateral=lateral)
 
-    # print(f"lateral={remap_sizes.lateral}, max_i={remap_sizes.max_i}, max_j={remap_sizes.max_j}")        
-    index_map = build_index_map_from_lonlat_e2v(lonlat, e2v) # Add your exact sizes here
-    
+    # print(f"lateral={remap_sizes.lateral}, max_i={remap_sizes.max_i}, max_j={remap_sizes.max_j}")
+    index_map = build_index_map_from_lonlat_e2v(lonlat, e2v)  # Add your exact sizes here
+
     _CACHED_INDEX_MAP = index_map
     _CACHED_REMAP_SIZES = remap_sizes
     _CACHED_EDGE_COUNT = int(e2v.shape[0])
-    
+
     return _CACHED_INDEX_MAP, _CACHED_REMAP_SIZES
 
+
 class GenericStructuredWrapper:
-    def __init__(self, operator, backend_factory, index_map, remap_sizes, allocator, offset_provider):
+    def __init__(
+        self, operator, backend_factory, index_map, remap_sizes, allocator, offset_provider
+    ):
         self.index_map = index_map
         self.allocator = allocator
         self.operator_name = getattr(operator, "id", None) or getattr(operator, "__name__", "")
@@ -417,7 +444,7 @@ class GenericStructuredWrapper:
         self.remap_sizes = remap_sizes
         self.max_i = int(self.remap_sizes.max_i)
         self.max_j = int(remap_sizes.max_j)
-        
+
         # 1. Dynamically extract connectivities from the offset_provider.
         # Store all raw (unsanitized) connectivity arrays keyed by name.
         self.v2e_conn = offset_provider.get("V2E").asnumpy() if "V2E" in offset_provider else None
@@ -445,11 +472,15 @@ class GenericStructuredWrapper:
                                     edge_kolor = np.asarray(edge_to_ijk[:, 2], dtype=np.int32)
                                     n_edge = min(normalized.shape[0], edge_kolor.shape[0])
                                     if n_edge > 0 and normalized.shape[1] >= 2:
-                                        swap_mask = (edge_kolor[:n_edge] == 0) | (edge_kolor[:n_edge] == 2)
+                                        swap_mask = (edge_kolor[:n_edge] == 0) | (
+                                            edge_kolor[:n_edge] == 2
+                                        )
                                         if np.any(swap_mask):
                                             tmp = np.array(normalized[:n_edge, 0], copy=True)
                                             normalized[:n_edge, 0] = np.where(
-                                                swap_mask, normalized[:n_edge, 1], normalized[:n_edge, 0]
+                                                swap_mask,
+                                                normalized[:n_edge, 1],
+                                                normalized[:n_edge, 0],
                                             )
                                             normalized[:n_edge, 1] = np.where(
                                                 swap_mask, tmp, normalized[:n_edge, 1]
@@ -466,11 +497,10 @@ class GenericStructuredWrapper:
         edge_lateral_flag = os.environ.get("GT4PY_TRANSLATOR_EDGE_LATERAL")
         if edge_lateral_flag is None:
             edge_lateral_flag = os.environ.get("GT4PY_TRANSLATOR_USE_EDGE_LATERAL")
-        use_edge_lateral = (
-            isinstance(edge_lateral_flag, str)
-            and edge_lateral_flag.strip().lower() in {"1", "true", "yes", "on"}
-        )
-        print(f"use edge lateral is: ", edge_lateral_flag)
+        use_edge_lateral = isinstance(
+            edge_lateral_flag, str
+        ) and edge_lateral_flag.strip().lower() in {"1", "true", "yes", "on"}
+        print("use edge lateral is: ", edge_lateral_flag)
 
         symbolic_domain_sizes = {
             "max_i": int(remap_sizes.max_i),
@@ -495,11 +525,12 @@ class GenericStructuredWrapper:
         )
 
         # 3. Compile the actual program
-        from gt4py.next.program_processors.program_setup_utils import setup_program as original_setup
+        from gt4py.next.program_processors.program_setup_utils import (
+            setup_program as original_setup,
+        )
+
         self._compiled_program = original_setup(
-            operator,
-            backend=structured_backend,
-            offset_provider=self.structured_offset_provider
+            operator, backend=structured_backend, offset_provider=self.structured_offset_provider
         )
 
     def _get_connectivity(self, offset_provider, name: str):
@@ -603,7 +634,9 @@ class GenericStructuredWrapper:
             )
         return structured_offset_provider
 
-    def _reference_tangential_wind(self, vn: np.ndarray, coeff: np.ndarray, e2c2e: np.ndarray) -> np.ndarray:
+    def _reference_tangential_wind(
+        self, vn: np.ndarray, coeff: np.ndarray, e2c2e: np.ndarray
+    ) -> np.ndarray:
         vt_ref = np.zeros((vn.shape[0], vn.shape[1]), dtype=vn.dtype)
         for edge in range(e2c2e.shape[0]):
             for local in range(e2c2e.shape[1]):
@@ -683,7 +716,10 @@ class GenericStructuredWrapper:
                 continue
             center_ijk = tuple(int(v) for v in self.index_map.edge_to_ijk[edge])
             neighbors = [int(v) for v in e2c2e[edge]]
-            neighbor_ijk = [tuple(int(v) for v in self.index_map.edge_to_ijk[n]) if n >= 0 else (-1, -1, -1) for n in neighbors]
+            neighbor_ijk = [
+                tuple(int(v) for v in self.index_map.edge_to_ijk[n]) if n >= 0 else (-1, -1, -1)
+                for n in neighbors
+            ]
             print(
                 f"[structured-debug] edge={int(edge)} center_ijk={center_ijk} "
                 f"out_k0={float(vt_out[edge, 0]):+.6e} ref_k0={float(vt_ref[edge, 0]):+.6e} "
@@ -742,7 +778,10 @@ class GenericStructuredWrapper:
 
         # Default OFF: zeroing clipped sparse coefficients was causing false mismatches
         # for divergence-damping stencils near edge-shape boundaries.
-        if local_dim in {"E2C2E", "E2C2EO"} and os.environ.get("GT4PY_TRANSLATOR_ZERO_CLIPPED_SPARSE", "0") == "1":
+        if (
+            local_dim in {"E2C2E", "E2C2EO"}
+            and os.environ.get("GT4PY_TRANSLATOR_ZERO_CLIPPED_SPARSE", "0") == "1"
+        ):
             # Keep sparse coefficients zero on clipped edge-shape center lines.
             ni, nj, nk = packed.shape[:3]
             i_idx = np.arange(ni, dtype=np.int32)[:, None, None]
@@ -758,7 +797,7 @@ class GenericStructuredWrapper:
     def _pack_argument(self, field):
         # print(f"packing field:", field)
         if not getattr(field, "domain", None):
-            return field 
+            return field
 
         np_data = field.asnumpy()
 
@@ -771,27 +810,33 @@ class GenericStructuredWrapper:
                 struct_np,
                 allocator=self.allocator,
             )
-            
+
         # 2. Standard unstructured fields
         if self._is_unstructured(field, "Vertex"):
             struct_np = pack_vertex_field_to_structured(np_data, self.index_map)
             trailing_dims = list(field.domain.dims[1:]) if np_data.ndim > 1 else []
-            return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np, allocator=self.allocator)
-            
+            return gtx.as_field(
+                [IDim, JDim, Kolor, *trailing_dims], struct_np, allocator=self.allocator
+            )
+
         elif self._is_unstructured(field, "Edge"):
             # print(f"Packing edge field '{getattr(field, 'name', '')}' with shape {np_data.shape}")
             struct_np = pack_edge_field(np_data, self.index_map)
             trailing_dims = list(field.domain.dims[1:]) if np_data.ndim > 1 else []
-            return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np, allocator=self.allocator)
-        
+            return gtx.as_field(
+                [IDim, JDim, Kolor, *trailing_dims], struct_np, allocator=self.allocator
+            )
+
         elif self._is_unstructured(field, "Cell"):
             if self.cell_to_ijk is None or self.ijk_to_cell is None:
                 return field
             struct_np = pack_cell_field_to_structured(np_data, self.cell_to_ijk, self.ijk_to_cell)
             trailing_dims = list(field.domain.dims[1:]) if np_data.ndim > 1 else []
-            return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np, allocator=self.allocator)
+            return gtx.as_field(
+                [IDim, JDim, Kolor, *trailing_dims], struct_np, allocator=self.allocator
+            )
 
-        return field 
+        return field
 
     def _unpack_to_buffer(self, structured_field, original_unstructured_field):
         # print(f"unpacking field:", structured_field, "to", original_unstructured_field)
@@ -815,7 +860,7 @@ class GenericStructuredWrapper:
             and local_dim_name in _SPARSE_REMAP_TABLE
         ):
             return
-        
+
         if self._is_unstructured(original_unstructured_field, "Vertex"):
             unstruct_np = unpack_vertex_field_to_unstructured(struct_np, self.index_map)
         elif self._is_unstructured(original_unstructured_field, "Edge"):
@@ -823,12 +868,14 @@ class GenericStructuredWrapper:
         elif self._is_unstructured(original_unstructured_field, "Cell"):
             if self.cell_to_ijk is None:
                 return
-            unstruct_np = unpack_cell_field_from_structured(struct_np, self.cell_to_ijk, orig_np.shape[0])
+            unstruct_np = unpack_cell_field_from_structured(
+                struct_np, self.cell_to_ijk, orig_np.shape[0]
+            )
         else:
-            return 
+            return
 
         np.copyto(orig_np, unstruct_np)
-    
+
     def __call__(self, **kwargs):
         structured_kwargs = {}
         packed_fields: list[tuple[object, object]] = []
@@ -872,7 +919,6 @@ class GenericStructuredWrapper:
         else:
             # Fallback for non-partial wrappers.
             self._compiled_program(**structured_kwargs)
-
 
         for original_field, packed_field in packed_fields:
             self._unpack_to_buffer(packed_field, original_field)

@@ -1,3 +1,5 @@
+# TODO: This license is not consistent with the license used in the project.
+#       Delete the inconsistent license and above line and rerun pre-commit to insert a good license.
 # # GT4Py - GridTools Framework
 # #
 # # Copyright (c) 2014-2024, ETH Zurich
@@ -153,7 +155,7 @@
 #         term0,
 #         concat_where(Kolor == 1, term1, term2),
 #     )
-    
+
 #     return neighbor_sum(pnabla_M, axis=Kolor) / vol
 
 
@@ -335,7 +337,7 @@
 # # TODO:
 # # - let the stencil run now with unstructured and structured and check if both produce same result
 # # - for this we need trafo on mesh and field
-# # - End: write in either chekcs or boolean flag showing if can run with structured or not 
+# # - End: write in either chekcs or boolean flag showing if can run with structured or not
 # # - look at what shape inference does and why we have [0, 5[ instead of [0, 3[ (maybe ask Hannes)
 # # solution to this: these are only intermediate results. If I get an out of bounds error, then the issue could be here. However, if i get the correct result, it is only a performance issue,
 # # to solve that issue, set two things in fuse_as_fieldop.py: 1) line 192: set opcount_preserving=False, 2) directly return True after or cpm.is_call_to(node, "if_"): return True (line ~213)

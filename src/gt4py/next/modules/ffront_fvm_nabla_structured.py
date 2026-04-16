@@ -1,8 +1,16 @@
+# GT4Py - GridTools Framework
+#
+# Copyright (c) 2014-2024, ETH Zurich
+# All rights reserved.
+#
+# Please, refer to the LICENSE file in the root directory.
+# SPDX-License-Identifier: BSD-3-Clause
+
 import gt4py.next as gtx
-from gt4py.next.experimental import concat_where
+
 
 # from gt4py.next import where as concat_where
-from gt4py.next import neighbor_sum
+
 
 # # Define Dimensions
 IDim = gtx.Dimension("IDim")
@@ -116,7 +124,7 @@ Kolor = gtx.Dimension("Kolor")
 #     domain_max_i: gtx.int32,
 #     domain_max_j: gtx.int32,
 # ) -> gtx.Field[[IDim, JDim, Kolor], float]:
-    
+
 #     zavgS = compute_zavgS_cartesian(pp, S_M, domain_max_i, domain_max_j)
 
 #     # Kolor 0: Forward edge is (i, j, 0) [East], Backward is (i, j-1, 0) [West]
@@ -149,7 +157,7 @@ Kolor = gtx.Dimension("Kolor")
 #         term0,
 #         concat_where(Kolor == 1, term1, term2),
 #     )
-    
+
 #     return neighbor_sum(pnabla_M, axis=Kolor) / vol
 
 # @gtx.program
@@ -183,14 +191,14 @@ Kolor = gtx.Dimension("Kolor")
 
 
 # # Observations from this structured stencil vs the unstructured version of pnabla and zavgS:
-# # - If i need E2V, i need to use concat_where to handle all three edge types. Easiest is to just split it 
+# # - If i need E2V, i need to use concat_where to handle all three edge types. Easiest is to just split it
 # #   into three different field operators, one for each edge type.
-# # - i need forward and back shifts for V2E accesses, so that i can compute the contribution of a vertex field 
+# # - i need forward and back shifts for V2E accesses, so that i can compute the contribution of a vertex field
 # #   (has only Kolor 0) to all edge types.
-# # - When a field is [Globaldim, Localdim], e.g. [Vertex, V2EDim], i need to use two separate fields to 
-# #   represent this field, because all edges contribute from two edges to the same vertex, i.e. 6 contributions 
+# # - When a field is [Globaldim, Localdim], e.g. [Vertex, V2EDim], i need to use two separate fields to
+# #   represent this field, because all edges contribute from two edges to the same vertex, i.e. 6 contributions
 # #   for in total, while Kolor is only 3.
 # # - E2V accesses must be written out explicitly with IDim and JDim, but produce the same result in the end.
 # # - neighbor_sum goes over six edges for each vertex, hence 2 per Kolor, that's why we add every edge in the same
 # #   Kolor contribution together before doing the neighbor_sum, which then just goes over the three Kolors.
-# # - Remember reshifts for e.g. the sign or pp field, if we use concat_where on a Vertex field, we need to reshift back 
+# # - Remember reshifts for e.g. the sign or pp field, if we use concat_where on a Vertex field, we need to reshift back

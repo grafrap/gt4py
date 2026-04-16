@@ -24,9 +24,8 @@ class NormalizeShifts(PreserveLocationVisitor, NodeTranslator):
     @staticmethod
     def _is_implicit_off_axis(expr: ir.Expr) -> bool:
         if isinstance(expr, ir.OffsetLiteral):
-            return (
-                isinstance(expr.value, str)
-                and expr.value.startswith(NormalizeShifts._IMPLICIT_OFF_AXIS_PREFIX)
+            return isinstance(expr.value, str) and expr.value.startswith(
+                NormalizeShifts._IMPLICIT_OFF_AXIS_PREFIX
             )
         if isinstance(expr, ir.SymRef):
             return expr.id.startswith(NormalizeShifts._IMPLICIT_OFF_AXIS_PREFIX)
@@ -48,7 +47,9 @@ class NormalizeShifts(PreserveLocationVisitor, NodeTranslator):
         for idx in range(0, len(shift_args), 2):
             axis = shift_args[idx]
             offset = shift_args[idx + 1]
-            if NormalizeShifts._is_implicit_off_axis(axis) and NormalizeShifts._is_zero_offset(offset):
+            if NormalizeShifts._is_implicit_off_axis(axis) and NormalizeShifts._is_zero_offset(
+                offset
+            ):
                 continue
             filtered_args.extend([axis, offset])
 

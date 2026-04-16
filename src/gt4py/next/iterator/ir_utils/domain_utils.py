@@ -211,20 +211,20 @@ class SymbolicDomain:
 
                 # If the new_dim is not in symbolic_domain_sizes, try to compute it from the connectivity
                 if new_dim.value not in symbolic_domain_sizes:
-                        # Try to extract the size from the offset provider itself
-                        offset_name = off.value if isinstance(off, itir.OffsetLiteral) else None
-                        if offset_name and common.is_offset_provider(offset_provider):
-                            provider = offset_provider.get(offset_name)
-                            if provider is not None and common.is_neighbor_connectivity(provider):
-                                # Extract codomain size from the connectivity array
-                                max_neighbor = int(provider.ndarray.max())  # type: ignore[attr-defined]
-                                symbolic_domain_sizes[new_dim.value] = im.literal(
-                                    str(max_neighbor + 1), builtins.INTEGER_INDEX_BUILTIN
-                                )
-                    
-                        # If still not found, skip this translation - return unchanged domain
-                        if new_dim.value not in symbolic_domain_sizes:
-                            return self
+                    # Try to extract the size from the offset provider itself
+                    offset_name = off.value if isinstance(off, itir.OffsetLiteral) else None
+                    if offset_name and common.is_offset_provider(offset_provider):
+                        provider = offset_provider.get(offset_name)
+                        if provider is not None and common.is_neighbor_connectivity(provider):
+                            # Extract codomain size from the connectivity array
+                            max_neighbor = int(provider.ndarray.max())  # type: ignore[attr-defined]
+                            symbolic_domain_sizes[new_dim.value] = im.literal(
+                                str(max_neighbor + 1), builtins.INTEGER_INDEX_BUILTIN
+                            )
+
+                    # If still not found, skip this translation - return unchanged domain
+                    if new_dim.value not in symbolic_domain_sizes:
+                        return self
 
                 if symbolic_domain_sizes is not None and new_dim.value in symbolic_domain_sizes:
                     new_range = SymbolicRange(
@@ -296,8 +296,7 @@ def _reduce_domains(
 
     promoted_domains = [promote_domain(domain, dims) for domain in domains]
     new_domain_ranges = {
-        dim: range_reduce_op(*(domain.ranges[dim] for domain in promoted_domains))
-        for dim in dims
+        dim: range_reduce_op(*(domain.ranges[dim] for domain in promoted_domains)) for dim in dims
     }
 
     return SymbolicDomain(domains[0].grid_type, new_domain_ranges)
