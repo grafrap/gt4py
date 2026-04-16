@@ -10,6 +10,7 @@ import functools
 
 from gt4py.eve import NodeTranslator, PreserveLocationVisitor
 from gt4py.next import utils
+from gt4py.next.iterator import builtins as itir_builtins
 from gt4py.next.iterator import ir as itir
 from gt4py.next.iterator.ir_utils import (
     common_pattern_matcher as cpm,
@@ -30,7 +31,7 @@ def _in(pos: itir.Expr, domain: itir.Expr) -> itir.Expr:
     """
     def _normalize_integral_bound(bound: itir.Expr) -> itir.Expr:
         if isinstance(bound, itir.OffsetLiteral) and isinstance(bound.value, int):
-            return im.literal(str(bound.value), "int64")
+            return im.literal(str(bound.value), itir_builtins.INTEGER_INDEX_BUILTIN)
         if isinstance(bound, itir.Literal) and isinstance(bound.type, ts.ScalarType):
             if bound.type.kind in {
                 ts.ScalarKind.INT8,
@@ -38,7 +39,7 @@ def _in(pos: itir.Expr, domain: itir.Expr) -> itir.Expr:
                 ts.ScalarKind.INT32,
                 ts.ScalarKind.INT64,
             }:
-                return im.literal(bound.value, "int64")
+                return im.literal(bound.value, itir_builtins.INTEGER_INDEX_BUILTIN)
         return bound
 
     ret = [
