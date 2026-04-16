@@ -175,11 +175,35 @@ def _(
     return lhs
 
 
-@_register_builtin_type_synthesizer(
-    fun_names=builtins.UNARY_MATH_FP_PREDICATE_BUILTINS | builtins.UNARY_LOGICAL_BUILTINS
-)
+@_register_builtin_type_synthesizer(fun_names=builtins.UNARY_MATH_FP_PREDICATE_BUILTINS)
 def _(arg: ts.ScalarType) -> ts.ScalarType:
     return ts.ScalarType(kind=ts.ScalarKind.BOOL)
+
+
+@_register_builtin_type_synthesizer(fun_names=builtins.UNARY_LOGICAL_BUILTINS)
+def _(arg: ts.ScalarType | ts.DomainType | ts.TupleType) -> ts.ScalarType | ts.DomainType | ts.TupleType:
+    if isinstance(arg, ts.DomainType):
+        return arg
+    if isinstance(arg, ts.TupleType):
+        return ts.TupleType(
+            types=[
+                _register_builtin_type_synthesizer_single_not_inner(t) for t in arg.types
+            ]
+        )
+    assert isinstance(arg, ts.ScalarType)
+    return ts.ScalarType(kind=ts.ScalarKind.BOOL)
+
+
+def _register_builtin_type_synthesizer_single_not_inner(
+    arg: ts.TypeSpec,
+) -> ts.TypeSpec:
+    if isinstance(arg, ts.DomainType):
+        return arg
+    if isinstance(arg, ts.ScalarType):
+        return ts.ScalarType(kind=ts.ScalarKind.BOOL)
+    if isinstance(arg, ts.TupleType):
+        return ts.TupleType(types=[_register_builtin_type_synthesizer_single_not_inner(t) for t in arg.types])
+    return arg
 
 
 def synthesize_binary_math_comparison_builtins(

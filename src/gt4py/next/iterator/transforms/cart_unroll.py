@@ -898,7 +898,9 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                 return copy.deepcopy(lhs)
             return im.minus(copy.deepcopy(lhs), copy.deepcopy(rhs))
 
-        def _cartesian_axis_bounds(axis_name: str) -> tuple[ir.Expr, ir.Expr] | None:
+        def _cartesian_axis_bounds(
+            axis_name: str, *, use_lateral: bool = True
+        ) -> tuple[ir.Expr, ir.Expr] | None:
             if axis_name == "IDim":
                 lower_base = _pick_size_param("i_min", "domain_i_min", "imin")
                 upper_base = _pick_size_param(
@@ -906,12 +908,12 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                 )
                 if upper_base is None:
                     return None
-                lateral = _lateral_size()
-                lower = _offset_add(
-                    ir.OffsetLiteral(value=0) if lower_base is None else lower_base,
-                    copy.deepcopy(lateral),
-                )
-                upper = _offset_sub(upper_base, lateral)
+                lower = ir.OffsetLiteral(value=0) if lower_base is None else copy.deepcopy(lower_base)
+                upper = copy.deepcopy(upper_base)
+                if use_lateral:
+                    lateral = _lateral_size()
+                    lower = _offset_add(lower, copy.deepcopy(lateral))
+                    upper = _offset_sub(upper, lateral)
                 return lower, upper
             if axis_name == "JDim":
                 lower_base = _pick_size_param("j_min", "domain_j_min", "jmin")
@@ -920,12 +922,12 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                 )
                 if upper_base is None:
                     return None
-                lateral = _lateral_size()
-                lower = _offset_add(
-                    ir.OffsetLiteral(value=0) if lower_base is None else lower_base,
-                    copy.deepcopy(lateral),
-                )
-                upper = _offset_sub(upper_base, lateral)
+                lower = ir.OffsetLiteral(value=0) if lower_base is None else copy.deepcopy(lower_base)
+                upper = copy.deepcopy(upper_base)
+                if use_lateral:
+                    lateral = _lateral_size()
+                    lower = _offset_add(lower, copy.deepcopy(lateral))
+                    upper = _offset_sub(upper, lateral)
                 return lower, upper
             if axis_name == "Kolor":
                 return ir.OffsetLiteral(value=0), ir.OffsetLiteral(value=3)
@@ -942,8 +944,9 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
             axis_name: str,
             *,
             extra_halo: int = 0,
+            use_lateral: bool = True,
         ) -> tuple[ir.Expr, ir.Expr] | None:
-            bounds = _cartesian_axis_bounds(axis_name)
+            bounds = _cartesian_axis_bounds(axis_name, use_lateral=use_lateral)
             if bounds is None:
                 return None
             lo, hi = bounds
@@ -970,10 +973,14 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
             )
 
         def _structured_entity_condition(
-            entity_name: str, *, extra_halo: int = 0
+            entity_name: str, *, extra_halo: int = 0, use_lateral: bool = True
         ) -> ir.Expr | None:
-            idim_bounds = _entity_cartesian_bounds(entity_name, "IDim", extra_halo=extra_halo)
-            jdim_bounds = _entity_cartesian_bounds(entity_name, "JDim", extra_halo=extra_halo)
+            idim_bounds = _entity_cartesian_bounds(
+                entity_name, "IDim", extra_halo=extra_halo, use_lateral=use_lateral
+            )
+            jdim_bounds = _entity_cartesian_bounds(
+                entity_name, "JDim", extra_halo=extra_halo, use_lateral=use_lateral
+            )
             kolor_bounds = _entity_kolor_bounds(entity_name)
             if idim_bounds is None or jdim_bounds is None or kolor_bounds is None:
                 return None
@@ -1034,6 +1041,15 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                 return str(expr.id)
             return None
 
+        def _expr_contains_symbol(expr: ir.Expr, symbol_ids: set[str]) -> bool:
+            if isinstance(expr, ir.SymRef):
+                return str(expr.id) in symbol_ids
+            if isinstance(expr, ir.FunCall):
+                if _expr_contains_symbol(expr.fun, symbol_ids):
+                    return True
+                return any(_expr_contains_symbol(arg, symbol_ids) for arg in expr.args)
+            return False
+
         # Remap scalar comparisons against unstructured horizontal axes (Edge/Vertex/Cell)
         # to structured IDim/JDim conditions so concat_where predicates stay structured.
         if (
@@ -1057,17 +1073,43 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                 op_name = str(new_node.fun.id)
                 threshold_expr = rhs if axis_side == "lhs" else lhs
                 threshold_id = _expr_symbol_id(threshold_expr)
+                is_interior_threshold = threshold_id == "interior_idx" or _expr_contains_symbol(
+                    threshold_expr, {"interior_idx"}
+                )
+                is_halo_threshold = threshold_id == "halo_idx" or _expr_contains_symbol(
+                    threshold_expr, {"halo_idx"}
+                )
+                is_start_2nd_nudge_threshold = (
+                    threshold_id == "start_2nd_nudge_line_idx_e"
+                    or _expr_contains_symbol(threshold_expr, {"start_2nd_nudge_line_idx_e"})
+                )
 
                 extra_halo = 0
-                if entity_axis == "Edge" and threshold_id == "start_2nd_nudge_line_idx_e":
+                use_lateral = True
+                if entity_axis == "Edge" and is_start_2nd_nudge_threshold:
                     # Equivalent to translator edge remap with boundary_level=10.
                     extra_halo = 3
+                elif entity_axis == "Cell" and is_interior_threshold:
+                    # Cell interior starts one shell deeper than edge/vertex mapping.
+                    extra_halo = 1
+                elif entity_axis == "Cell" and is_halo_threshold:
+                    # `halo_idx` is the upper Cell bound; keep full Cell coverage.
+                    use_lateral = False
 
-                interior_cond = _structured_entity_condition(entity_axis, extra_halo=extra_halo)
+                interior_cond = _structured_entity_condition(
+                    entity_axis, extra_halo=extra_halo, use_lateral=use_lateral
+                )
                 if interior_cond is not None:
-                    is_positive = (
-                        axis_side == "lhs" and op_name in {"greater_equal", "greater"}
-                    ) or (axis_side == "rhs" and op_name in {"less_equal", "less"})
+                    if is_halo_threshold:
+                        is_positive = (
+                            axis_side == "lhs" and op_name in {"less_equal", "less"}
+                        ) or (axis_side == "rhs" and op_name in {"greater_equal", "greater"})
+                    elif is_interior_threshold or is_start_2nd_nudge_threshold:
+                        is_positive = (
+                            axis_side == "lhs" and op_name in {"greater_equal", "greater"}
+                        ) or (axis_side == "rhs" and op_name in {"less_equal", "less"})
+                    else:
+                        return new_node
                     return interior_cond if is_positive else im.not_(interior_cond)
 
         if cpm.is_call_to(new_node, "get_domain_range") and len(new_node.args) == 2:

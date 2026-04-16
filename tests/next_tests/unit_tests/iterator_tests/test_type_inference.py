@@ -107,6 +107,10 @@ def expression_test_cases():
             ts.DomainType(dims=[IDim]),
         ),
         (
+            im.not_(im.call("cartesian_domain")(im.named_range(itir.AxisLiteral(value="IDim"), 0, 1))),
+            ts.DomainType(dims=[IDim]),
+        ),
+        (
             im.call("unstructured_domain")(
                 im.named_range(
                     itir.AxisLiteral(value="Vertex", kind=common.DimensionKind.HORIZONTAL), 0, 1
