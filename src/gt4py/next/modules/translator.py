@@ -7,6 +7,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from dataclasses import dataclass
+from pathlib import Path
+import threading
 from typing import Any, List, cast
 
 import numpy as np
@@ -88,6 +90,10 @@ def _parse_sparse_remap_table() -> dict[str, dict[int, dict[int, tuple[int, int,
 _SPARSE_REMAP_TABLE: dict[str, dict[int, dict[int, tuple[int, int, int]]]] = (
     _parse_sparse_remap_table()
 )
+
+
+_STRUCTURED_REMAP_SIZES_CACHE: dict[tuple[str, int, int, int], "StructuredRemapSizes"] = {}
+_STRUCTURED_REMAP_SIZES_CACHE_LOCK = threading.Lock()
 _CENTER_ELEMENT_BY_PREFIX: dict[str, str] = {"E": "Edge", "C": "Cell", "V": "Vertex"}
 
 
@@ -325,8 +331,7 @@ def infer_structured_remap_sizes(
     )
 
 
-def load_structured_remap_sizes_from_netcdf(nc_path: str, lateral: int = 0) -> StructuredRemapSizes:
-
+def _load_structured_remap_sizes_uncached(nc_path: str, lateral: int) -> StructuredRemapSizes:
     with xr.open_dataset(nc_path) as ds:
         if "domain_length" not in ds.attrs or "mean_edge_length" not in ds.attrs:
             raise KeyError(
@@ -335,15 +340,29 @@ def load_structured_remap_sizes_from_netcdf(nc_path: str, lateral: int = 0) -> S
         if "cell" not in ds.sizes:
             raise KeyError("Dataset must contain dimension 'cell'.")
 
-        sizes = infer_structured_remap_sizes(
+        return infer_structured_remap_sizes(
             domain_length=float(ds.attrs["domain_length"]),
             mean_edge_length=float(ds.attrs["mean_edge_length"]),
             n_cells=int(ds.sizes["cell"]),
             lateral=lateral,
         )
-        # print(f"Inferred structured remap sizes from {nc_path}: {sizes}")
 
-    return sizes
+
+def load_structured_remap_sizes_from_netcdf(nc_path: str, lateral: int = 0) -> StructuredRemapSizes:
+    # Cache by resolved path + file identity + lateral so repeated compilations
+    # do not repeatedly open/read the same NetCDF metadata.
+    resolved_path = Path(nc_path).expanduser().resolve()
+    stat = resolved_path.stat()
+    cache_key = (str(resolved_path), int(stat.st_mtime_ns), int(stat.st_size), int(lateral))
+
+    with _STRUCTURED_REMAP_SIZES_CACHE_LOCK:
+        cached = _STRUCTURED_REMAP_SIZES_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
+        sizes = _load_structured_remap_sizes_uncached(str(resolved_path), int(lateral))
+        _STRUCTURED_REMAP_SIZES_CACHE[cache_key] = sizes
+        return sizes
 
 
 def build_index_map_for_ragged_lonlat_e2v(

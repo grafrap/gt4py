@@ -139,6 +139,37 @@ class GTFNCodegen(codegen.TemplatedGenerator):
         else:
             return f"::gridtools::tuple({','.join(values)})"
 
+    def _clamp_non_negative_extent(self, expr: gtfn_ir.Expr) -> gtfn_ir.Expr:
+        return gtfn_ir.TernaryExpr(
+            cond=gtfn_ir.BinaryExpr(
+                op=">",
+                lhs=expr,
+                rhs=gtfn_ir.Literal(value="0", type="int32_t"),
+            ),
+            true_expr=expr,
+            false_expr=gtfn_ir.Literal(value="0", type="int32_t"),
+        )
+
+    def _clamp_tagged_sizes(self, tagged_sizes: gtfn_ir.TaggedValues) -> gtfn_ir.TaggedValues:
+        return gtfn_ir.TaggedValues(
+            tags=tagged_sizes.tags,
+            values=[self._clamp_non_negative_extent(size) for size in tagged_sizes.values],
+        )
+
+    def visit_CartesianDomain(self, node: gtfn_ir.CartesianDomain, **kwargs: Any) -> str:
+        return self.generic_visit(
+            node,
+            tagged_sizes=self.visit(self._clamp_tagged_sizes(node.tagged_sizes), **kwargs),
+            **kwargs,
+        )
+
+    def visit_UnstructuredDomain(self, node: gtfn_ir.UnstructuredDomain, **kwargs: Any) -> str:
+        return self.generic_visit(
+            node,
+            tagged_sizes=self.visit(self._clamp_tagged_sizes(node.tagged_sizes), **kwargs),
+            **kwargs,
+        )
+
     CartesianDomain = as_fmt("gtfn::cartesian_domain({tagged_sizes}, {tagged_offsets})")
     UnstructuredDomain = as_mako(
         "gtfn::unstructured_domain(${tagged_sizes}, ${tagged_offsets}, connectivities__...)"
@@ -267,9 +298,13 @@ class GTFNCodegen(codegen.TemplatedGenerator):
             gtfn_ir.UnaryExpr(op="-", expr=offset) for offset in node.domain.tagged_offsets.values
         ]
 
+        # Empty domains can produce negative extents (upper - lower). Clamp to zero so
+        # temporary allocations stay valid and do not wrap to huge unsigned sizes.
+        clamped_sizes = self._clamp_tagged_sizes(node.domain.tagged_sizes)
+
         return self.generic_visit(
             node,
-            tmp_sizes=self.visit(node.domain.tagged_sizes, **kwargs),
+            tmp_sizes=self.visit(clamped_sizes, **kwargs),
             shifts=self.visit(gtfn_ir.TaggedValues(tags=tags, values=origins), **kwargs),
             **kwargs,
         )
