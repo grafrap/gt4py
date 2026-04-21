@@ -8,6 +8,7 @@
 
 import functools
 import os
+from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
@@ -431,7 +432,7 @@ def get_global_grid_mapping(e2v_override: Any = None) -> tuple[IndexMap, Structu
     with xr.open_dataset(mesh_nc) as ds:
         e2v = _read_e2v(ds)
         lonlat = _read_lonlat(ds)
-        lateral = int(os.environ.get("GT4PY_TRANSLATOR_LATERAL", "1"))
+        lateral = int(os.environ.get("GT4PY_TRANSLATOR_LATERAL", "0"))
         remap_sizes = load_structured_remap_sizes_from_netcdf(mesh_nc, lateral=lateral)
 
     # print(f"lateral={remap_sizes.lateral}, max_i={remap_sizes.max_i}, max_j={remap_sizes.max_j}")
@@ -517,28 +518,16 @@ class GenericStructuredWrapper:
         self.e2c2e_conn_raw: np.ndarray | None = self._raw_conn.get("E2C2E")
         self.e2c2e_conn: np.ndarray | None = self._sanitized_conn.get("E2C2E")
         self.structured_offset_provider = self._build_structured_offset_provider(offset_provider)
-
-        edge_lateral_flag = os.environ.get("GT4PY_TRANSLATOR_EDGE_LATERAL")
-        if edge_lateral_flag is None:
-            edge_lateral_flag = os.environ.get("GT4PY_TRANSLATOR_USE_EDGE_LATERAL")
-        use_edge_lateral = isinstance(
-            edge_lateral_flag, str
-        ) and edge_lateral_flag.strip().lower() in {"1", "true", "yes", "on"}
-        print("use edge lateral is: ", edge_lateral_flag)
+        mesh_path = os.environ.get(
+            "GT4PY_TRANSLATOR_MESH",
+            "/home/raphael/Documents/Studium/Msc_thesis/grid-generator/parallelogram_grid.nc",
+        )
 
         symbolic_domain_sizes = {
             "max_i": int(remap_sizes.max_i),
             "max_j": int(remap_sizes.max_j),
+            "mesh_path": str(Path(mesh_path).expanduser().resolve()),
         }
-        if use_edge_lateral:
-            lateral_edge = int(remap_sizes.lateral)
-            lateral_bounds = (lateral_edge) // 2
-            symbolic_domain_sizes["lateral_edge"] = lateral_edge
-            symbolic_domain_sizes["lateral_bounds"] = lateral_bounds
-            # Compatibility for transforms that still read `lateral`.
-            symbolic_domain_sizes["lateral"] = lateral_bounds
-        else:
-            symbolic_domain_sizes["lateral"] = int(remap_sizes.lateral)
 
         print(f"[structured-debug] symbolic_domain_sizes: {symbolic_domain_sizes}")
         # 2. Instantiate the structured backend dynamically using the remap_sizes
@@ -920,6 +909,12 @@ class GenericStructuredWrapper:
     def __call__(self, **kwargs: Any) -> None:
         structured_kwargs: dict[str, Any] = {}
         packed_fields: list[tuple[gtx.Field, gtx.Field]] = []
+
+        horizontal_start_value = kwargs.get("horizontal_start")
+        if isinstance(horizontal_start_value, np.generic):
+            horizontal_start_value = horizontal_start_value.item()
+        if isinstance(horizontal_start_value, (int, np.integer)):
+            os.environ["GT4PY_TRANSLATOR_HORIZONTAL_START"] = str(int(horizontal_start_value))
 
         for arg_name, arg_val in kwargs.items():
             if arg_name == "offset_provider":

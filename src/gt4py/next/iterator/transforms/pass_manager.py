@@ -39,6 +39,7 @@ from gt4py.next.iterator.transforms.inline_lambdas import InlineLambdas
 from gt4py.next.iterator.transforms.inline_scalar import InlineScalar
 from gt4py.next.iterator.transforms.merge_let import MergeLet
 from gt4py.next.iterator.transforms.normalize_shifts import NormalizeShifts
+from gt4py.next.iterator.transforms.simplify_domain_bounds import SimplifyDomainBounds
 from gt4py.next.iterator.transforms.unroll_reduce import UnrollReduce
 from gt4py.next.iterator.type_system.inference import infer
 
@@ -298,7 +299,8 @@ def apply_common_transforms(
     assert common.is_offset_provider(offset_provider)
 
     offset_provider_type = common.offset_provider_to_type(offset_provider)
-    print_ir = True
+    enable_simplify_domain_bounds = bool(os.environ.get("GT4PY_ENABLE_SIMPLIFY_DOMAIN_BOUNDS"))
+    print_ir = True #bool(os.environ.get("GT4PY_PRINT_IR"))
     _print_ir_block("=== FINAL GTIR HANDED TO GTFN BACKEND ===", ir, enabled=print_ir)
 
     symbolic_domain_sizes = _process_symbolic_domains_option(
@@ -346,7 +348,12 @@ def apply_common_transforms(
         _print_ir_block("=== GTIR AFTER CARTESIAN UNROLLING ===", ir, enabled=print_ir)
 
     ir = infer_domain_ops.InferDomainOps.apply(ir)
-    ir = concat_where.canonicalize_domain_argument(ir)
+    skip_canonicalize = (
+        os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1"
+        and os.environ.get("GT4PY_STRUCTURED_SKIP_CANONICALIZE_DOMAIN", "0") == "1"
+    )
+    if not skip_canonicalize:
+        ir = concat_where.canonicalize_domain_argument(ir)
     _print_ir_block("=== GTIR AFTER CANONICALIZING DOMAIN ARGUMENTS ===", ir, enabled=print_ir)
     # if cartesian_reduce_axis_ranges is None:
     #     cartesian_reduce_axis_ranges = {common.Dimension("Kolor"): (0, 3)}
@@ -360,11 +367,15 @@ def apply_common_transforms(
     )
     ir = prune_empty_concat_where.prune_empty_concat_where(ir)
     ir = remove_broadcast.RemoveBroadcast.apply(ir)
-    ir = cast(itir.Program, ConstantFolding.apply(ir))
+    ir = ConstantFolding.apply(ir)
+    if enable_simplify_domain_bounds:
+        ir = SimplifyDomainBounds.apply(ir)
     _print_ir_block(
         "=== GTIR AFTER COMMON TRANSFORMS BEFORE INFER_DOMAIN ===", ir, enabled=print_ir
     )
     ir = concat_where.transform_to_as_fieldop(ir)
+    if enable_simplify_domain_bounds:
+        ir = SimplifyDomainBounds.apply(ir)
     _print_ir_block("=== GTIR AFTER TRANSFORM AS FIELDOP ===", ir, enabled=print_ir)
     for _ in range(10):
         inlined = ir

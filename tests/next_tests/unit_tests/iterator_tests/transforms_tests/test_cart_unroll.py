@@ -6,9 +6,13 @@
 # Please, refer to the LICENSE file in the root directory.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import os
+from pathlib import Path
+
 import pytest
 import numpy as np
 
+import gt4py.next.iterator.transforms.cart_unroll as cart_unroll_module
 from gt4py.next import common
 from gt4py.eve import SymbolRef
 from gt4py.next.iterator import ir
@@ -1178,7 +1182,7 @@ def test_edge_domain_remap_with_lateral_edge_has_expected_kolor_specific_bounds(
     assert len(actual.body) == 1
     assert isinstance(actual.body[0], ir.SetAt)
 
-    # Edge axis must be remapped to IDim/JDim/Kolor with floor(lateral_edge/2) halo.
+    # Edge axis remap no longer uses lateral/lateral_edge and keeps full max_i/max_j bounds.
     remapped_domain = actual.body[0].domain
     assert cpm.is_call_to(remapped_domain, "cartesian_domain")
     remapped_ranges: dict[str, tuple[int, int]] = {}
@@ -1193,11 +1197,7 @@ def test_edge_domain_remap_with_lateral_edge_has_expected_kolor_specific_bounds(
         assert isinstance(hi, ir.OffsetLiteral)
         remapped_ranges[axis] = (int(lo.value), int(hi.value))
 
-    assert remapped_ranges == {
-        "IDim": (4, 36),
-        "JDim": (4, 36),
-        "Kolor": (0, 3),
-    }
+    assert remapped_ranges == {"IDim": (0, 40), "JDim": (0, 40), "Kolor": (0, 3)}
 
     assert cpm.is_call_to(actual.body[0].expr, "concat_where")
 
@@ -1249,7 +1249,12 @@ def test_edge_domain_remap_with_lateral_edge_has_expected_kolor_specific_bounds(
             }
         work = work.args[2]
 
-    assert by_kolor == expected_by_kolor
+    expected = {
+        (0, 1): {"IDim": (0, 40), "JDim": (0, 39)},
+        (1, 2): {"IDim": (0, 39), "JDim": (0, 40)},
+        (2, 3): {"IDim": (0, 39), "JDim": (0, 39)},
+    }
+    assert by_kolor == expected
 
 
 def test_cartesian_remapped_type_includes_cell_fields():
@@ -1562,6 +1567,198 @@ def test_unstructured_domain_inlines_i_j_min_max_when_available():
     assert cpm.is_call_to(actual.body[0].expr, "concat_where")
 
 
+def _resolve_test_mesh_path() -> Path | None:
+    mesh_env = os.environ.get("GT4PY_TRANSLATOR_MESH")
+    if mesh_env:
+        mesh = Path(mesh_env).expanduser().resolve()
+        if mesh.is_file():
+            return mesh
+
+    repo_root = Path(__file__).resolve().parents[5]
+    candidates = (
+        repo_root / "../grid-generator/parallelogram_grid.nc",
+        repo_root / "grid-generator/parallelogram_grid.nc",
+        Path.cwd() / "grid-generator/parallelogram_grid.nc",
+        Path.cwd() / "parallelogram_grid.nc",
+    )
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved.is_file():
+            return resolved
+    return None
+
+
+@pytest.mark.parametrize(
+    ("axis", "kolor_hi"),
+    [("Edge", 3), ("Vertex", 1), ("Cell", 2)],
+)
+def test_unstructured_domain_uses_horizontal_start_global_clipping_from_real_mesh(axis, kolor_hi):
+    mesh_path = _resolve_test_mesh_path()
+    if mesh_path is None:
+        pytest.skip("No parallelogram mesh found for mesh-backed horizontal_start test.")
+
+    _, edge_map, vertex_map, cell_map = cart_unroll_module._load_entity_ijk_maps(str(mesh_path))
+
+    mapping = {"Edge": edge_map, "Vertex": vertex_map, "Cell": cell_map}[axis]
+    valid_count = sum(1 for i, j, _ in mapping if i >= 0 and j >= 0)
+    assert valid_count > 16
+
+    start = 5
+    end = min(start + 11, len(mapping))
+    assert end > start
+
+    start_i = None
+    start_j = None
+    for i, j, _ in mapping[start:]:
+        if i < 0 or j < 0:
+            continue
+        start_i = i
+        start_j = j
+        break
+
+    assert start_i is not None and start_j is not None
+    max_i = max(i for i, j, _ in mapping if i >= 0 and j >= 0) + 1
+    max_j = max(j for i, j, _ in mapping if i >= 0 and j >= 0) + 1
+
+    clip_i = int(start_i)
+    clip_j = int(start_j)
+    if axis == "Edge":
+        expected_bounds = {
+            "IDim": (0, max_i),
+            "JDim": (0, max_j),
+            "Kolor": (0, kolor_hi),
+        }
+    else:
+        expected_bounds = {
+            "IDim": (clip_i, max_i - clip_i - (1 if axis == "Cell" else 0)),
+            "JDim": (clip_j, max_j - clip_j - (1 if axis == "Cell" else 0)),
+            "Kolor": (0, kolor_hi),
+        }
+
+    domain_expr = im.call("unstructured_domain")(
+        im.call("named_range")(
+            ir.AxisLiteral(value=axis),
+            ir.OffsetLiteral(value=start),
+            ir.OffsetLiteral(value=end),
+        )
+    )
+
+    testee = ir.Program(
+        id="testee",
+        function_definitions=[],
+        params=[im.sym("inp"), im.sym("out")],
+        declarations=[],
+        body=[ir.SetAt(expr=im.ref("inp"), domain=domain_expr, target=im.ref("out"))],
+    )
+
+    actual = CartUnroll.apply(
+        testee,
+        symbolic_domain_sizes={
+            "mesh_path": str(mesh_path),
+            "i_min": 0,
+            "i_max": max_i,
+            "j_min": 0,
+            "j_max": max_j,
+            "lateral": 123,
+            "lateral_edge": 123,
+        },
+    )
+    assert isinstance(actual, ir.Program)
+    assert len(actual.body) == 1
+    assert isinstance(actual.body[0], ir.SetAt)
+    remapped_domain = actual.body[0].domain
+    assert cpm.is_call_to(remapped_domain, "cartesian_domain")
+
+    remapped_bounds: dict[str, tuple[int, int]] = {}
+    for nr in remapped_domain.args:
+        if not (cpm.is_call_to(nr, "named_range") and len(nr.args) == 3):
+            continue
+        axis_name = nr.args[0].value if hasattr(nr.args[0], "value") else None
+        if axis_name is None:
+            continue
+        assert isinstance(nr.args[1], ir.OffsetLiteral)
+        assert isinstance(nr.args[2], ir.OffsetLiteral)
+        remapped_bounds[axis_name] = (int(nr.args[1].value), int(nr.args[2].value))
+
+    assert remapped_bounds == expected_bounds
+    if axis == "Edge":
+        assert cpm.is_call_to(actual.body[0].expr, "concat_where")
+
+
+def test_edge_interior_comparison_uses_horizontal_start_global_clipping_from_real_mesh():
+    mesh_path = _resolve_test_mesh_path()
+    if mesh_path is None:
+        pytest.skip("No parallelogram mesh found for mesh-backed comparison test.")
+
+    _, edge_map, _, _ = cart_unroll_module._load_entity_ijk_maps(str(mesh_path))
+    start = 7
+    max_i = max(i for i, j, _ in edge_map if i >= 0 and j >= 0) + 1
+    max_j = max(j for i, j, _ in edge_map if i >= 0 and j >= 0) + 1
+
+    start_i = None
+    start_j = None
+    for i, j, _ in edge_map[start:]:
+        if i < 0 or j < 0:
+            continue
+        start_i = i
+        start_j = j
+        break
+
+    assert start_i is not None and start_j is not None
+    testee = im.call("greater_equal")(ir.AxisLiteral(value="Edge"), im.ref("interior_idx"))
+    actual = NormalizeShifts().visit(
+        CartUnroll.apply(
+            testee,
+            symbolic_domain_sizes={
+                "mesh_path": str(mesh_path),
+                "horizontal_start": start,
+                # Deliberately conflicting fallback values.
+                "i_min": 0,
+                "i_max": max_i,
+                "j_min": 0,
+                "j_max": max_j,
+                "lateral": 77,
+                "lateral_edge": 77,
+            },
+        )
+    )
+
+    def _collect_axis_domains(node: ir.Expr) -> dict[str, tuple[int, int]]:
+        out: dict[str, tuple[int, int]] = {}
+
+        def _walk(expr: ir.Expr) -> None:
+            if cpm.is_call_to(expr, "cartesian_domain"):
+                for nr in expr.args:
+                    if not (cpm.is_call_to(nr, "named_range") and len(nr.args) == 3):
+                        continue
+                    axis_arg = nr.args[0]
+                    axis_name = (
+                        axis_arg.value
+                        if isinstance(axis_arg, ir.AxisLiteral)
+                        else axis_arg.value if isinstance(axis_arg, common.Dimension) else None
+                    )
+                    if axis_name is None:
+                        continue
+                    lo = nr.args[1]
+                    hi = nr.args[2]
+                    if isinstance(lo, ir.OffsetLiteral) and isinstance(hi, ir.OffsetLiteral):
+                        out[axis_name] = (int(lo.value), int(hi.value))
+            if isinstance(expr, ir.FunCall):
+                _walk(expr.fun)
+                for arg in expr.args:
+                    _walk(arg)
+
+        _walk(node)
+        return out
+
+    assert cpm.is_call_to(actual, ("and_", "or_", "cartesian_domain"))
+    bounds = _collect_axis_domains(actual)
+    assert "IDim" in bounds and "JDim" in bounds
+    assert 0 <= bounds["IDim"][0] < bounds["IDim"][1] <= max_i
+    assert 0 <= bounds["JDim"][0] < bounds["JDim"][1] <= max_j
+    assert "77" not in str(actual)
+
+
 def test_unstructured_edge_and_k_domain_rewrites_edge_and_preserves_k_range():
     domain_expr = im.call("unstructured_domain")(
         im.call("named_range")(
@@ -1791,7 +1988,7 @@ def test_lateral_edge_even_maps_to_domain_lateral_bounds_via_get_domain_range():
         },
     )
 
-    expected = im.make_tuple(ir.OffsetLiteral(value=4), ir.OffsetLiteral(value=36))
+    expected = im.make_tuple(ir.OffsetLiteral(value=0), ir.OffsetLiteral(value=40))
     assert actual == expected
 
 
@@ -1810,6 +2007,5 @@ def test_lateral_edge_odd_maps_to_domain_lateral_bounds_via_get_domain_range():
         },
     )
 
-    # (lateral_edge) // 2 => (9) // 2 = 4
-    expected = im.make_tuple(ir.OffsetLiteral(value=4), ir.OffsetLiteral(value=36))
+    expected = im.make_tuple(ir.OffsetLiteral(value=0), ir.OffsetLiteral(value=40))
     assert actual == expected

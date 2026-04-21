@@ -6,6 +6,8 @@
 # Please, refer to the LICENSE file in the root directory.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import copy
+import os
 from typing import Optional
 
 from gt4py.eve import PreserveLocationVisitor
@@ -77,6 +79,49 @@ class _CanonicalizeDomainArgument(
             # `concat_where(d1 & d2, a, b)` -> concat_where(d1, concat_where(d2, a, b), b)
             if cpm.is_call_to(cond_expr, "and_"):
                 conds = cond_expr.args
+                if os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1":
+                    merged_named_ranges: list[itir.Expr] = []
+                    seen_axes: set[str] = set()
+                    merged_grid_fun: str | None = None
+                    can_merge = True
+                    for cond in conds:
+                        if not cpm.is_call_to(cond, ("cartesian_domain", "unstructured_domain")):
+                            can_merge = False
+                            break
+
+                        grid_fun = str(cond.fun.id)
+                        if merged_grid_fun is None:
+                            merged_grid_fun = grid_fun
+                        elif merged_grid_fun != grid_fun:
+                            can_merge = False
+                            break
+
+                        for named_range in cond.args:
+                            if not (
+                                cpm.is_call_to(named_range, "named_range")
+                                and len(named_range.args) == 3
+                            ):
+                                can_merge = False
+                                break
+                            axis_name = getattr(named_range.args[0], "value", None)
+                            if not isinstance(axis_name, str) or axis_name in seen_axes:
+                                can_merge = False
+                                break
+                            seen_axes.add(axis_name)
+                            merged_named_ranges.append(copy.deepcopy(named_range))
+                        if not can_merge:
+                            break
+
+                    # Structured edge remap emits conjunctions of axis-specific finite domains.
+                    # Merge them directly back into one multi-axis domain to avoid nested
+                    # concat_where expansion blow-up.
+                    if can_merge and merged_grid_fun and len(merged_named_ranges) >= 2:
+                        axis_order = {"IDim": 0, "JDim": 1, "K": 2, "Kolor": 3}
+                        merged_named_ranges.sort(
+                            key=lambda nr: axis_order.get(getattr(nr.args[0], "value", ""), 100)
+                        )
+                        merged_domain = im.call(merged_grid_fun)(*merged_named_ranges)
+                        return self.fp_transform(im.concat_where(merged_domain, field_a, field_b))
                 return im.let(("__cwcda_field_a", field_a), ("__cwcda_field_b", field_b))(
                     self.fp_transform(
                         im.concat_where(
@@ -118,10 +163,10 @@ class _CanonicalizeDomainArgument(
                             im.concat_where(im.call("or_")(*new_domains), field_b, field_a)
                         )
                 else:
-                    # TODO(tehrengruber): Implement. Note that this case can not be triggered by
-                    #  the frontend yet since domains can only be created by expressions like
-                    #  `IDim < 10`.
-                    raise NotImplementedError()
+                    # Keep multi-axis domains unchanged. Expanding them into nested boolean
+                    # domain expressions can cause severe IR/compile-time growth in structured
+                    # remap workloads.
+                    return None
 
         return None
 

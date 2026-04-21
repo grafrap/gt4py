@@ -38,7 +38,7 @@ def _set_node_type(node: itir.Node, type_: ts.TypeSpec) -> None:
         if not type_info.is_compatible_type(node.type, type_):
             if os.environ.get(
                 "USE_STRUCTURED_BACKEND", "0"
-            ) == "1" and _is_structured_remap_compatibility_case(node.type, type_):
+            ) == "1" and _is_structured_remap_compatibility_case(node.type, type_, node=node):
                 type_ = node.type
             else:
                 raise AssertionError(
@@ -55,7 +55,9 @@ def _set_node_type(node: itir.Node, type_: ts.TypeSpec) -> None:
     node.type = type_
 
 
-def _is_structured_remap_compatibility_case(existing: ts.TypeSpec, inferred: ts.TypeSpec) -> bool:
+def _is_structured_remap_compatibility_case(
+    existing: ts.TypeSpec, inferred: ts.TypeSpec, *, node: itir.Node | None = None
+) -> bool:
     if isinstance(existing, ts.FieldType) and isinstance(inferred, ts.FieldType):
         if existing.dtype != inferred.dtype:
             return False
@@ -70,6 +72,16 @@ def _is_structured_remap_compatibility_case(existing: ts.TypeSpec, inferred: ts.
             return False
         if existing.position_dims == "unknown" or inferred.position_dims == "unknown":
             return False
+
+        # Structured concat_where rewrites may temporarily infer narrower defined dimensions
+        # for tuple-collapse-generated position symbols.
+        if tuple(existing.position_dims) == tuple(inferred.position_dims):
+            if isinstance(node, (itir.Sym, itir.SymRef)) and "__tcw_pos" in str(node.id):
+                existing_defined = {dim.value for dim in existing.defined_dims}
+                inferred_defined = {dim.value for dim in inferred.defined_dims}
+                if inferred_defined.issubset(existing_defined):
+                    return True
+
         if len(existing.position_dims) != len(inferred.position_dims) + 1:
             return False
         if existing.position_dims[0].value not in {"Edge", "Cell", "Vertex"}:
@@ -436,7 +448,9 @@ class ITIRTypeInference(eve.NodeTranslator):
                     if not type_info.is_compatible_type(node.type, result):
                         if os.environ.get(
                             "USE_STRUCTURED_BACKEND", "0"
-                        ) == "1" and _is_structured_remap_compatibility_case(node.type, result):
+                        ) == "1" and _is_structured_remap_compatibility_case(
+                            node.type, result, node=node
+                        ):
                             result = node.type
                         else:
                             raise TypeError(

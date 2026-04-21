@@ -214,6 +214,12 @@ class GTFNTranslationStep(
 
         static_arg_descriptors = argument_descriptor_contexts.get(arguments.StaticArg)
         if static_arg_descriptors is not None:
+            for name, descriptor in static_arg_descriptors.items():
+                if not isinstance(descriptor, arguments.StaticArg):
+                    continue
+                if isinstance(descriptor.value, (int, np.integer)):
+                    resolved[name] = int(descriptor.value)
+
             for name in (
                 "max_i",
                 "max_j",
@@ -221,9 +227,6 @@ class GTFNTranslationStep(
                 "domain_max_j",
                 "nx",
                 "ny",
-                "lateral",
-                "lateral_bounds",
-                "lateral_edge",
                 "edge_phase_size",
             ):
                 descriptor = static_arg_descriptors.get(name)
@@ -248,8 +251,6 @@ class GTFNTranslationStep(
             )
         ):
             resolved.update(self._resolve_symbolic_domain_sizes_from_mesh_metadata())
-
-        self._route_edge_lateral_symbolic_sizes(program, resolved)
 
         return resolved or None
 
@@ -307,15 +308,15 @@ class GTFNTranslationStep(
             resolved["lateral"] = int(resolved["lateral_bounds"])
 
     @staticmethod
-    def _resolve_symbolic_domain_sizes_from_mesh_metadata() -> dict[str, int]:
+    def _resolve_symbolic_domain_sizes_from_mesh_metadata() -> dict[str, Any]:
         mesh_path = os.environ.get("GT4PY_TRANSLATOR_MESH")
         lateral_env = os.environ.get("GT4PY_TRANSLATOR_LATERAL")
         if lateral_env is None:
-            lateral_env = os.environ.get("LATERAL_BOUNDARY_LEVEL", "1")
+            lateral_env = os.environ.get("LATERAL_BOUNDARY_LEVEL", "0")
         try:
             lateral = int(lateral_env)
         except ValueError:
-            lateral = 1
+            lateral = 0
         lateral = max(0, lateral)
 
         if not mesh_path:
@@ -353,7 +354,7 @@ class GTFNTranslationStep(
             "domain_max_j": int(sizes.max_j),
             "nx": int(sizes.nx),
             "ny": int(sizes.ny),
-            "lateral": int(sizes.lateral),
+            "mesh_path": str(Path(mesh_path).expanduser().resolve()),
         }
 
     @staticmethod

@@ -10,6 +10,9 @@ import copy
 import dataclasses
 import math
 import numbers
+import os
+from pathlib import Path
+import threading
 from typing import cast
 
 import gt4py.next.iterator.transforms.map_dict as map_dict_module
@@ -23,6 +26,371 @@ from gt4py.next.type_system import type_specifications as ts
 
 # You can keep map_dict as a local alias so you don't have to change the rest of your code
 map_dict = map_dict_module.map_dict
+
+
+_ENTITY_IJK_MAPS_CACHE_LOCK = threading.Lock()
+_ENTITY_IJK_MAPS_CACHE: dict[
+    tuple[str, int, int], tuple[tuple[tuple[int, int, int], ...], tuple[tuple[int, int, int], ...], tuple[tuple[int, int, int], ...]]
+] = {}
+_ENTITY_RANGE_BOUNDS_CACHE: dict[tuple[tuple[str, int, int], str, int, int], tuple[int, int, int, int]] = {}
+_EDGE_ACTIVE_RECTS_CACHE: dict[
+    tuple[tuple[str, int, int], int], dict[int, tuple[tuple[int, int, int, int], ...]]
+] = {}
+
+
+def _use_exact_edge_active_set_for_setat() -> bool:
+    return os.environ.get("GT4PY_TRANSLATOR_EXACT_EDGE_ACTIVE_SET_SETAT", "1") == "1"
+
+
+def _use_exact_edge_active_set_for_predicates() -> bool:
+    # Predicate remapping is the most IR-expensive use of exact edge active sets.
+    return os.environ.get("GT4PY_TRANSLATOR_EXACT_EDGE_ACTIVE_SET_PREDICATES", "1") == "1"
+
+
+def _edge_rect_coalesce_threshold() -> int:
+    raw = os.environ.get("GT4PY_TRANSLATOR_EDGE_RECT_COALESCE_THRESHOLD", "16")
+    try:
+        return max(int(raw), 0)
+    except ValueError:
+        return 16
+
+
+def _coalesce_rects_by_kolor(
+    rects_by_kolor: dict[int, tuple[tuple[int, int, int, int], ...]]
+) -> dict[int, tuple[tuple[int, int, int, int], ...]]:
+    threshold = _edge_rect_coalesce_threshold()
+    if threshold <= 0:
+        return rects_by_kolor
+
+    merged: dict[int, tuple[tuple[int, int, int, int], ...]] = {}
+    for kolor, rects in rects_by_kolor.items():
+        valid = [r for r in rects if r[1] > r[0] and r[3] > r[2]]
+        if not valid:
+            merged[kolor] = tuple()
+            continue
+        if len(valid) <= threshold:
+            merged[kolor] = tuple(valid)
+            continue
+        i_lo = min(r[0] for r in valid)
+        i_hi = max(r[1] for r in valid)
+        j_lo = min(r[2] for r in valid)
+        j_hi = max(r[3] for r in valid)
+        merged[kolor] = ((i_lo, i_hi, j_lo, j_hi),)
+    return merged
+
+
+def _simplify_minmax_expr(expr: ir.Expr) -> ir.Expr:
+    def _same_expr(lhs: ir.Expr, rhs: ir.Expr) -> bool:
+        return lhs == rhs
+
+    def _flatten(op_name: str, args: list[ir.Expr]) -> list[ir.Expr]:
+        out: list[ir.Expr] = []
+        for arg in args:
+            if cpm.is_call_to(arg, op_name):
+                out.extend(copy.deepcopy(a) for a in arg.args)
+            else:
+                out.append(arg)
+        return out
+
+    if not isinstance(expr, ir.FunCall):
+        return expr
+
+    op_name = str(expr.fun.id) if isinstance(expr.fun, ir.SymRef) else None
+    if op_name not in {"minimum", "maximum"}:
+        return expr
+
+    args = [copy.deepcopy(arg) for arg in expr.args]
+    args = _flatten(op_name, args)
+
+    # Idempotence: min(x, x) = x, max(x, x) = x
+    deduped: list[ir.Expr] = []
+    for arg in args:
+        if any(_same_expr(arg, seen) for seen in deduped):
+            continue
+        deduped.append(arg)
+    args = deduped
+
+    opposite = "maximum" if op_name == "minimum" else "minimum"
+
+    # Absorption: min(x, max(x, y)) = x and max(x, min(x, y)) = x
+    absorbed: list[ir.Expr] = []
+    for arg in args:
+        if cpm.is_call_to(arg, opposite):
+            if any(any(_same_expr(base, inner) for inner in arg.args) for base in args if base is not arg):
+                continue
+        absorbed.append(arg)
+    args = absorbed
+
+    if not args:
+        return expr
+    if len(args) == 1:
+        return args[0]
+    return im.call(op_name)(*args)
+
+
+def _resolve_mesh_path_for_unroll(symbolic_domain_sizes: dict[str, str | int] | None) -> str | None:
+    if symbolic_domain_sizes is not None:
+        mesh_from_sizes = symbolic_domain_sizes.get("mesh_path")
+        if isinstance(mesh_from_sizes, str) and mesh_from_sizes:
+            resolved = Path(mesh_from_sizes).expanduser().resolve()
+            if resolved.is_file():
+                return str(resolved)
+
+    mesh_path = os.environ.get("GT4PY_TRANSLATOR_MESH")
+    if mesh_path:
+        resolved = Path(mesh_path).expanduser().resolve()
+        if resolved.is_file():
+            return str(resolved)
+
+    repo_root = Path(__file__).resolve().parents[6]
+    candidate_paths = (
+        repo_root / "../grid-generator/parallelogram_grid.nc",
+        repo_root / "grid-generator/parallelogram_grid.nc",
+        Path.cwd() / "grid-generator/parallelogram_grid.nc",
+        Path.cwd() / "parallelogram_grid.nc",
+    )
+    for candidate in candidate_paths:
+        resolved = candidate.resolve()
+        if resolved.is_file():
+            return str(resolved)
+    return None
+
+
+def _load_entity_ijk_maps_uncached(
+    mesh_path: str,
+) -> tuple[tuple[tuple[int, int, int], ...], tuple[tuple[int, int, int], ...], tuple[tuple[int, int, int], ...]]:
+    import numpy as np
+    import xarray as xr
+
+    import gt4py.next.modules.translator as translator
+
+    with xr.open_dataset(mesh_path) as ds:
+        e2v = translator._read_e2v(ds)
+        index_map = translator.build_index_map_from_ds_regular(ds, e2v)
+
+        edge_map = tuple(
+            (int(row[0]), int(row[1]), int(row[2]))
+            for row in np.asarray(index_map.edge_to_ijk, dtype=np.int64)
+        )
+        vertex_map = tuple(
+            (int(row[0]), int(row[1]), 0)
+            for row in np.asarray(index_map.vertex_to_ij, dtype=np.int64)
+        )
+
+        c2v = np.where(
+            ds["vertex_of_cell"].transpose("cell", "nv").values.astype(np.int32) > 0,
+            ds["vertex_of_cell"].transpose("cell", "nv").values.astype(np.int32) - 1,
+            -1,
+        )
+        cell_to_ijk, _ = translator.build_cell_ijk_maps(c2v, index_map)
+        cell_map = tuple(
+            (int(row[0]), int(row[1]), int(row[2]))
+            for row in np.asarray(cell_to_ijk, dtype=np.int64)
+        )
+
+    return edge_map, vertex_map, cell_map
+
+
+def _load_entity_ijk_maps(
+    mesh_path: str,
+) -> tuple[
+    tuple[str, int, int],
+    tuple[tuple[int, int, int], ...],
+    tuple[tuple[int, int, int], ...],
+    tuple[tuple[int, int, int], ...],
+]:
+    resolved = Path(mesh_path).expanduser().resolve()
+    stat = resolved.stat()
+    cache_key = (str(resolved), int(stat.st_mtime_ns), int(stat.st_size))
+
+    with _ENTITY_IJK_MAPS_CACHE_LOCK:
+        cached = _ENTITY_IJK_MAPS_CACHE.get(cache_key)
+        if cached is None:
+            cached = _load_entity_ijk_maps_uncached(str(resolved))
+            _ENTITY_IJK_MAPS_CACHE[cache_key] = cached
+        edge_map, vertex_map, cell_map = cached
+    return cache_key, edge_map, vertex_map, cell_map
+
+
+def _expr_to_static_int(
+    expr: ir.Expr,
+    symbolic_domain_sizes: dict[str, str | int] | None,
+) -> int | None:
+    if isinstance(expr, ir.OffsetLiteral) and isinstance(expr.value, int):
+        return int(expr.value)
+    if isinstance(expr, ir.Literal) and str(expr.value).lstrip("-").isdigit():
+        return int(str(expr.value))
+    if isinstance(expr, ir.SymRef):
+        sym_name = str(expr.id)
+        if symbolic_domain_sizes is None:
+            symbolic_value = None
+        else:
+            symbolic_value = symbolic_domain_sizes.get(sym_name)
+        if isinstance(symbolic_value, numbers.Integral):
+            return int(symbolic_value)
+        if isinstance(symbolic_value, str) and symbolic_value.lstrip("-").isdigit():
+            return int(symbolic_value)
+
+        if sym_name in {
+            "horizontal_start",
+            "horizontal_start_idx",
+            "edge_start",
+            "cell_start",
+            "vertex_start",
+        }:
+            env_start = os.environ.get("GT4PY_TRANSLATOR_HORIZONTAL_START")
+            if env_start and env_start.lstrip("-").isdigit():
+                return int(env_start)
+        return None
+    if cpm.is_call_to(expr, "plus") and len(expr.args) == 2:
+        lhs = _expr_to_static_int(expr.args[0], symbolic_domain_sizes)
+        rhs = _expr_to_static_int(expr.args[1], symbolic_domain_sizes)
+        if lhs is not None and rhs is not None:
+            return lhs + rhs
+    if cpm.is_call_to(expr, "minus") and len(expr.args) == 2:
+        lhs = _expr_to_static_int(expr.args[0], symbolic_domain_sizes)
+        rhs = _expr_to_static_int(expr.args[1], symbolic_domain_sizes)
+        if lhs is not None and rhs is not None:
+            return lhs - rhs
+    return None
+
+
+def _entity_start_ij_from_horizontal_start(
+    entity_name: str,
+    start_expr: ir.Expr,
+    symbolic_domain_sizes: dict[str, str | int] | None,
+) -> tuple[int, int] | None:
+    start_idx = _expr_to_static_int(start_expr, symbolic_domain_sizes)
+    if start_idx is None:
+        return None
+
+    mesh_path = _resolve_mesh_path_for_unroll(symbolic_domain_sizes)
+    if mesh_path is None:
+        return None
+
+    try:
+        cache_key, edge_map, vertex_map, cell_map = _load_entity_ijk_maps(mesh_path)
+    except Exception:
+        return None
+
+    if entity_name == "Edge":
+        mapping = edge_map
+    elif entity_name == "Vertex":
+        mapping = vertex_map
+    elif entity_name == "Cell":
+        mapping = cell_map
+    else:
+        return None
+
+    if not mapping:
+        return None
+
+    lo = max(0, start_idx)
+    if lo >= len(mapping):
+        return None
+
+    bounds_cache_key = (cache_key, entity_name, lo, lo)
+    with _ENTITY_IJK_MAPS_CACHE_LOCK:
+        cached_bounds = _ENTITY_RANGE_BOUNDS_CACHE.get(bounds_cache_key)
+    if cached_bounds is not None:
+        i_lo, _, j_lo, _ = cached_bounds
+        return i_lo, j_lo
+
+    for idx in range(lo, len(mapping)):
+        i_val, j_val, _ = mapping[idx]
+        if i_val < 0 or j_val < 0:
+            continue
+        cached_tuple = (i_val, i_val + 1, j_val, j_val + 1)
+        with _ENTITY_IJK_MAPS_CACHE_LOCK:
+            _ENTITY_RANGE_BOUNDS_CACHE[bounds_cache_key] = cached_tuple
+        return i_val, j_val
+
+    return None
+
+
+def _rectangles_from_points(points: set[tuple[int, int]]) -> tuple[tuple[int, int, int, int], ...]:
+    if not points:
+        return ()
+
+    runs_by_j: dict[int, list[tuple[int, int]]] = {}
+    for i, j in points:
+        runs_by_j.setdefault(j, []).append((i, i + 1))
+
+    for j in runs_by_j:
+        runs = sorted(runs_by_j[j])
+        merged: list[tuple[int, int]] = []
+        cur_lo, cur_hi = runs[0]
+        for lo, hi in runs[1:]:
+            if lo <= cur_hi:
+                cur_hi = max(cur_hi, hi)
+            else:
+                merged.append((cur_lo, cur_hi))
+                cur_lo, cur_hi = lo, hi
+        merged.append((cur_lo, cur_hi))
+        runs_by_j[j] = merged
+
+    rects: list[tuple[int, int, int, int]] = []
+    active: dict[tuple[int, int], tuple[int, int, int, int]] = {}
+    for j in sorted(runs_by_j):
+        next_active: dict[tuple[int, int], tuple[int, int, int, int]] = {}
+        for i_lo, i_hi in runs_by_j[j]:
+            key = (i_lo, i_hi)
+            if key in active:
+                r_i_lo, r_i_hi, j_lo, _ = active[key]
+                next_active[key] = (r_i_lo, r_i_hi, j_lo, j + 1)
+            else:
+                next_active[key] = (i_lo, i_hi, j, j + 1)
+        for key, rect in active.items():
+            if key not in next_active:
+                rects.append(rect)
+        active = next_active
+    rects.extend(active.values())
+    return tuple(rects)
+
+
+def _edge_active_rectangles_from_horizontal_start(
+    start_expr: ir.Expr,
+    symbolic_domain_sizes: dict[str, str | int] | None,
+) -> dict[int, tuple[tuple[int, int, int, int], ...]] | None:
+    start_idx = _expr_to_static_int(start_expr, symbolic_domain_sizes)
+    if start_idx is None:
+        return None
+
+    mesh_path = _resolve_mesh_path_for_unroll(symbolic_domain_sizes)
+    if mesh_path is None:
+        return None
+
+    try:
+        cache_key, edge_map, _, _ = _load_entity_ijk_maps(mesh_path)
+    except Exception:
+        return None
+
+    if not edge_map:
+        return None
+
+    lo = max(0, start_idx)
+    if lo >= len(edge_map):
+        return None
+
+    rect_cache_key = (cache_key, lo)
+    with _ENTITY_IJK_MAPS_CACHE_LOCK:
+        cached = _EDGE_ACTIVE_RECTS_CACHE.get(rect_cache_key)
+    if cached is not None:
+        return cached
+
+    points_by_kolor: dict[int, set[tuple[int, int]]] = {0: set(), 1: set(), 2: set()}
+    for idx in range(lo, len(edge_map)):
+        i_val, j_val, k_val = edge_map[idx]
+        if i_val < 0 or j_val < 0 or k_val not in points_by_kolor:
+            continue
+        points_by_kolor[k_val].add((int(i_val), int(j_val)))
+
+    rects_by_kolor: dict[int, tuple[tuple[int, int, int, int], ...]] = {
+        k: _rectangles_from_points(v) for k, v in points_by_kolor.items()
+    }
+    with _ENTITY_IJK_MAPS_CACHE_LOCK:
+        _EDGE_ACTIVE_RECTS_CACHE[rect_cache_key] = rects_by_kolor
+    return rects_by_kolor
 
 # =====================================================================
 # Shift and Concat-Where Helpers
@@ -403,18 +771,12 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
             name in symbolic_domain_sizes
             for name in ("max_i", "max_j", "domain_max_i", "domain_max_j", "nx", "ny")
         )
-        has_symbolic_signal = has_symbolic_structured_sizes or any(
-            name in symbolic_domain_sizes for name in ("lateral", "lateral_bounds", "lateral_edge")
-        )
+        has_symbolic_signal = has_symbolic_structured_sizes
 
         if not has_symbolic_signal:
             return
 
         missing_groups: list[str] = []
-        if has_symbolic_structured_sizes and not _has_any(
-            "lateral", "lateral_bounds", "lateral_edge"
-        ):
-            missing_groups.append("lateral")
         if not _has_any("i_max", "domain_i_max", "max_i", "domain_max_i", "nx", "num_i", "ni"):
             missing_groups.append("IDim upper bound")
         if not _has_any("j_max", "domain_j_max", "max_j", "domain_max_j", "ny", "num_j", "nj"):
@@ -572,6 +934,7 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
         )
 
     def visit_SetAt(self, node: ir.SetAt, **kwargs) -> ir.SetAt:
+        program_param_ids: set[str] = kwargs.get("program_param_ids", set())
         symbolic_domain_sizes: dict[str, str | int] = kwargs.get("symbolic_domain_sizes") or {}
 
         def _pick_symbolic_int(*names: str) -> int | None:
@@ -590,9 +953,6 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
             phase = _pick_symbolic_int("edge_phase_size", "lateral_edge_phase")
             if phase is not None:
                 return max(0, phase)
-            lateral_edge = _pick_symbolic_int("lateral_edge")
-            if lateral_edge is not None:
-                return 1 if lateral_edge > 0 and lateral_edge % 2 == 1 else 0
             return 0
 
         def _has_unstructured_axis(type_: ts.TypeSpec | None) -> bool:
@@ -641,6 +1001,230 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                     axis_name = _get_axis_name(nr.args[0])
                     if axis_name == "Edge":
                         return True
+            return False
+
+        def _edge_start_expr_from_unstructured_domain(domain_expr: ir.Expr) -> ir.Expr | None:
+            def _iter_domain_nodes(expr: ir.Expr):
+                if cpm.is_call_to(expr, "make_tuple"):
+                    for arg in expr.args:
+                        yield from _iter_domain_nodes(arg)
+                    return
+                yield expr
+
+            for dom in _iter_domain_nodes(domain_expr):
+                if not cpm.is_call_to(dom, "unstructured_domain"):
+                    continue
+                for nr in dom.args:
+                    if not (cpm.is_call_to(nr, "named_range") and len(nr.args) == 3):
+                        continue
+                    if _get_axis_name(nr.args[0]) == "Edge":
+                        return nr.args[1]
+            return None
+
+        def _build_full_edge_cartesian_domain(current_domain: ir.Expr) -> ir.Expr | None:
+            def _iter_domain_nodes(expr: ir.Expr):
+                if cpm.is_call_to(expr, "make_tuple"):
+                    for arg in expr.args:
+                        yield from _iter_domain_nodes(arg)
+                    return
+                yield expr
+
+            i_lo = _pick_symbolic_int("i_min", "domain_i_min", "imin")
+            i_hi = _pick_symbolic_int(
+                "i_max", "domain_i_max", "max_i", "domain_max_i", "nx", "num_i", "ni"
+            )
+            j_lo = _pick_symbolic_int("j_min", "domain_j_min", "jmin")
+            j_hi = _pick_symbolic_int(
+                "j_max", "domain_j_max", "max_j", "domain_max_j", "ny", "num_j", "nj"
+            )
+            if i_hi is None or j_hi is None:
+                return None
+            if i_lo is None:
+                i_lo = 0
+            if j_lo is None:
+                j_lo = 0
+
+            extra_ranges: list[ir.Expr] = []
+            seen_axes: set[str] = set()
+            for dom in _iter_domain_nodes(current_domain):
+                if not cpm.is_call_to(dom, "cartesian_domain"):
+                    continue
+                for nr in dom.args:
+                    if not (cpm.is_call_to(nr, "named_range") and len(nr.args) == 3):
+                        continue
+                    axis_name = _get_axis_name(nr.args[0])
+                    if axis_name in {"IDim", "JDim", "Kolor"} or axis_name in seen_axes:
+                        continue
+                    seen_axes.add(axis_name)
+                    extra_ranges.append(copy.deepcopy(nr))
+
+            return im.call("cartesian_domain")(
+                im.named_range(
+                    common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL),
+                    ir.OffsetLiteral(value=int(i_lo)),
+                    ir.OffsetLiteral(value=int(i_hi)),
+                ),
+                im.named_range(
+                    common.Dimension("JDim", kind=common.DimensionKind.HORIZONTAL),
+                    ir.OffsetLiteral(value=int(j_lo)),
+                    ir.OffsetLiteral(value=int(j_hi)),
+                ),
+                im.named_range(
+                    common.Dimension("Kolor", kind=common.DimensionKind.HORIZONTAL),
+                    ir.OffsetLiteral(value=0),
+                    ir.OffsetLiteral(value=3),
+                ),
+                *extra_ranges,
+            )
+
+        def _build_edge_compact_setat_domains(
+            rects_by_kolor: dict[int, tuple[tuple[int, int, int, int], ...]],
+            current_domain: ir.Expr,
+        ) -> list[ir.Expr]:
+            rects_by_kolor = _coalesce_rects_by_kolor(rects_by_kolor)
+
+            def _iter_domain_nodes(expr: ir.Expr):
+                if cpm.is_call_to(expr, "make_tuple"):
+                    for arg in expr.args:
+                        yield from _iter_domain_nodes(arg)
+                    return
+                yield expr
+
+            extra_named_ranges: list[ir.Expr] = []
+            seen_axes: set[str] = set()
+            for dom in _iter_domain_nodes(current_domain):
+                if not cpm.is_call_to(dom, "cartesian_domain"):
+                    continue
+                for nr in dom.args:
+                    if not (cpm.is_call_to(nr, "named_range") and len(nr.args) == 3):
+                        continue
+                    axis_name = _get_axis_name(nr.args[0])
+                    if axis_name in {"IDim", "JDim", "Kolor"} or axis_name in seen_axes:
+                        continue
+                    seen_axes.add(axis_name)
+                    extra_named_ranges.append(copy.deepcopy(nr))
+
+            domains: list[ir.Expr] = []
+            for kolor in (0, 1, 2):
+                for i_lo, i_hi, j_lo, j_hi in rects_by_kolor.get(kolor, ()):  # exact rect set
+                    if i_hi <= i_lo or j_hi <= j_lo:
+                        continue
+                    domains.append(
+                        im.call("cartesian_domain")(
+                            im.named_range(
+                                common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL),
+                                ir.OffsetLiteral(value=i_lo),
+                                ir.OffsetLiteral(value=i_hi),
+                            ),
+                            im.named_range(
+                                common.Dimension("JDim", kind=common.DimensionKind.HORIZONTAL),
+                                ir.OffsetLiteral(value=j_lo),
+                                ir.OffsetLiteral(value=j_hi),
+                            ),
+                            im.named_range(
+                                common.Dimension("Kolor", kind=common.DimensionKind.HORIZONTAL),
+                                ir.OffsetLiteral(value=kolor),
+                                ir.OffsetLiteral(value=kolor + 1),
+                            ),
+                            *(copy.deepcopy(nr) for nr in extra_named_ranges),
+                        )
+                    )
+
+            return domains
+
+        def _build_edge_rect_condition(
+            rects_by_kolor: dict[int, tuple[tuple[int, int, int, int], ...]],
+            current_domain: ir.Expr,
+        ) -> ir.Expr | None:
+            rects_by_kolor = _coalesce_rects_by_kolor(rects_by_kolor)
+
+            def _iter_domain_nodes(expr: ir.Expr):
+                if cpm.is_call_to(expr, "make_tuple"):
+                    for arg in expr.args:
+                        yield from _iter_domain_nodes(arg)
+                    return
+                yield expr
+
+            def _axis_dom(axis_name: str, lo: int, hi: int) -> ir.Expr:
+                return im.call("cartesian_domain")(
+                    im.named_range(
+                        common.Dimension(axis_name, kind=common.DimensionKind.HORIZONTAL),
+                        ir.OffsetLiteral(value=lo),
+                        ir.OffsetLiteral(value=hi),
+                    )
+                )
+
+            def _or_domains(domains: list[ir.Expr]) -> ir.Expr | None:
+                if not domains:
+                    return None
+                acc = domains[0]
+                for dom in domains[1:]:
+                    acc = im.or_(acc, dom)
+                return acc
+
+            def _and_domains(domains: list[ir.Expr]) -> ir.Expr | None:
+                if not domains:
+                    return None
+                acc = domains[0]
+                for dom in domains[1:]:
+                    acc = im.and_(acc, dom)
+                return acc
+
+            preserved_axis_domains: list[ir.Expr] = []
+            seen_axes: set[str] = set()
+            for dom in _iter_domain_nodes(current_domain):
+                if not cpm.is_call_to(dom, "cartesian_domain"):
+                    continue
+                for nr in dom.args:
+                    if not (cpm.is_call_to(nr, "named_range") and len(nr.args) == 3):
+                        continue
+                    axis_name = _get_axis_name(nr.args[0])
+                    if axis_name in {"IDim", "JDim", "Kolor"} or axis_name in seen_axes:
+                        continue
+                    seen_axes.add(axis_name)
+                    preserved_axis_domains.append(im.call("cartesian_domain")(copy.deepcopy(nr)))
+
+            preserved_cond = _and_domains(preserved_axis_domains)
+
+            per_kolor: list[ir.Expr] = []
+            for kolor in (0, 1, 2):
+                rect_domains: list[ir.Expr] = []
+                for i_lo, i_hi, j_lo, j_hi in rects_by_kolor.get(kolor, ()): 
+                    if i_hi <= i_lo or j_hi <= j_lo:
+                        continue
+                    rect_domains.append(
+                        im.and_(
+                            _axis_dom("IDim", i_lo, i_hi),
+                            _axis_dom("JDim", j_lo, j_hi),
+                        )
+                    )
+                rect_union = _or_domains(rect_domains)
+                if rect_union is None:
+                    continue
+                kolor_rect_cond = im.and_(
+                    _axis_dom("Kolor", kolor, kolor + 1),
+                    rect_union,
+                )
+                if preserved_cond is not None:
+                    kolor_rect_cond = im.and_(copy.deepcopy(preserved_cond), kolor_rect_cond)
+                per_kolor.append(kolor_rect_cond)
+
+            return _or_domains(per_kolor)
+
+        def _has_horizontal_start_source() -> bool:
+            for name in (
+                "horizontal_start",
+                "horizontal_start_idx",
+                "edge_start",
+                "cell_start",
+                "vertex_start",
+            ):
+                if name not in program_param_ids and (
+                    symbolic_domain_sizes is None or name not in symbolic_domain_sizes
+                ):
+                    continue
+                if _expr_to_static_int(im.ref(name), symbolic_domain_sizes) is not None:
+                    return True
             return False
 
         def _minus_one(expr: ir.Expr) -> ir.Expr:
@@ -796,9 +1380,46 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
             new_expr = _retarget_self_refs(new_expr, new_target)
 
         if _is_unstructured_edge_domain(node.domain):
-            masked_expr = _build_edge_validity_masked_expr(new_expr, new_target, new_domain)
-            if masked_expr is not None:
-                new_expr = masked_expr
+            start_expr = _edge_start_expr_from_unstructured_domain(node.domain)
+            if (
+                _use_exact_edge_active_set_for_setat()
+                and start_expr is not None
+                and _expr_to_static_int(start_expr, symbolic_domain_sizes) is not None
+            ):
+                rects_by_kolor = _edge_active_rectangles_from_horizontal_start(
+                    start_expr,
+                    symbolic_domain_sizes,
+                )
+                full_domain = _build_full_edge_cartesian_domain(new_domain)
+                compact_domains = (
+                    _build_edge_compact_setat_domains(rects_by_kolor, new_domain)
+                    if rects_by_kolor is not None
+                    else []
+                )
+                compact_setat = os.environ.get("GT4PY_TRANSLATOR_COMPACT_SETAT_MASK", "0") == "1"
+                if full_domain is not None and compact_setat and compact_domains:
+                    new_domain = full_domain
+                    masked_expr = copy.deepcopy(new_target)
+                    for compact_domain in compact_domains:
+                        masked_expr = im.concat_where(
+                            compact_domain,
+                            copy.deepcopy(new_expr),
+                            masked_expr,
+                        )
+                    new_expr = masked_expr
+                elif full_domain is not None:
+                    cond = (
+                        _build_edge_rect_condition(rects_by_kolor, new_domain)
+                        if rects_by_kolor is not None
+                        else None
+                    )
+                    if cond is not None:
+                        new_domain = full_domain
+                        new_expr = im.concat_where(cond, new_expr, copy.deepcopy(new_target))
+            elif not _has_horizontal_start_source():
+                masked_expr = _build_edge_validity_masked_expr(new_expr, new_target, new_domain)
+                if masked_expr is not None:
+                    new_expr = masked_expr
 
         return ir.SetAt(expr=new_expr, domain=new_domain, target=new_target)
 
@@ -856,23 +1477,6 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                     return im.ensure_expr(symbolic_size)
             return None
 
-        def _lateral_size() -> ir.Expr:
-            lateral = _pick_size_param("lateral", "lateral_bounds")
-            if lateral is not None:
-                return lateral
-
-            if symbolic_domain_sizes is not None and "lateral_edge" in symbolic_domain_sizes:
-                lateral_edge = symbolic_domain_sizes["lateral_edge"]
-                if isinstance(lateral_edge, numbers.Integral):
-                    return ir.OffsetLiteral(value=max(0, int(lateral_edge) // 2))
-                if isinstance(lateral_edge, str):
-                    try:
-                        return ir.OffsetLiteral(value=max(0, int(lateral_edge) // 2))
-                    except ValueError:
-                        pass
-
-            return ir.OffsetLiteral(value=0)
-
         def _offset_int_value(expr: ir.Expr) -> int | None:
             if isinstance(expr, ir.OffsetLiteral) and isinstance(expr.value, int):
                 return expr.value
@@ -901,6 +1505,7 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
         def _cartesian_axis_bounds(
             axis_name: str, *, use_lateral: bool = True
         ) -> tuple[ir.Expr, ir.Expr] | None:
+            _ = use_lateral
             if axis_name == "IDim":
                 lower_base = _pick_size_param("i_min", "domain_i_min", "imin")
                 upper_base = _pick_size_param(
@@ -910,10 +1515,6 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                     return None
                 lower = ir.OffsetLiteral(value=0) if lower_base is None else copy.deepcopy(lower_base)
                 upper = copy.deepcopy(upper_base)
-                if use_lateral:
-                    lateral = _lateral_size()
-                    lower = _offset_add(lower, copy.deepcopy(lateral))
-                    upper = _offset_sub(upper, lateral)
                 return lower, upper
             if axis_name == "JDim":
                 lower_base = _pick_size_param("j_min", "domain_j_min", "jmin")
@@ -924,10 +1525,6 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                     return None
                 lower = ir.OffsetLiteral(value=0) if lower_base is None else copy.deepcopy(lower_base)
                 upper = copy.deepcopy(upper_base)
-                if use_lateral:
-                    lateral = _lateral_size()
-                    lower = _offset_add(lower, copy.deepcopy(lateral))
-                    upper = _offset_sub(upper, lateral)
                 return lower, upper
             if axis_name == "Kolor":
                 return ir.OffsetLiteral(value=0), ir.OffsetLiteral(value=3)
@@ -945,7 +1542,34 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
             *,
             extra_halo: int = 0,
             use_lateral: bool = True,
+            start_expr: ir.Expr | None = None,
+            end_expr: ir.Expr | None = None,
         ) -> tuple[ir.Expr, ir.Expr] | None:
+            _ = end_expr
+            if start_expr is not None and axis_name in {"IDim", "JDim"}:
+                start_ij = _entity_start_ij_from_horizontal_start(
+                    entity_name,
+                    start_expr,
+                    symbolic_domain_sizes,
+                )
+                global_bounds = _cartesian_axis_bounds(axis_name, use_lateral=use_lateral)
+                if start_ij is not None and global_bounds is not None:
+                    global_lo_expr, global_hi_expr = global_bounds
+                    global_lo = _expr_to_static_int(global_lo_expr, symbolic_domain_sizes)
+                    global_hi = _expr_to_static_int(global_hi_expr, symbolic_domain_sizes)
+                    if global_lo is not None and global_hi is not None:
+                        start_axis = start_ij[0] if axis_name == "IDim" else start_ij[1]
+                        clip = max(0, int(start_axis) - int(global_lo))
+                        lo = ir.OffsetLiteral(value=int(global_lo + clip))
+                        hi_val = int(global_hi - clip)
+                        if entity_name == "Cell":
+                            hi_val -= 1
+                        hi = ir.OffsetLiteral(value=hi_val)
+                        if axis_name in {"IDim", "JDim"} and extra_halo > 0:
+                            lo = _offset_add(lo, ir.OffsetLiteral(value=extra_halo))
+                            hi = _offset_sub(hi, ir.OffsetLiteral(value=extra_halo))
+                        return lo, hi
+
             bounds = _cartesian_axis_bounds(axis_name, use_lateral=use_lateral)
             if bounds is None:
                 return None
@@ -972,14 +1596,123 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                 else None
             )
 
+        def _horizontal_range_exprs() -> tuple[ir.Expr, ir.Expr | None] | None:
+            start_expr = _pick_size_param(
+                "horizontal_start",
+                "horizontal_start_idx",
+                "cell_start",
+                "edge_start",
+                "vertex_start",
+            )
+            end_expr = _pick_size_param(
+                "horizontal_end",
+                "horizontal_end_idx",
+                "cell_end",
+                "edge_end",
+                "vertex_end",
+            )
+            if start_expr is None:
+                return None
+            return start_expr, end_expr
+
         def _structured_entity_condition(
             entity_name: str, *, extra_halo: int = 0, use_lateral: bool = True
         ) -> ir.Expr | None:
+            horizontal_range = _horizontal_range_exprs()
+            start_expr = horizontal_range[0] if horizontal_range is not None else None
+            end_expr = horizontal_range[1] if horizontal_range is not None else None
+
+            if (
+                _use_exact_edge_active_set_for_predicates()
+                and entity_name == "Edge"
+                and start_expr is not None
+            ):
+                rects_by_kolor = _edge_active_rectangles_from_horizontal_start(
+                    start_expr,
+                    symbolic_domain_sizes,
+                )
+                if rects_by_kolor:
+                    rects_by_kolor = _coalesce_rects_by_kolor(rects_by_kolor)
+
+                    def _rect_to_domain(rect: tuple[int, int, int, int]) -> ir.Expr | None:
+                        i_lo, i_hi, j_lo, j_hi = rect
+                        if extra_halo > 0:
+                            i_lo += extra_halo
+                            i_hi -= extra_halo
+                            j_lo += extra_halo
+                            j_hi -= extra_halo
+                        if i_hi <= i_lo or j_hi <= j_lo:
+                            return None
+                        return im.call("cartesian_domain")(
+                            im.named_range(
+                                common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL),
+                                ir.OffsetLiteral(value=i_lo),
+                                ir.OffsetLiteral(value=i_hi),
+                            ),
+                            im.named_range(
+                                common.Dimension("JDim", kind=common.DimensionKind.HORIZONTAL),
+                                ir.OffsetLiteral(value=j_lo),
+                                ir.OffsetLiteral(value=j_hi),
+                            ),
+                        )
+
+                    def _or_domains(domains: list[ir.Expr]) -> ir.Expr | None:
+                        if not domains:
+                            return None
+                        acc = domains[0]
+                        for domain in domains[1:]:
+                            acc = im.or_(acc, domain)
+                        return acc
+
+                    per_kolor_conds: list[ir.Expr] = []
+                    for kolor in (0, 1, 2):
+                        domains = [
+                            d
+                            for d in (
+                                _rect_to_domain(rect)
+                                for rect in rects_by_kolor.get(kolor, ())
+                            )
+                            if d is not None
+                        ]
+                        kolor_domain = _or_domains(domains)
+                        if kolor_domain is None:
+                            continue
+                        per_kolor_conds.append(
+                            im.and_(
+                                im.call("cartesian_domain")(
+                                    im.named_range(
+                                        common.Dimension(
+                                            "Kolor", kind=common.DimensionKind.HORIZONTAL
+                                        ),
+                                        ir.OffsetLiteral(value=kolor),
+                                        ir.OffsetLiteral(value=kolor + 1),
+                                    )
+                                ),
+                                kolor_domain,
+                            )
+                        )
+
+                    if per_kolor_conds:
+                        acc = per_kolor_conds[0]
+                        for cond in per_kolor_conds[1:]:
+                            acc = im.or_(acc, cond)
+                        return acc
+
             idim_bounds = _entity_cartesian_bounds(
-                entity_name, "IDim", extra_halo=extra_halo, use_lateral=use_lateral
+                entity_name,
+                "IDim",
+                extra_halo=extra_halo,
+                use_lateral=use_lateral,
+                start_expr=start_expr,
+                end_expr=end_expr,
             )
             jdim_bounds = _entity_cartesian_bounds(
-                entity_name, "JDim", extra_halo=extra_halo, use_lateral=use_lateral
+                entity_name,
+                "JDim",
+                extra_halo=extra_halo,
+                use_lateral=use_lateral,
+                start_expr=start_expr,
+                end_expr=end_expr,
             )
             kolor_bounds = _entity_kolor_bounds(entity_name)
             if idim_bounds is None or jdim_bounds is None or kolor_bounds is None:
@@ -1178,8 +1911,18 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                     axis_name = _axis_name(nr.args[0])
                     # If it's a horizontal unstructured dimension, split it into 3 Cartesian dimensions
                     if axis_name in {"Edge", "Vertex", "Cell"}:
-                        idim_bounds = _entity_cartesian_bounds(axis_name, "IDim")
-                        jdim_bounds = _entity_cartesian_bounds(axis_name, "JDim")
+                        idim_bounds = _entity_cartesian_bounds(
+                            axis_name,
+                            "IDim",
+                            start_expr=nr.args[1],
+                            end_expr=nr.args[2],
+                        )
+                        jdim_bounds = _entity_cartesian_bounds(
+                            axis_name,
+                            "JDim",
+                            start_expr=nr.args[1],
+                            end_expr=nr.args[2],
+                        )
                         kolor_bounds = _entity_kolor_bounds(axis_name)
                         if (
                             idim_bounds is not None
@@ -1739,6 +2482,17 @@ class RewriteCartesianCanDeref(NodeTranslator):
 
 
 @dataclasses.dataclass
+class SimplifyMinMaxBounds(NodeTranslator):
+    @classmethod
+    def apply(cls, node: ir.Node) -> ir.Node:
+        return cls().visit(node)
+
+    def visit_FunCall(self, node: ir.FunCall, **kwargs) -> ir.Expr:
+        new_node = copy.deepcopy(self.generic_visit(node, **kwargs))
+        return _simplify_minmax_expr(new_node)
+
+
+@dataclasses.dataclass
 class CartUnroll:
     _cartesian_remapped_type = staticmethod(CartesianDomainAndTypeRemapper._cartesian_remapped_type)
 
@@ -1749,4 +2503,5 @@ class CartUnroll:
         transformed = CartesianDomainAndTypeRemapper.apply(
             node, symbolic_domain_sizes=symbolic_domain_sizes
         )
-        return CartesianReductionUnroller.apply(transformed)
+        transformed = CartesianReductionUnroller.apply(transformed)
+        return SimplifyMinMaxBounds.apply(transformed)
