@@ -10,7 +10,7 @@ import copy
 import dataclasses
 import math
 import numbers
-from typing import cast
+from typing import Any, cast
 
 import gt4py.next.iterator.transforms.map_dict as map_dict_module
 from gt4py.eve import NodeTranslator
@@ -23,6 +23,103 @@ from gt4py.next.type_system import type_specifications as ts
 
 # You can keep map_dict as a local alias so you don't have to change the rest of your code
 map_dict = map_dict_module.map_dict
+
+
+# Cache entity start bounds derived from structured index mappings.
+# Key: (entity_name, id(mapping_rows), horizontal_start, max_i, max_j)
+_ENTITY_START_BOUNDS_CACHE: dict[
+    tuple[str, int, int, int, int], dict[int, tuple[int, int, int, int]]
+] = {}
+
+
+def _coerce_int(value: Any) -> int | None:
+    if isinstance(value, numbers.Integral):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _coerce_mapping_rows(value: Any, expected_len: int) -> tuple[tuple[int, ...], ...] | None:
+    if not isinstance(value, (list, tuple)):
+        return None
+
+    rows: list[tuple[int, ...]] = []
+    for row in value:
+        if not isinstance(row, (list, tuple)) or len(row) < expected_len:
+            return None
+        parsed = tuple(_coerce_int(item) for item in row[:expected_len])
+        if any(item is None for item in parsed):
+            return None
+        rows.append(cast(tuple[int, ...], parsed))
+
+    return tuple(rows)
+
+
+def _derive_entity_start_bounds_from_mapping(
+    entity_name: str,
+    *,
+    mapping_rows: tuple[tuple[int, ...], ...],
+    horizontal_start: int,
+    max_i: int,
+    max_j: int,
+) -> dict[int, tuple[int, int, int, int]] | None:
+    cache_key = (entity_name, id(mapping_rows), horizontal_start, max_i, max_j)
+    if cache_key in _ENTITY_START_BOUNDS_CACHE:
+        return _ENTITY_START_BOUNDS_CACHE[cache_key]
+
+    if horizontal_start < 0:
+        horizontal_start = 0
+    if horizontal_start >= len(mapping_rows):
+        return None
+
+    if entity_name == "Edge":
+        by_kolor: dict[int, tuple[int, int, int, int]] = {}
+        for i_val, j_val, kolor in mapping_rows[horizontal_start:]:
+            if i_val < 0 or j_val < 0 or kolor < 0:
+                continue
+            if kolor not in {0, 1, 2}:
+                continue
+            prev = by_kolor.get(kolor)
+            if prev is None:
+                by_kolor[kolor] = (i_val, j_val, i_val, j_val)
+            else:
+                by_kolor[kolor] = (
+                    min(prev[0], i_val),
+                    min(prev[1], j_val),
+                    max(prev[2], i_val),
+                    max(prev[3], j_val),
+                )
+
+        if not by_kolor:
+            return None
+
+        _ENTITY_START_BOUNDS_CACHE[cache_key] = by_kolor
+        return by_kolor
+
+    # Vertex/Cell: scalar horizontal_start maps to a single (i,j) lower shell.
+    min_i: int | None = None
+    min_j: int | None = None
+    max_i_seen: int | None = None
+    max_j_seen: int | None = None
+    for row in mapping_rows[horizontal_start:]:
+        i_val, j_val = row[0], row[1]
+        if i_val < 0 or j_val < 0:
+            continue
+        min_i = i_val if min_i is None else min(min_i, i_val)
+        min_j = j_val if min_j is None else min(min_j, j_val)
+        max_i_seen = i_val if max_i_seen is None else max(max_i_seen, i_val)
+        max_j_seen = j_val if max_j_seen is None else max(max_j_seen, j_val)
+
+    if min_i is None or min_j is None or max_i_seen is None or max_j_seen is None:
+        return None
+
+    bounds = {0: (min_i, min_j, max_i_seen, max_j_seen)}
+    _ENTITY_START_BOUNDS_CACHE[cache_key] = bounds
+    return bounds
 
 # =====================================================================
 # Shift and Concat-Where Helpers
@@ -387,7 +484,7 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
 
     @staticmethod
     def _validate_structured_remap_requirements(
-        node: ir.Node, symbolic_domain_sizes: dict[str, str | int]
+        node: ir.Node, symbolic_domain_sizes: dict[str, Any]
     ) -> None:
         if not isinstance(node, ir.Program):
             return
@@ -451,7 +548,7 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
         cls,
         node: ir.Node,
         *,
-        symbolic_domain_sizes: dict[str, str | int] | None = None,
+        symbolic_domain_sizes: dict[str, Any] | None = None,
         offset_provider: common.OffsetProvider | None = None,
     ) -> ir.Node:
         effective_symbolic_sizes = dict(symbolic_domain_sizes or {})
@@ -572,7 +669,7 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
         )
 
     def visit_SetAt(self, node: ir.SetAt, **kwargs) -> ir.SetAt:
-        symbolic_domain_sizes: dict[str, str | int] = kwargs.get("symbolic_domain_sizes") or {}
+        symbolic_domain_sizes: dict[str, Any] = kwargs.get("symbolic_domain_sizes") or {}
 
         def _pick_symbolic_int(*names: str) -> int | None:
             for name in names:
@@ -585,6 +682,16 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                     except ValueError:
                         continue
             return None
+
+        def _horizontal_start_mapping_enabled() -> bool:
+            raw = symbolic_domain_sizes.get("use_horizontal_start_mapping")
+            if isinstance(raw, bool):
+                return raw
+            if isinstance(raw, numbers.Integral):
+                return int(raw) != 0
+            if isinstance(raw, str):
+                return raw.strip().lower() in {"1", "true", "yes", "on"}
+            return False
 
         def _edge_phase_size_for_setat() -> int:
             phase = _pick_symbolic_int("edge_phase_size", "lateral_edge_phase")
@@ -735,6 +842,120 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
             def _and(lhs: ir.Expr, rhs: ir.Expr) -> ir.Expr:
                 return im.call("and_")(lhs, rhs)
 
+            mapping_rows = _coerce_mapping_rows(symbolic_domain_sizes.get("edge_to_ijk"), 3)
+            horizontal_start = _pick_symbolic_int(
+                "horizontal_start_edge",
+                "horizontal_start_e",
+                "horizontal_start",
+            )
+            max_i_int = _pick_symbolic_int("i_max", "domain_i_max", "max_i", "domain_max_i", "nx")
+            max_j_int = _pick_symbolic_int("j_max", "domain_j_max", "max_j", "domain_max_j", "ny")
+
+            if (
+                _horizontal_start_mapping_enabled()
+                and mapping_rows is not None
+                and horizontal_start is not None
+                and horizontal_start > 0
+                and max_i_int is not None
+                and max_j_int is not None
+            ):
+                by_kolor = _derive_entity_start_bounds_from_mapping(
+                    "Edge",
+                    mapping_rows=mapping_rows,
+                    horizontal_start=horizontal_start,
+                    max_i=max_i_int,
+                    max_j=max_j_int,
+                )
+                if by_kolor is not None and all(k in by_kolor for k in (0, 1, 2)):
+                    i0_lo, j0_lo, i0_hi, j0_hi = by_kolor[0]
+                    i1_lo, j1_lo, i1_hi, j1_hi = by_kolor[1]
+                    i2_lo, j2_lo, i2_hi, j2_hi = by_kolor[2]
+
+                    cond_k0 = _and(
+                        _dom(
+                            copy.deepcopy(k_axis),
+                            ir.OffsetLiteral(value=0),
+                            ir.OffsetLiteral(value=1),
+                        ),
+                        _and(
+                            _dom(
+                                copy.deepcopy(id_axis),
+                                ir.OffsetLiteral(value=i0_lo),
+                                ir.OffsetLiteral(value=i0_hi + 1),
+                            ),
+                            _dom(
+                                copy.deepcopy(j_axis),
+                                ir.OffsetLiteral(value=j0_lo),
+                                ir.OffsetLiteral(value=j0_hi + 1),
+                            ),
+                        ),
+                    )
+                    cond_k1 = _and(
+                        _dom(
+                            copy.deepcopy(k_axis),
+                            ir.OffsetLiteral(value=1),
+                            ir.OffsetLiteral(value=2),
+                        ),
+                        _and(
+                            _dom(
+                                copy.deepcopy(id_axis),
+                                ir.OffsetLiteral(value=i1_lo),
+                                ir.OffsetLiteral(value=i1_hi + 1),
+                            ),
+                            _dom(
+                                copy.deepcopy(j_axis),
+                                ir.OffsetLiteral(value=j1_lo),
+                                ir.OffsetLiteral(value=j1_hi + 1),
+                            ),
+                        ),
+                    )
+                    cond_k2 = _and(
+                        _dom(
+                            copy.deepcopy(k_axis),
+                            ir.OffsetLiteral(value=2),
+                            ir.OffsetLiteral(value=3),
+                        ),
+                        _and(
+                            _dom(
+                                copy.deepcopy(id_axis),
+                                ir.OffsetLiteral(value=i2_lo),
+                                ir.OffsetLiteral(value=i2_hi + 1),
+                            ),
+                            _dom(
+                                copy.deepcopy(j_axis),
+                                ir.OffsetLiteral(value=j2_lo),
+                                ir.OffsetLiteral(value=j2_hi + 1),
+                            ),
+                        ),
+                    )
+                    print(im.concat_where(
+                        cond_k0,
+                        copy.deepcopy(expr),
+                        im.concat_where(
+                            cond_k1,
+                            copy.deepcopy(expr),
+                            im.concat_where(
+                                cond_k2,
+                                copy.deepcopy(expr),
+                                copy.deepcopy(target),
+                            ),
+                        ),
+                    ))
+
+                    return im.concat_where(
+                        cond_k0,
+                        copy.deepcopy(expr),
+                        im.concat_where(
+                            cond_k1,
+                            copy.deepcopy(expr),
+                            im.concat_where(
+                                cond_k2,
+                                copy.deepcopy(expr),
+                                copy.deepcopy(target),
+                            ),
+                        ),
+                    )
+
             edge_phase = _edge_phase_size_for_setat()
             i_lo_k0 = _plus_n((i_lo), edge_phase)
             i_hi_k0 = _minus_n((i_hi), edge_phase)
@@ -804,7 +1025,7 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
 
     def visit_FunCall(self, node: ir.FunCall, **kwargs) -> ir.Expr:
         program_param_ids: set[str] = kwargs.get("program_param_ids", set())
-        symbolic_domain_sizes: dict[str, str | int] | None = kwargs.get("symbolic_domain_sizes")
+        symbolic_domain_sizes: dict[str, Any] | None = kwargs.get("symbolic_domain_sizes")
         new_node = copy.deepcopy(self.generic_visit(node, **kwargs))
 
         def _structured_axis_literals() -> list[ir.Expr]:
@@ -855,6 +1076,117 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                             return im.ref(symbolic_size)
                     return im.ensure_expr(symbolic_size)
             return None
+
+        def _pick_symbolic_int(*candidates: str) -> int | None:
+            if symbolic_domain_sizes is None:
+                return None
+            for candidate in candidates:
+                if candidate not in symbolic_domain_sizes:
+                    continue
+                parsed = _coerce_int(symbolic_domain_sizes[candidate])
+                if parsed is not None:
+                    return parsed
+            return None
+
+        def _horizontal_start_mapping_enabled() -> bool:
+            if symbolic_domain_sizes is None:
+                return False
+            raw = symbolic_domain_sizes.get("use_horizontal_start_mapping")
+            if isinstance(raw, bool):
+                return raw
+            if isinstance(raw, numbers.Integral):
+                return int(raw) != 0
+            if isinstance(raw, str):
+                return raw.strip().lower() in {"1", "true", "yes", "on"}
+            return False
+
+        def _entity_start_bounds_from_horizontal_start(
+            entity_name: str,
+        ) -> dict[int, tuple[int, int, int, int]] | None:
+            if symbolic_domain_sizes is None:
+                return None
+            print(f"Entered _entity_start_bounds_from_horizontal_start for {entity_name}")
+            if not _horizontal_start_mapping_enabled():
+                return None
+            print("Horizontal start mapping is enabled.")
+            max_i_int = _pick_symbolic_int("i_max", "domain_i_max", "max_i", "domain_max_i", "nx")
+            max_j_int = _pick_symbolic_int("j_max", "domain_j_max", "max_j", "domain_max_j", "ny")
+            if max_i_int is None or max_j_int is None:
+                return None
+
+            if entity_name == "Edge":
+                mapping_value = symbolic_domain_sizes.get("edge_to_ijk")
+                mapping_rows = _coerce_mapping_rows(mapping_value, expected_len=3)
+                horizontal_start = _pick_symbolic_int(
+                    "horizontal_start_edge",
+                    "horizontal_start_e",
+                    "horizontal_start",
+                )
+            elif entity_name == "Vertex":
+                mapping_value = symbolic_domain_sizes.get("vertex_to_ij")
+                mapping_rows = _coerce_mapping_rows(mapping_value, expected_len=2)
+                horizontal_start = _pick_symbolic_int(
+                    "horizontal_start_vertex",
+                    "horizontal_start_v",
+                    "horizontal_start",
+                )
+            elif entity_name == "Cell":
+                mapping_value = symbolic_domain_sizes.get("cell_to_ijk")
+                mapping_rows = _coerce_mapping_rows(mapping_value, expected_len=3)
+                horizontal_start = _pick_symbolic_int(
+                    "horizontal_start_cell",
+                    "horizontal_start_c",
+                    "horizontal_start",
+                )
+            else:
+                return None
+            print(f"Mapping value for {entity_name}:", mapping_value, " with horizontal start:", horizontal_start)
+            if mapping_rows is None or horizontal_start is None:
+                return None
+            if horizontal_start < 0:
+                return None
+            
+            print(f"Deriving {entity_name} start bounds from horizontal start mapping:\n", _derive_entity_start_bounds_from_mapping(
+                entity_name,
+                mapping_rows=mapping_rows,
+                horizontal_start=horizontal_start,
+                max_i=max_i_int,
+                max_j=max_j_int,
+            ))
+
+            return _derive_entity_start_bounds_from_mapping(
+                entity_name,
+                mapping_rows=mapping_rows,
+                horizontal_start=horizontal_start,
+                max_i=max_i_int,
+                max_j=max_j_int,
+            )
+
+        def _mapping_based_axis_bounds(
+            entity_name: str,
+            axis_name: str,
+            *,
+            kolor: int | None = None,
+        ) -> tuple[ir.Expr, ir.Expr] | None:
+            if axis_name not in {"IDim", "JDim"}:
+                return None
+            print(f"Attempting to get mapping-based axis bounds for {entity_name} along {axis_name} with kolor={kolor}")
+            bounds_by_kolor = _entity_start_bounds_from_horizontal_start(entity_name)
+            if not bounds_by_kolor:
+                return None
+
+            axis_index = 0 if axis_name == "IDim" else 1
+            axis_hi_index = 2 if axis_name == "IDim" else 3
+
+            if entity_name == "Edge" and kolor is not None:
+                if kolor not in bounds_by_kolor:
+                    return None
+                axis_lo = bounds_by_kolor[kolor][axis_index]
+                axis_hi = bounds_by_kolor[kolor][axis_hi_index] + 1
+            else:
+                axis_lo = min(pair[axis_index] for pair in bounds_by_kolor.values())
+                axis_hi = max(pair[axis_hi_index] for pair in bounds_by_kolor.values()) + 1
+            return ir.OffsetLiteral(value=axis_lo), ir.OffsetLiteral(value=axis_hi)
 
         def _lateral_size() -> ir.Expr:
             lateral = _pick_size_param("lateral", "lateral_bounds")
@@ -945,15 +1277,22 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
             *,
             extra_halo: int = 0,
             use_lateral: bool = True,
+            kolor: int | None = None,
         ) -> tuple[ir.Expr, ir.Expr] | None:
-            bounds = _cartesian_axis_bounds(axis_name, use_lateral=use_lateral)
+            bounds = None
+            if use_lateral:
+                bounds = _mapping_based_axis_bounds(entity_name, axis_name, kolor=kolor)
+            if bounds is None:
+                bounds = _cartesian_axis_bounds(axis_name, use_lateral=use_lateral)
             if bounds is None:
                 return None
             lo, hi = bounds
             # Cell-centered fields live on nx*ny interior cells, not on the full
             # vertex-like (nx+1)*(ny+1) extent. Clip one extra layer on both
             # horizontal axes when remapping Cell domains.
-            if entity_name == "Cell":
+            if entity_name == "Cell" and not (
+                use_lateral and _mapping_based_axis_bounds(entity_name, axis_name, kolor=kolor) is not None
+            ):
                 hi = _offset_sub(hi, ir.OffsetLiteral(value=1))
             if axis_name in {"IDim", "JDim"} and extra_halo > 0:
                 extra = ir.OffsetLiteral(value=extra_halo)
@@ -999,6 +1338,89 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
             # Keep comparator predicates kolor-aware to avoid carving out wrong
             # interior stripes when one global IDim/JDim mask is applied.
             if entity_name == "Edge" and extra_halo > 0:
+                mapping_k0_idim = _entity_cartesian_bounds(
+                    entity_name,
+                    "IDim",
+                    extra_halo=extra_halo,
+                    use_lateral=use_lateral,
+                    kolor=0,
+                )
+                mapping_k0_jdim = _entity_cartesian_bounds(
+                    entity_name,
+                    "JDim",
+                    extra_halo=extra_halo,
+                    use_lateral=use_lateral,
+                    kolor=0,
+                )
+                mapping_k1_idim = _entity_cartesian_bounds(
+                    entity_name,
+                    "IDim",
+                    extra_halo=extra_halo,
+                    use_lateral=use_lateral,
+                    kolor=1,
+                )
+                mapping_k1_jdim = _entity_cartesian_bounds(
+                    entity_name,
+                    "JDim",
+                    extra_halo=extra_halo,
+                    use_lateral=use_lateral,
+                    kolor=1,
+                )
+                mapping_k2_idim = _entity_cartesian_bounds(
+                    entity_name,
+                    "IDim",
+                    extra_halo=extra_halo,
+                    use_lateral=use_lateral,
+                    kolor=2,
+                )
+                mapping_k2_jdim = _entity_cartesian_bounds(
+                    entity_name,
+                    "JDim",
+                    extra_halo=extra_halo,
+                    use_lateral=use_lateral,
+                    kolor=2,
+                )
+                if all(
+                    bound is not None
+                    for bound in (
+                        mapping_k0_idim,
+                        mapping_k0_jdim,
+                        mapping_k1_idim,
+                        mapping_k1_jdim,
+                        mapping_k2_idim,
+                        mapping_k2_jdim,
+                    )
+                ):
+                    assert mapping_k0_idim is not None
+                    assert mapping_k0_jdim is not None
+                    assert mapping_k1_idim is not None
+                    assert mapping_k1_jdim is not None
+                    assert mapping_k2_idim is not None
+                    assert mapping_k2_jdim is not None
+
+                    cond_k0 = im.and_(
+                        _axis_domain(Kolor, ir.OffsetLiteral(value=0), ir.OffsetLiteral(value=1)),
+                        im.and_(
+                            _axis_domain(IDim, *mapping_k0_idim),
+                            _axis_domain(JDim, *mapping_k0_jdim),
+                        ),
+                    )
+                    cond_k1 = im.and_(
+                        _axis_domain(Kolor, ir.OffsetLiteral(value=1), ir.OffsetLiteral(value=2)),
+                        im.and_(
+                            _axis_domain(IDim, *mapping_k1_idim),
+                            _axis_domain(JDim, *mapping_k1_jdim),
+                        ),
+                    )
+                    cond_k2 = im.and_(
+                        _axis_domain(Kolor, ir.OffsetLiteral(value=2), ir.OffsetLiteral(value=3)),
+                        im.and_(
+                            _axis_domain(IDim, *mapping_k2_idim),
+                            _axis_domain(JDim, *mapping_k2_jdim),
+                        ),
+                    )
+                    return im.or_(cond_k0, im.or_(cond_k1, cond_k2))
+
                 i_lo, i_hi = idim_bounds
                 j_lo, j_hi = jdim_bounds
                 i_lo_k1k2 = _offset_sub(i_lo, ir.OffsetLiteral(value=1))
@@ -1744,7 +2166,7 @@ class CartUnroll:
 
     @classmethod
     def apply(
-        cls, node: ir.Node, *, symbolic_domain_sizes: dict[str, str | int] | None = None
+        cls, node: ir.Node, *, symbolic_domain_sizes: dict[str, Any] | None = None
     ) -> ir.Node:
         transformed = CartesianDomainAndTypeRemapper.apply(
             node, symbolic_domain_sizes=symbolic_domain_sizes
