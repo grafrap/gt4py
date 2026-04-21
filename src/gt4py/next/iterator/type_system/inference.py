@@ -36,10 +36,9 @@ def _is_representable_as_int(s: int | str) -> bool:
 def _set_node_type(node: itir.Node, type_: ts.TypeSpec) -> None:
     if node.type and not isinstance(type_, ts.DeferredType):
         if not type_info.is_compatible_type(node.type, type_):
-            if (
-                os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1"
-                and _is_structured_remap_compatibility_case(node.type, type_)
-            ):
+            if os.environ.get(
+                "USE_STRUCTURED_BACKEND", "0"
+            ) == "1" and _is_structured_remap_compatibility_case(node.type, type_):
                 type_ = node.type
             else:
                 raise AssertionError(
@@ -81,7 +80,9 @@ def _is_structured_remap_compatibility_case(existing: ts.TypeSpec, inferred: ts.
         if tuple(existing.defined_dims) == tuple(inferred.defined_dims):
             return True
 
-        if len(existing.defined_dims) == len(inferred.defined_dims) + 1 and existing.defined_dims[0].value in {
+        if len(existing.defined_dims) == len(inferred.defined_dims) + 1 and existing.defined_dims[
+            0
+        ].value in {
             "Edge",
             "Cell",
             "Vertex",
@@ -433,10 +434,9 @@ class ITIRTypeInference(eve.NodeTranslator):
             if isinstance(result, ts.TypeSpec):
                 if node.type and not isinstance(node.type, ts.DeferredType):
                     if not type_info.is_compatible_type(node.type, result):
-                        if (
-                            os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1"
-                            and _is_structured_remap_compatibility_case(node.type, result)
-                        ):
+                        if os.environ.get(
+                            "USE_STRUCTURED_BACKEND", "0"
+                        ) == "1" and _is_structured_remap_compatibility_case(node.type, result):
                             result = node.type
                         else:
                             raise TypeError(
@@ -499,10 +499,12 @@ class ITIRTypeInference(eve.NodeTranslator):
             # the target can have fewer elements than the expr in which case the output from the
             # expression is simply discarded.
             expr_type = functools.reduce(
-                lambda tuple_type, i: tuple_type.types[i]  # type: ignore[attr-defined]  # format ensured by primitive_constituents
-                # `ts.DeferredType` only occurs for scans returning a tuple
-                if not isinstance(tuple_type, ts.DeferredType)
-                else ts.DeferredType(constraint=None),
+                lambda tuple_type, i: (
+                    tuple_type.types[i]  # type: ignore[attr-defined]  # format ensured by primitive_constituents
+                    # `ts.DeferredType` only occurs for scans returning a tuple
+                    if not isinstance(tuple_type, ts.DeferredType)
+                    else ts.DeferredType(constraint=None)
+                ),
                 path,
                 node.expr.type,
             )
@@ -610,47 +612,7 @@ class ITIRTypeInference(eve.NodeTranslator):
 
         fun = self.visit(node.fun, ctx=ctx)
         args = self.visit(node.args, ctx=ctx)
-        try:
-            result = fun(*args, **syntactic_info, offset_provider_type=self.offset_provider_type)
-        except TypeError as exc:
-            # Domain expressions can carry small integer literals as int64 even though
-            # integer-index arithmetic is performed in INTEGER_INDEX_BUILTIN (int32).
-            # If an int64 literal fits the index range, retry with index scalar type.
-            if is_call_to(node, builtins.BINARY_MATH_NUMBER_BUILTINS) and len(args) == 2:
-                index_kind = getattr(ts.ScalarKind, builtins.INTEGER_INDEX_BUILTIN.upper())
-                index_type = ts.ScalarType(kind=index_kind)
-                min_val, max_val = type_info.arithmetic_bounds(index_type)
-
-                def _retry_with_index_literal(idx_index: int, idx_literal: int) -> ts.TypeSpec | None:
-                    lhs_t, rhs_t = args[idx_index], args[idx_literal]
-                    if not (
-                        isinstance(lhs_t, ts.ScalarType)
-                        and isinstance(rhs_t, ts.ScalarType)
-                        and lhs_t.kind == index_kind
-                        and rhs_t.kind == ts.ScalarKind.INT64
-                        and isinstance(node.args[idx_literal], itir.Literal)
-                        and _is_representable_as_int(node.args[idx_literal].value)
-                    ):
-                        return None
-                    lit_val = int(node.args[idx_literal].value)
-                    if not (min_val <= lit_val <= max_val):
-                        return None
-
-                    coerced_args = list(args)
-                    coerced_args[idx_literal] = index_type
-                    return fun(
-                        *coerced_args,
-                        **syntactic_info,
-                        offset_provider_type=self.offset_provider_type,
-                    )
-
-                retried = _retry_with_index_literal(0, 1)
-                if retried is None:
-                    retried = _retry_with_index_literal(1, 0)
-                if retried is not None:
-                    return retried
-
-            raise
+        result = fun(*args, **syntactic_info, offset_provider_type=self.offset_provider_type)
 
         if isinstance(result, ObservableTypeSynthesizer):
             assert not result.node
