@@ -12,10 +12,7 @@ import numpy as np
 
 from gt4py import next as gtx
 from gt4py.next.modules.translator import (  # type: ignore[import-not-found]
-    IDim,
     IndexMap,
-    JDim,
-    Kolor,
     StructuredRemapSizes,
     pack_edge_field_to_structured,
     pack_sparse_local_field_to_structured,
@@ -23,6 +20,10 @@ from gt4py.next.modules.translator import (  # type: ignore[import-not-found]
     unpack_edge_field,
     unpack_vertex_field_to_unstructured,
 )
+IDim = gtx.Dimension("IDim")
+JDim = gtx.Dimension("JDim")
+Kolor = gtx.Dimension("Kolor")
+
 from gt4py.next.program_processors.program_setup_utils import setup_program
 from gt4py.next.program_processors.runners import gtfn as gtfn_runner
 
@@ -37,6 +38,7 @@ class StructuredExecutionWrapper:
         v2e_conn: np.ndarray,
         allocator: Any,
         offset_provider: dict,
+        horizontal_start: int,
     ) -> None:
         self.index_map = index_map
         self.e2v_conn = e2v_conn
@@ -45,7 +47,7 @@ class StructuredExecutionWrapper:
 
         # Compile the actual structured GT4Py program under the hood
         self._compiled_program = setup_program(
-            operator, backend=backend, offset_provider=offset_provider
+            operator, backend=backend, offset_provider=offset_provider, horizontal_start=horizontal_start
         )
 
     def _is_unstructured(self, field: gtx.Field, axis_name: str) -> bool:
@@ -130,6 +132,7 @@ def setup_smart_program(
     remap_sizes: StructuredRemapSizes,
     allocator: Any,
     offset_provider: dict,
+    horizontal_start: int,
 ) -> StructuredExecutionWrapper:
     """Factory to create the structured wrapper."""
     structured_backend = gtfn_runner.GTFNBackendFactory(
@@ -138,6 +141,7 @@ def setup_smart_program(
         otf_workflow__bare_translation__symbolic_domain_sizes={
             "max_i": int(remap_sizes.max_i),
             "max_j": int(remap_sizes.max_j),
+            "horizontal_start": horizontal_start,
         },
     )
 
@@ -149,4 +153,5 @@ def setup_smart_program(
         v2e_conn=setup.nodes2edge_connectivity.asnumpy(),
         allocator=allocator,
         offset_provider=offset_provider,
+        horizontal_start=horizontal_start,
     )
