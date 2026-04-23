@@ -931,19 +931,19 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                             ),
                         ),
                     )
-                    print(im.concat_where(
-                        cond_k0,
-                        copy.deepcopy(expr),
-                        im.concat_where(
-                            cond_k1,
-                            copy.deepcopy(expr),
-                            im.concat_where(
-                                cond_k2,
-                                copy.deepcopy(expr),
-                                copy.deepcopy(target),
-                            ),
-                        ),
-                    ))
+                    # print(im.concat_where(
+                    #     cond_k0,
+                    #     copy.deepcopy(expr),
+                    #     im.concat_where(
+                    #         cond_k1,
+                    #         copy.deepcopy(expr),
+                    #         im.concat_where(
+                    #             cond_k2,
+                    #             copy.deepcopy(expr),
+                    #             copy.deepcopy(target),
+                    #         ),
+                    #     ),
+                    # ))
 
                     return im.concat_where(
                         cond_k0,
@@ -1108,10 +1108,10 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
         ) -> dict[int, tuple[int, int, int, int]] | None:
             if symbolic_domain_sizes is None:
                 return None
-            print(f"Entered _entity_start_bounds_from_horizontal_start for {entity_name}")
+            # print(f"Entered _entity_start_bounds_from_horizontal_start for {entity_name}")
             if not _horizontal_start_mapping_enabled():
                 return None
-            print("Horizontal start mapping is enabled.")
+            # print("Horizontal start mapping is enabled.")
             max_i_int = _pick_symbolic_int("i_max", "domain_i_max", "max_i", "domain_max_i", "nx")
             max_j_int = _pick_symbolic_int("j_max", "domain_j_max", "max_j", "domain_max_j", "ny")
             if max_i_int is None or max_j_int is None:
@@ -1143,19 +1143,19 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                 )
             else:
                 return None
-            print(f"Mapping value for {entity_name}:", mapping_value, " with horizontal start:", horizontal_start)
+            # print(f"Mapping value for {entity_name}:", mapping_value, " with horizontal start:", horizontal_start)
             if mapping_rows is None or horizontal_start is None:
                 return None
             if horizontal_start < 0:
                 return None
             
-            print(f"Deriving {entity_name} start bounds from horizontal start mapping:\n", _derive_entity_start_bounds_from_mapping(
-                entity_name,
-                mapping_rows=mapping_rows,
-                horizontal_start=horizontal_start,
-                max_i=max_i_int,
-                max_j=max_j_int,
-            ))
+            # print(f"Deriving {entity_name} start bounds from horizontal start mapping:\n", _derive_entity_start_bounds_from_mapping(
+            #     entity_name,
+            #     mapping_rows=mapping_rows,
+            #     horizontal_start=horizontal_start,
+            #     max_i=max_i_int,
+            #     max_j=max_j_int,
+            # ))
 
             return _derive_entity_start_bounds_from_mapping(
                 entity_name,
@@ -1173,7 +1173,7 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
         ) -> tuple[ir.Expr, ir.Expr] | None:
             if axis_name not in {"IDim", "JDim"}:
                 return None
-            print(f"Attempting to get mapping-based axis bounds for {entity_name} along {axis_name} with kolor={kolor}")
+            # print(f"Attempting to get mapping-based axis bounds for {entity_name} along {axis_name} with kolor={kolor}")
             bounds_by_kolor = _entity_start_bounds_from_horizontal_start(entity_name)
             if not bounds_by_kolor:
                 return None
@@ -1527,31 +1527,80 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                     threshold_id == "start_2nd_nudge_line_idx_e"
                     or _expr_contains_symbol(threshold_expr, {"start_2nd_nudge_line_idx_e"})
                 )
-                print(f"is start_2nd_nudge_threshold: {is_start_2nd_nudge_threshold} for entity_axis {entity_axis} with threshold_expr {threshold_expr} and threshold_id {threshold_id}")
+
+                def _mapping_based_threshold_condition(tid: str) -> ir.Expr | None:
+                    """Build per-kolor condition from precomputed bounds stored in symbolic_domain_sizes."""
+                    if symbolic_domain_sizes is None:
+                        return None
+                    IDim_d = common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL)
+                    JDim_d = common.Dimension("JDim", kind=common.DimensionKind.HORIZONTAL)
+                    Kolor_d = common.Dimension("Kolor", kind=common.DimensionKind.HORIZONTAL)
+
+                    def _dom(axis, lo_val: int, hi_val: int) -> ir.Expr:
+                        return im.call("cartesian_domain")(
+                            im.named_range(
+                                copy.deepcopy(axis),
+                                ir.OffsetLiteral(value=lo_val),
+                                ir.OffsetLiteral(value=hi_val),
+                            )
+                        )
+
+                    conds = []
+                    for k in range(3):
+                        ilo = symbolic_domain_sizes.get(f"{tid}_k{k}_ilo")
+                        jlo = symbolic_domain_sizes.get(f"{tid}_k{k}_jlo")
+                        ihi = symbolic_domain_sizes.get(f"{tid}_k{k}_ihi")
+                        jhi = symbolic_domain_sizes.get(f"{tid}_k{k}_jhi")
+                        if None in (ilo, jlo, ihi, jhi):
+                            return None
+                        conds.append(im.and_(
+                            _dom(Kolor_d, k, k + 1),
+                            im.and_(
+                                _dom(IDim_d, int(ilo), int(ihi)),
+                                _dom(JDim_d, int(jlo), int(jhi)),
+                            ),
+                        ))
+                    return im.or_(conds[0], im.or_(conds[1], conds[2])) if len(conds) == 3 else None
+
+                # Prefer exact mapping-based bounds (injected at compile time by the wrapper).
+                has_threshold_mapping = (
+                    entity_axis == "Edge"
+                    and threshold_id is not None
+                    and symbolic_domain_sizes is not None
+                    and f"{threshold_id}_k0_ilo" in symbolic_domain_sizes
+                )
 
                 extra_halo = 0
                 use_lateral = True
-                if entity_axis == "Edge" and is_start_2nd_nudge_threshold:
-                    # Equivalent to translator edge remap with boundary_level=10.
+                if has_threshold_mapping:
+                    interior_cond = _mapping_based_threshold_condition(threshold_id)
+                elif entity_axis == "Edge" and is_start_2nd_nudge_threshold:
+                    # Legacy fallback: symmetric clip when mapping bounds not available.
                     extra_halo = 2
+                    interior_cond = _structured_entity_condition(
+                        entity_axis, extra_halo=extra_halo, use_lateral=use_lateral
+                    )
                 elif entity_axis == "Cell" and is_interior_threshold:
-                    # Cell interior starts one shell deeper than edge/vertex mapping.
                     extra_halo = 1
+                    interior_cond = _structured_entity_condition(
+                        entity_axis, extra_halo=extra_halo, use_lateral=use_lateral
+                    )
                 elif entity_axis == "Cell" and is_halo_threshold:
-                    # `halo_idx` is the upper Cell bound; keep full Cell coverage.
                     use_lateral = False
+                    interior_cond = _structured_entity_condition(
+                        entity_axis, extra_halo=extra_halo, use_lateral=use_lateral
+                    )
+                else:
+                    interior_cond = _structured_entity_condition(
+                        entity_axis, extra_halo=extra_halo, use_lateral=use_lateral
+                    )
 
-                interior_cond = _structured_entity_condition(
-                    entity_axis, extra_halo=extra_halo, use_lateral=use_lateral
-                )
-                if is_start_2nd_nudge_threshold:
-                    print(f"Derived interior condition for start_2nd_nudge_threshold on {entity_axis}:", interior_cond)
                 if interior_cond is not None:
                     if is_halo_threshold:
                         is_positive = (
                             axis_side == "lhs" and op_name in {"less_equal", "less"}
                         ) or (axis_side == "rhs" and op_name in {"greater_equal", "greater"})
-                    elif is_interior_threshold or is_start_2nd_nudge_threshold:
+                    elif is_interior_threshold or is_start_2nd_nudge_threshold or has_threshold_mapping:
                         is_positive = (
                             axis_side == "lhs" and op_name in {"greater_equal", "greater"}
                         ) or (axis_side == "rhs" and op_name in {"less_equal", "less"})

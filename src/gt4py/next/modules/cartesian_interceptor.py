@@ -133,6 +133,16 @@ _CENTER_ELEMENT_BY_PREFIX: dict[str, str] = {
     "V": "Vertex",
 }
 
+# gtx.int32 stencil parameters that represent flat edge-index zone boundaries.
+# For each such param found in call kwargs the wrapper computes per-kolor (i,j) bounds
+# from the edge_to_ijk mapping and bakes them into symbolic_domain_sizes so that
+# cart_unroll.py can use them instead of the symmetric extra_halo heuristic.
+_KNOWN_EDGE_THRESHOLD_PARAMS: frozenset[str] = frozenset({
+    "start_2nd_nudge_line_idx_e",
+    "start_nudging_line_idx_e",
+    "start_halo_level_2_idx_e",
+})
+
 
 def pack_sparse_local_field_to_structured(
     coeff: np.ndarray,
@@ -492,18 +502,55 @@ class GenericStructuredWrapper:
         self._operator = operator
         self._backend_factory = backend_factory
         self._symbolic_domain_sizes_base = symbolic_domain_sizes
-        self._compiled_cache: dict[int, object] = {}
+        # Cache keyed by (horizontal_start, extra_thresholds) tuple.
+        self._compiled_cache: dict[tuple, object] = {}
 
-    def _get_or_compile(self, horizontal_start: int):
-        """Return (and cache) a compiled program specialised for the given horizontal_start."""
-        if horizontal_start in self._compiled_cache:
-            return self._compiled_cache[horizontal_start]
+    def _get_or_compile(
+        self,
+        horizontal_start: int,
+        extra_thresholds: tuple[tuple[str, int], ...] = (),
+    ):
+        """Return (and cache) a compiled program for the given horizontal_start + thresholds."""
+        cache_key = (horizontal_start, extra_thresholds)
+        if cache_key in self._compiled_cache:
+            return self._compiled_cache[cache_key]
         sds = dict(self._symbolic_domain_sizes_base)
         sds["horizontal_start"] = horizontal_start
         sds["horizontal_start_edge"] = horizontal_start
         sds["horizontal_start_cell"] = horizontal_start
         sds["horizontal_start_vertex"] = horizontal_start
-        print(f"[structured] compiling '{self.operator_name}' for horizontal_start={horizontal_start}")
+
+        # Inject per-kolor bounds for each known edge-threshold parameter.
+        if extra_thresholds and self.index_map is not None:
+            edge_to_ijk = getattr(self.index_map, "edge_to_ijk", None)
+            if edge_to_ijk is not None:
+                from gt4py.next.iterator.transforms.cart_unroll import (
+                    _derive_entity_start_bounds_from_mapping,
+                )
+                mapping_rows = tuple(
+                    tuple(int(x) for x in row) for row in edge_to_ijk
+                )
+                for param_name, threshold_value in extra_thresholds:
+                    if threshold_value <= 0:
+                        continue
+                    bounds = _derive_entity_start_bounds_from_mapping(
+                        "Edge",
+                        mapping_rows=mapping_rows,
+                        horizontal_start=threshold_value,
+                        max_i=self.max_i,
+                        max_j=self.max_j,
+                    )
+                    if bounds is not None:
+                        for kolor, (ilo, jlo, ihi, jhi) in bounds.items():
+                            sds[f"{param_name}_k{kolor}_ilo"] = ilo
+                            sds[f"{param_name}_k{kolor}_jlo"] = jlo
+                            sds[f"{param_name}_k{kolor}_ihi"] = ihi + 1  # exclusive
+                            sds[f"{param_name}_k{kolor}_jhi"] = jhi + 1  # exclusive
+
+        print(
+            f"[structured] compiling '{self.operator_name}' for "
+            f"horizontal_start={horizontal_start}, thresholds={extra_thresholds}"
+        )
         structured_backend = self._backend_factory(
             cached=True,
             otf_workflow__cached_translation=True,
@@ -515,7 +562,7 @@ class GenericStructuredWrapper:
             backend=structured_backend,
             offset_provider=self.structured_offset_provider,
         )
-        self._compiled_cache[horizontal_start] = compiled
+        self._compiled_cache[cache_key] = compiled
         return compiled
 
     def _get_connectivity(self, offset_provider, name: str):
@@ -873,7 +920,16 @@ class GenericStructuredWrapper:
             or 0
         )
         horizontal_start = int(hs_raw) if hs_raw is not None else 0
-        compiled = self._get_or_compile(horizontal_start)
+
+        # Collect known edge-threshold parameters so per-kolor bounds can be computed.
+        extra_thresholds = tuple(sorted(
+            (name, int(val))
+            for name, val in kwargs.items()
+            if name in _KNOWN_EDGE_THRESHOLD_PARAMS
+            and isinstance(val, (int, np.integer))
+            and int(val) > 0
+        ))
+        compiled = self._get_or_compile(horizontal_start, extra_thresholds)
 
         if isinstance(compiled, functools.partial) and hasattr(compiled.func, "_compiled_programs"):
             bound_kwargs = dict(compiled.keywords or {})
