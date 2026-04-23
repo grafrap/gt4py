@@ -344,6 +344,8 @@ def apply_common_transforms(
         ir = cart_unroll.CartesianReductionUnroller.apply(ir)  # type: ignore[assignment]
         ir = NormalizeShifts().visit(ir)
         _print_ir_block("=== GTIR AFTER CARTESIAN UNROLLING ===", ir, enabled=print_ir)
+        # ir = cart_unroll.KolorConstantPropagation.apply(ir)  # type: ignore[assignment]
+        # _print_ir_block("=== GTIR AFTER KOLOR CONSTANT PROPAGATION ===", ir, enabled=print_ir)
 
     ir = infer_domain_ops.InferDomainOps.apply(ir)
     ir = concat_where.canonicalize_domain_argument(ir)
@@ -361,6 +363,9 @@ def apply_common_transforms(
     ir = prune_empty_concat_where.prune_empty_concat_where(ir)
     ir = remove_broadcast.RemoveBroadcast.apply(ir)
     ir = cast(itir.Program, ConstantFolding.apply(ir))
+    # After ConstantFolding some K ranges may now be provably empty (e.g. when vertical_end
+    # is small); prune those dead concat_where branches so they don't inflate the IR.
+    ir = prune_empty_concat_where.prune_empty_concat_where(ir)
     _print_ir_block(
         "=== GTIR AFTER COMMON TRANSFORMS BEFORE INFER_DOMAIN ===", ir, enabled=print_ir
     )
@@ -393,6 +398,12 @@ def apply_common_transforms(
             )
         except Exception:
             pass
+
+        # FuseAsFieldOp intersects as_fieldop domains which introduces nested maximum/minimum
+        # expressions in the K bounds (e.g. maximum(maximum(X, Y), Y)). Run ConstantFolding
+        # immediately after to algebraically simplify them before the next fusion round, otherwise
+        # the nesting grows unboundedly over iterations.
+        inlined = ConstantFolding.apply(inlined)  # type: ignore[assignment]
 
         if inlined == ir:
             break

@@ -141,6 +141,12 @@ _KNOWN_EDGE_THRESHOLD_PARAMS: frozenset[str] = frozenset({
     "start_2nd_nudge_line_idx_e",
     "start_nudging_line_idx_e",
     "start_halo_level_2_idx_e",
+    "start_edge_lateral_boundary",
+    "start_edge_lateral_boundary_level_7",
+    "start_edge_nudging_level_2",
+    "end_edge_nudging",
+    "end_edge_halo",
+
 })
 
 

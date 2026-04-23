@@ -195,6 +195,7 @@ def _build_field_concat_where_from_branches(
     domain: ir.Expr | None = None,
     inferred_kolor_start: int | None = None,
     apply_edge_shape_bounds: bool = False,
+    current_kolor: int | None = None,
 ):
     def _extract_kolor_interval(cond_expr: ir.Expr | None) -> tuple[int, int] | None:
         if cond_expr is None or not cpm.is_call_to(cond_expr, "cartesian_domain"):
@@ -242,7 +243,14 @@ def _build_field_concat_where_from_branches(
     def _edge_shape_domain(
         source_kolor: int,
         shift_spec: tuple[ir.OffsetLiteral, ...],
+        current_kolor: int | None = None,
     ) -> ir.Expr | None:
+        # With per-kolor split, the SetAt domain is already restricted to valid
+        # interior source edges, so all neighbor accesses are within the valid
+        # grid range. Clipping the already-narrow per-kolor domain would
+        # over-clip and exclude valid boundary source positions.
+        if current_kolor is not None:
+            return None
         if domain is None or not cpm.is_call_to(domain, "cartesian_domain"):
             return None
 
@@ -316,6 +324,31 @@ def _build_field_concat_where_from_branches(
             return None, None
         return fallback, fallback + 1
 
+    # When a specific kolor is known (per-kolor SetAt split), select the matching branch
+    # directly without generating a concat_where — but only for edge-center connectivities.
+    if current_kolor is not None:
+        inferred = inferred_kolor_start
+        fallback_spec = branches[-1][1] if branches else None
+        for cond_expr, shift_spec in branches:
+            k, next_k = _infer_source_kolor_from_cond(cond_expr, inferred)
+            inferred = next_k
+            if k == current_kolor:
+                branch_domain = domain
+                if apply_edge_shape_bounds:
+                    ed = _edge_shape_domain(k, shift_spec, current_kolor=current_kolor)
+                    if ed is not None:
+                        branch_domain = ed
+                return _make_lifted_deref_shift(arg, shift_spec, branch_domain)
+            fallback_spec = shift_spec
+        # Fallback: no explicit match found (e.g., else-branch for the last kolor)
+        if fallback_spec is not None:
+            branch_domain = domain
+            if apply_edge_shape_bounds:
+                ed = _edge_shape_domain(current_kolor, fallback_spec, current_kolor=current_kolor)
+                if ed is not None:
+                    branch_domain = ed
+            return _make_lifted_deref_shift(arg, fallback_spec, branch_domain)
+
     cond, shift_spec = branches[0]
     source_kolor, next_inferred_kolor = _infer_source_kolor_from_cond(cond, inferred_kolor_start)
     branch_domain = domain
@@ -336,8 +369,44 @@ def _build_field_concat_where_from_branches(
             domain,
             inferred_kolor_start=next_inferred_kolor,
             apply_edge_shape_bounds=apply_edge_shape_bounds,
+            current_kolor=current_kolor,
         ),
     )
+
+
+def _is_unstructured_edge_domain_stmt(domain_expr: ir.Expr) -> bool:
+    """Return True if any domain node in domain_expr names the Edge axis."""
+    def _iter(expr: ir.Expr):
+        if cpm.is_call_to(expr, "make_tuple"):
+            for a in expr.args:
+                yield from _iter(a)
+            return
+        yield expr
+
+    for dom in _iter(domain_expr):
+        if not cpm.is_call_to(dom, "unstructured_domain"):
+            continue
+        for nr in dom.args:
+            if cpm.is_call_to(nr, "named_range") and len(nr.args) == 3:
+                if _get_axis_name(nr.args[0]) == "Edge":
+                    return True
+    return False
+
+
+def _kolor_from_domain(domain: ir.Expr | None) -> int | None:
+    """Return k if *domain* has a single-kolor Kolor:[k, k+1) range, else None."""
+    if domain is None or not cpm.is_call_to(domain, "cartesian_domain"):
+        return None
+    for nr in domain.args:
+        if not (cpm.is_call_to(nr, "named_range") and len(nr.args) == 3):
+            continue
+        if _get_axis_name(nr.args[0]) != "Kolor":
+            continue
+        lo, hi = nr.args[1], nr.args[2]
+        if isinstance(lo, ir.OffsetLiteral) and isinstance(hi, ir.OffsetLiteral):
+            if hi.value - lo.value == 1:
+                return int(lo.value)
+    return None
 
 
 def _get_axis_name(axis_expr: ir.Expr) -> str | None:
@@ -347,103 +416,6 @@ def _get_axis_name(axis_expr: ir.Expr) -> str | None:
     if hasattr(axis_expr, "value") and isinstance(axis_expr.value, str):
         return axis_expr.value
     return None
-
-
-def _to_offset_literal(node: ir.Expr) -> ir.Expr:
-    """Forces integer bounds to be formatted as OffsetLiterals (with 'ₒ')."""
-    if isinstance(node, ir.OffsetLiteral):
-        return copy.deepcopy(node)
-    if hasattr(node, "value") and str(node.value).lstrip("-").isdigit():
-        return ir.OffsetLiteral(value=int(str(node.value)))
-    return copy.deepcopy(node)
-
-
-def _compute_shift_guard_domain(
-    shift_spec: tuple[ir.OffsetLiteral, ...],
-    full_domain: ir.Expr,
-) -> ir.Expr | None:
-    if not cpm.is_call_to(full_domain, "cartesian_domain"):
-        return None
-
-    shifts_by_dim: dict[str, int] = {}
-    for k in range(0, len(shift_spec), 2):
-        if k + 1 >= len(shift_spec):
-            break
-        dim_tag = shift_spec[k]
-        offset_tag = shift_spec[k + 1]
-        if (
-            isinstance(dim_tag, ir.OffsetLiteral)
-            and isinstance(dim_tag.value, str)
-            and isinstance(offset_tag, ir.OffsetLiteral)
-            and isinstance(offset_tag.value, int)
-        ):
-            shifts_by_dim[dim_tag.value] = offset_tag.value
-
-    domain_ranges: dict[str, tuple[ir.Expr, ir.Expr, ir.Expr]] = {}
-    for range_expr in full_domain.args:
-        if cpm.is_call_to(range_expr, "named_range") and len(range_expr.args) == 3:
-            axis_name = _get_axis_name(range_expr.args[0])
-            if axis_name is not None:
-                domain_ranges[axis_name] = (
-                    range_expr.args[0],
-                    range_expr.args[1],
-                    range_expr.args[2],
-                )
-
-    new_ranges: dict[str, tuple[ir.Expr, ir.Expr, ir.Expr]] = {}
-    needs_restriction = False
-
-    for axis_name, (axis_lit, lo, hi) in domain_ranges.items():
-        lo_off = _to_offset_literal(lo)
-        hi_off = _to_offset_literal(hi)
-
-        # Hard-skip Kolor: Never shrink it.
-        if axis_name == "Kolor":
-            new_ranges[axis_name] = (axis_lit, lo_off, hi_off)
-            continue
-
-        offset = shifts_by_dim.get(axis_name, 0)
-
-        if offset < 0:
-            if isinstance(lo_off, ir.OffsetLiteral) and isinstance(lo_off.value, int):
-                new_lo = ir.OffsetLiteral(value=max(lo_off.value, -offset))
-            else:
-                new_lo = ir.OffsetLiteral(value=-offset)
-            new_ranges[axis_name] = (axis_lit, new_lo, hi_off)
-            needs_restriction = True
-
-        elif offset > 0:
-            if isinstance(hi_off, ir.OffsetLiteral) and isinstance(hi_off.value, int):
-                new_hi = ir.OffsetLiteral(value=hi_off.value - offset)
-            else:
-                new_hi = im.minus(hi_off, ir.OffsetLiteral(value=offset))
-            new_ranges[axis_name] = (axis_lit, lo_off, new_hi)
-            needs_restriction = True
-
-        else:
-            new_ranges[axis_name] = (axis_lit, lo_off, hi_off)
-
-    if not needs_restriction:
-        return None
-
-    dim_kind_map = {
-        "IDim": common.DimensionKind.HORIZONTAL,
-        "JDim": common.DimensionKind.HORIZONTAL,
-        "Kolor": common.DimensionKind.HORIZONTAL,
-        "K": common.DimensionKind.VERTICAL,
-    }
-    dim_ranges: dict[common.Dimension, tuple[ir.Expr, ir.Expr]] = {}
-    for axis_name, (axis_lit, lo, hi) in new_ranges.items():
-        kind = (
-            axis_lit.kind
-            if isinstance(axis_lit, ir.AxisLiteral)
-            else dim_kind_map.get(axis_name, common.DimensionKind.HORIZONTAL)
-        )
-        dim = common.Dimension(axis_name, kind=kind)
-        dim_ranges[dim] = (lo, hi)
-
-    return im.domain(common.GridType.CARTESIAN, dim_ranges)
-
 
 def _concat_where_condition_from_domain(domain_expr: ir.Expr) -> ir.Expr:
     if cpm.is_call_to(domain_expr, "cartesian_domain") and len(domain_expr.args) > 1:
@@ -643,7 +615,18 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
         ]
         child_kwargs = dict(kwargs)
         child_kwargs["program_param_ids"] = program_param_ids
-        new_body = [self.visit(stmt, **child_kwargs) for stmt in node.body]
+
+        new_body: list[ir.SetAt] = []
+        for stmt in node.body:
+            # Split edge-domain SetAts into 3 per-kolor SetAts so that the
+            # CartesianReductionUnroller can use the fixed kolor from the domain
+            # to select shift branches directly (avoiding inner kolor concat_where).
+            if isinstance(stmt, ir.SetAt) and _is_unstructured_edge_domain_stmt(stmt.domain):
+                for k in range(3):
+                    new_body.append(self.visit(stmt, current_kolor=k, **child_kwargs))
+            else:
+                new_body.append(self.visit(stmt, **child_kwargs))
+
         return ir.Program(
             id=node.id,
             function_definitions=node.function_definitions,
@@ -1009,6 +992,124 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                 ),
             )
 
+        def _per_kolor_domain(kolor: int, full_structured_domain: ir.Expr) -> ir.Expr | None:
+            """Build a kolor-specific SetAt domain from the full structured domain."""
+            cart_domain = None
+            for dom in (full_structured_domain,):
+                if cpm.is_call_to(dom, "make_tuple"):
+                    for a in dom.args:
+                        if cpm.is_call_to(a, "cartesian_domain"):
+                            cart_domain = a
+                            break
+                elif cpm.is_call_to(dom, "cartesian_domain"):
+                    cart_domain = dom
+                    break
+            if cart_domain is None:
+                return None
+
+            id_axis = j_axis = k_axis = None
+            other_ranges: list[ir.Expr] = []
+            i_lo = i_hi = j_lo = j_hi = None
+
+            for nr in cart_domain.args:
+                if not (cpm.is_call_to(nr, "named_range") and len(nr.args) == 3):
+                    continue
+                name = _get_axis_name(nr.args[0])
+                if name == "IDim":
+                    id_axis = nr.args[0]
+                    i_lo, i_hi = nr.args[1], nr.args[2]
+                elif name == "JDim":
+                    j_axis = nr.args[0]
+                    j_lo, j_hi = nr.args[1], nr.args[2]
+                elif name == "Kolor":
+                    k_axis = nr.args[0]
+                else:
+                    other_ranges.append(copy.deepcopy(nr))
+
+            if id_axis is None or j_axis is None or k_axis is None:
+                return None
+
+            # Compute per-kolor I/J bounds using the same logic as _build_edge_validity_masked_expr.
+            mapping_rows = _coerce_mapping_rows(symbolic_domain_sizes.get("edge_to_ijk"), 3)
+            horizontal_start = _pick_symbolic_int(
+                "horizontal_start_edge", "horizontal_start_e", "horizontal_start"
+            )
+            max_i_int = _pick_symbolic_int("i_max", "domain_i_max", "max_i", "domain_max_i", "nx")
+            max_j_int = _pick_symbolic_int("j_max", "domain_j_max", "max_j", "domain_max_j", "ny")
+
+            ilo: ir.Expr | None = None
+            jlo: ir.Expr | None = None
+            ihi: ir.Expr | None = None
+            jhi: ir.Expr | None = None
+
+            if (
+                _horizontal_start_mapping_enabled()
+                and mapping_rows is not None
+                and horizontal_start is not None
+                and horizontal_start > 0
+                and max_i_int is not None
+                and max_j_int is not None
+            ):
+                by_kolor = _derive_entity_start_bounds_from_mapping(
+                    "Edge",
+                    mapping_rows=mapping_rows,
+                    horizontal_start=horizontal_start,
+                    max_i=max_i_int,
+                    max_j=max_j_int,
+                )
+                if by_kolor is not None and kolor in by_kolor:
+                    k_ilo, k_jlo, k_ihi, k_jhi = by_kolor[kolor]
+                    ilo = ir.OffsetLiteral(value=k_ilo)
+                    jlo = ir.OffsetLiteral(value=k_jlo)
+                    ihi = ir.OffsetLiteral(value=k_ihi + 1)
+                    jhi = ir.OffsetLiteral(value=k_jhi + 1)
+
+            if ilo is None:
+                # Phase-based fallback bounds per kolor
+                edge_phase = _edge_phase_size_for_setat()
+                if kolor == 0:
+                    ilo = _plus_n(copy.deepcopy(i_lo), edge_phase)
+                    jlo = copy.deepcopy(j_lo)
+                    ihi = _minus_n(copy.deepcopy(i_hi), edge_phase)
+                    jhi = _minus_one(copy.deepcopy(j_hi))
+                elif kolor == 1:
+                    ilo = copy.deepcopy(i_lo)
+                    jlo = _plus_n(copy.deepcopy(j_lo), edge_phase)
+                    ihi = _minus_one(copy.deepcopy(i_hi))
+                    jhi = _minus_n(copy.deepcopy(j_hi), edge_phase)
+                else:  # kolor == 2
+                    ilo = copy.deepcopy(i_lo)
+                    jlo = copy.deepcopy(j_lo)
+                    ihi = _minus_one(copy.deepcopy(i_hi))
+                    jhi = _minus_one(copy.deepcopy(j_hi))
+
+            if ilo is None or jlo is None or ihi is None or jhi is None:
+                return None
+
+            new_ranges = [
+                im.named_range(
+                    cast(ir.AxisLiteral | common.Dimension, copy.deepcopy(id_axis)), ilo, ihi
+                ),
+                im.named_range(
+                    cast(ir.AxisLiteral | common.Dimension, copy.deepcopy(j_axis)), jlo, jhi
+                ),
+                im.named_range(
+                    cast(ir.AxisLiteral | common.Dimension, copy.deepcopy(k_axis)),
+                    ir.OffsetLiteral(value=kolor),
+                    ir.OffsetLiteral(value=kolor + 1),
+                ),
+            ]
+            new_ranges.extend(other_ranges)
+
+            result_domain = im.call("cartesian_domain")(*new_ranges)
+            # Wrap in make_tuple if the original was a make_tuple (multi-output SetAt)
+            if cpm.is_call_to(full_structured_domain, "make_tuple"):
+                n_outputs = len(full_structured_domain.args)
+                return im.make_tuple(*[copy.deepcopy(result_domain) for _ in range(n_outputs)])
+            return result_domain
+
+        current_kolor: int | None = kwargs.get("current_kolor")
+
         new_domain = self.visit(node.domain, **kwargs)
         new_expr = self.visit(node.expr, current_domain=new_domain, **kwargs)
         new_target = self.visit(node.target, **kwargs)
@@ -1020,6 +1121,12 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
             new_expr = _retarget_self_refs(new_expr, new_target)
 
         if _is_unstructured_edge_domain(node.domain):
+            if current_kolor is not None:
+                # Per-kolor split: build kolor-specific domain, skip concat_where wrapper.
+                kolor_domain = _per_kolor_domain(current_kolor, new_domain)
+                if kolor_domain is not None:
+                    return ir.SetAt(expr=new_expr, domain=kolor_domain, target=new_target)
+            # Original behaviour: wrap expression in 3-kolor concat_where mask.
             masked_expr = _build_edge_validity_masked_expr(new_expr, new_target, new_domain)
             if masked_expr is not None:
                 new_expr = masked_expr
@@ -1642,27 +1749,27 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                         idx = int(tuple_index.value)  # mypy: ensure an int index
                         return copy.deepcopy(bounds[idx])
 
-        if cpm.is_call_to(new_node, "cartesian_domain") and len(new_node.args) == 1:
-            nr = new_node.args[0]
-            if cpm.is_call_to(nr, "named_range") and len(nr.args) == 3:
-                axis_name = _axis_name(nr.args[0])
-                if axis_name in {"Edge", "Vertex", "Cell"}:
-                    idim_bounds = _entity_cartesian_bounds(axis_name, "IDim")
-                    jdim_bounds = _entity_cartesian_bounds(axis_name, "JDim")
-                    kolor_bounds = _entity_kolor_bounds(axis_name)
-                    if (
-                        idim_bounds is not None
-                        and jdim_bounds is not None
-                        and kolor_bounds is not None
-                    ):
-                        IDim = common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL)
-                        JDim = common.Dimension("JDim", kind=common.DimensionKind.HORIZONTAL)
-                        Kolor = common.Dimension("Kolor", kind=common.DimensionKind.HORIZONTAL)
-                        return im.call("cartesian_domain")(
-                            im.named_range(IDim, *idim_bounds),
-                            im.named_range(JDim, *jdim_bounds),
-                            im.named_range(Kolor, *kolor_bounds),
-                        )
+        # if cpm.is_call_to(new_node, "cartesian_domain") and len(new_node.args) == 1:
+        #     nr = new_node.args[0]
+        #     if cpm.is_call_to(nr, "named_range") and len(nr.args) == 3:
+        #         axis_name = _axis_name(nr.args[0])
+        #         if axis_name in {"Edge", "Vertex", "Cell"}:
+        #             idim_bounds = _entity_cartesian_bounds(axis_name, "IDim")
+        #             jdim_bounds = _entity_cartesian_bounds(axis_name, "JDim")
+        #             kolor_bounds = _entity_kolor_bounds(axis_name)
+        #             if (
+        #                 idim_bounds is not None
+        #                 and jdim_bounds is not None
+        #                 and kolor_bounds is not None
+        #             ):
+        #                 IDim = common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL)
+        #                 JDim = common.Dimension("JDim", kind=common.DimensionKind.HORIZONTAL)
+        #                 Kolor = common.Dimension("Kolor", kind=common.DimensionKind.HORIZONTAL)
+        #                 return im.call("cartesian_domain")(
+        #                     im.named_range(IDim, *idim_bounds),
+        #                     im.named_range(JDim, *jdim_bounds),
+        #                     im.named_range(Kolor, *kolor_bounds),
+        #                 )
 
         if cpm.is_call_to(new_node, "unstructured_domain") or cpm.is_call_to(
             new_node, "cartesian_domain"
@@ -1876,7 +1983,12 @@ class CartesianReductionUnroller(NodeTranslator):
 
     @classmethod
     def _eval_list_field_at_idx(
-        cls, expr: ir.Expr, idx: int, domain: ir.Expr | None, neutral_element: ir.Expr
+        cls,
+        expr: ir.Expr,
+        idx: int,
+        domain: ir.Expr | None,
+        neutral_element: ir.Expr,
+        current_kolor: int | None = None,
     ) -> ir.Expr | None:
         if cpm.is_applied_as_fieldop(expr):
             stencil = expr.fun.args[0]
@@ -1901,11 +2013,14 @@ class CartesianReductionUnroller(NodeTranslator):
                                 domain,
                             )
                         if entry["kind"] == "concat_where":
+                            # Only use kolor for edge-center connectivities (prefix "E").
+                            is_edge_conn = conn.rstrip("ₒ").startswith("E")
                             return _build_field_concat_where_from_branches(
                                 field_expr,
                                 cast(tuple, entry["branches"]),
                                 domain,
                                 apply_edge_shape_bounds=_needs_edge_shape_bounds(conn),
+                                current_kolor=current_kolor if is_edge_conn else None,
                             )
 
                 # Is it map_ ?
@@ -1942,6 +2057,7 @@ class CartesianReductionUnroller(NodeTranslator):
         list_expr: ir.Expr,
         conn_size: int,
         domain: ir.Expr | None,
+        current_kolor: int | None = None,
     ) -> ir.Expr:
         domain_bounds: dict[str, tuple[ir.Expr, ir.Expr]] = {}
         if cpm.is_call_to(domain, "cartesian_domain"):
@@ -2037,7 +2153,7 @@ class CartesianReductionUnroller(NodeTranslator):
             )(im.as_fieldop(im.lambda_("__x")(copy.deepcopy(widened_init)), domain)(base_field))
             for idx in range(conn_size):
                 elem_field = CartesianReductionUnroller._eval_list_field_at_idx(
-                    list_expr, idx, domain, neutral_element
+                    list_expr, idx, domain, neutral_element, current_kolor=current_kolor
                 )
                 if elem_field is None:
                     break
@@ -2124,12 +2240,23 @@ class CartesianReductionUnroller(NodeTranslator):
 
     def visit_SetAt(self, node: ir.SetAt, **kwargs) -> ir.SetAt:
         new_domain = self.visit(node.domain, **kwargs)
-        new_expr = self.visit(node.expr, current_domain=new_domain, **kwargs)
+        # Extract a fixed kolor from the domain (set by CartesianDomainAndTypeRemapper's
+        # per-kolor split) and propagate it so shift expansion uses kolor-specific branches.
+        current_kolor = _kolor_from_domain(new_domain)
+        if current_kolor is None and cpm.is_call_to(new_domain, "make_tuple"):
+            for sub in new_domain.args:
+                current_kolor = _kolor_from_domain(sub)
+                if current_kolor is not None:
+                    break
+        new_expr = self.visit(
+            node.expr, current_domain=new_domain, current_kolor=current_kolor, **kwargs
+        )
         new_target = self.visit(node.target, **kwargs)
         return ir.SetAt(expr=new_expr, domain=new_domain, target=new_target)
 
     def visit_FunCall(self, node: ir.FunCall, **kwargs) -> ir.Expr:
         current_domain = kwargs.get("current_domain")
+        current_kolor: int | None = kwargs.get("current_kolor")
 
         if cpm.is_applied_as_fieldop(node) and len(node.args) == 1:
             stencil = node.fun.args[0]
@@ -2153,16 +2280,18 @@ class CartesianReductionUnroller(NodeTranslator):
                     _neutral_element = im.literal("0.0", "float64")
 
                     if entry["kind"] == "concat_where":
+                        conn_name_str = (
+                            key[0].value
+                            if isinstance(key[0], ir.OffsetLiteral) and isinstance(key[0].value, str)
+                            else ""
+                        )
+                        is_edge_conn = conn_name_str.rstrip("ₒ").startswith("E")
                         return _build_field_concat_where_from_branches(
                             rewritten_arg,
                             cast(tuple, entry["branches"]),
                             current_domain,
-                            apply_edge_shape_bounds=_needs_edge_shape_bounds(
-                                key[0].value
-                                if isinstance(key[0], ir.OffsetLiteral)
-                                and isinstance(key[0].value, str)
-                                else None
-                            ),
+                            apply_edge_shape_bounds=_needs_edge_shape_bounds(conn_name_str or None),
+                            current_kolor=current_kolor if is_edge_conn else None,
                         )
                     elif entry["kind"] == "shift":
                         return _make_lifted_deref_shift(
@@ -2175,7 +2304,8 @@ class CartesianReductionUnroller(NodeTranslator):
                 red_op, red_init, list_expr, conn_size = reduce_inputs
                 rewritten_list_expr = self.visit(list_expr, **kwargs)
                 return self._build_generic_unrolled_reduce_expr(
-                    red_op, red_init, rewritten_list_expr, conn_size, current_domain
+                    red_op, red_init, rewritten_list_expr, conn_size, current_domain,
+                    current_kolor=current_kolor,
                 )
 
         new_node = copy.deepcopy(self.generic_visit(node, **kwargs))
@@ -2193,19 +2323,19 @@ class CartesianReductionUnroller(NodeTranslator):
                     )
 
                 if entry["kind"] == "concat_where":
-                    conn_name = None
-                    if (
-                        key
-                        and isinstance(key[0], ir.OffsetLiteral)
-                        and isinstance(key[0].value, str)
-                    ):
-                        conn_name = key[0].value
+                    conn_name = (
+                        key[0].value
+                        if key and isinstance(key[0], ir.OffsetLiteral) and isinstance(key[0].value, str)
+                        else None
+                    )
+                    is_edge_conn2 = conn_name is not None and conn_name.rstrip("ₒ").startswith("E")
                     if current_domain is not None:
                         return _build_field_concat_where_from_branches(
                             arg,
                             entry["branches"],
                             current_domain,
                             apply_edge_shape_bounds=_needs_edge_shape_bounds(conn_name),
+                            current_kolor=current_kolor if is_edge_conn2 else None,
                         )
                     return _build_concat_where_from_branches(arg, entry["branches"])
 
@@ -2218,6 +2348,85 @@ class CartesianReductionUnroller(NodeTranslator):
 
 
 @dataclasses.dataclass
+class KolorConstantPropagation(NodeTranslator):
+    """Eliminate dead kolor branches from the expanded structured IR.
+
+    After CartesianReductionUnroller, each `neighbors()` expansion emits per-kolor
+    shifted-field expressions wrapped in concat_where conditions, e.g.::
+
+        concat_where(Kolor:[0,1), shift_k0(vn), concat_where(Kolor:[1,2), shift_k1(vn), shift_k2(vn)))
+
+    These inner conditions appear INSIDE the outer kolor-specific branches added by
+    `_build_edge_validity_masked_expr`, e.g. the kolor-0 branch already guarantees
+    that the current element has Kolor=0.  The inner kolor-1 and kolor-2 branches are
+    therefore dead code and inflate the IR 3x per neighbor slot.
+
+    This pass propagates the outer kolor context inward and removes statically
+    unreachable branches, reducing the expanded IR by ≈3x for edge stencils and
+    similarly for two-kolor cell stencils.
+    """
+
+    @staticmethod
+    def _kolor_range_from_cond(cond: ir.Expr) -> tuple[int, int] | None:
+        """Return (lo, hi) if *cond* contains exactly one Kolor named_range."""
+        if cpm.is_call_to(cond, "and_") and len(cond.args) == 2:
+            for arg in cond.args:
+                result = KolorConstantPropagation._kolor_range_from_cond(arg)
+                if result is not None:
+                    return result
+            return None
+        if not cpm.is_call_to(cond, "cartesian_domain"):
+            return None
+        for nr in cond.args:
+            if not (cpm.is_call_to(nr, "named_range") and len(nr.args) == 3):
+                continue
+            if _get_axis_name(nr.args[0]) != "Kolor":
+                continue
+            lo, hi = nr.args[1], nr.args[2]
+            if isinstance(lo, ir.OffsetLiteral) and isinstance(hi, ir.OffsetLiteral):
+                return int(lo.value), int(hi.value)
+        return None
+
+    def visit_FunCall(
+        self,
+        node: ir.FunCall,
+        *,
+        known_kolor: tuple[int, int] | None = None,
+        **kwargs: Any,
+    ) -> ir.Expr:
+        if not cpm.is_call_to(node, "concat_where") or len(node.args) != 3:
+            return self.generic_visit(node, known_kolor=known_kolor, **kwargs)
+
+        cond, true_branch, false_branch = node.args
+        inner_range = self._kolor_range_from_cond(cond)
+
+        if inner_range is not None and known_kolor is not None:
+            klo, khi = known_kolor
+            ilo, ihi = inner_range
+            if ihi <= klo or ilo >= khi:
+                # Inner condition is always FALSE given the outer kolor → dead branch.
+                return self.visit(false_branch, known_kolor=known_kolor, **kwargs)
+            if ilo >= klo and ihi <= khi:
+                # Inner condition is always TRUE given the outer kolor → skip wrapper.
+                return self.visit(true_branch, known_kolor=inner_range, **kwargs)
+
+        if inner_range is not None:
+            # Enter the true branch with narrowed kolor context.
+            new_true = self.visit(true_branch, known_kolor=inner_range, **kwargs)
+            # False branch: kolor is outside inner_range but we only know the parent range.
+            new_false = self.visit(false_branch, known_kolor=known_kolor, **kwargs)
+            if new_true is true_branch and new_false is false_branch:
+                return node
+            return ir.FunCall(fun=copy.deepcopy(node.fun), args=[cond, new_true, new_false])
+
+        # Non-kolor concat_where: recurse with same kolor context.
+        return self.generic_visit(node, known_kolor=known_kolor, **kwargs)
+
+    @classmethod
+    def apply(cls, node: ir.Node) -> ir.Node:
+        return cls().visit(node, known_kolor=None)
+
+
 class RewriteCartesianCanDeref(NodeTranslator):
     @classmethod
     def apply(cls, node: ir.Node) -> ir.Node:
