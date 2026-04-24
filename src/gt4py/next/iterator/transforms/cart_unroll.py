@@ -393,6 +393,141 @@ def _is_unstructured_edge_domain_stmt(domain_expr: ir.Expr) -> bool:
     return False
 
 
+_EDGE_TO_EDGE_CONNECTIVITIES: frozenset[str] = frozenset({"E2C2EO", "E2C2E"})
+
+
+def _kolor_from_cw_condition(cond: ir.Expr) -> int | None:
+    """Extract the kolor integer from a concat_where condition built by _build_edge_validity_masked_expr.
+
+    The condition has the shape and_(kolor_domain, and_(idim_domain, jdim_domain)) where
+    kolor_domain = cartesian_domain(named_range(Kolor, k, k+1)).
+    Returns k if found, else None.
+    """
+    # Walk into and_ chains to find a single-kolor cartesian_domain.
+    def _walk(expr: ir.Expr) -> int | None:
+        if cpm.is_call_to(expr, "and_"):
+            for arg in expr.args:
+                k = _walk(arg)
+                if k is not None:
+                    return k
+            return None
+        return _kolor_from_domain(expr)
+
+    return _walk(cond)
+
+
+def _kolor_cw_condition_to_domain(cond: ir.Expr, fallback_domain: ir.Expr) -> ir.Expr | None:
+    """Convert a concat_where condition back to a cartesian_domain for use as current_domain.
+
+    The condition is and_(kolor_domain, and_(idim_domain, jdim_domain)).
+    We reconstruct a cartesian_domain with axes in the canonical order:
+    IDim, JDim, Kolor, then any remaining axes (e.g. K) from fallback_domain.
+    """
+    by_axis: dict[str, ir.Expr] = {}
+
+    def _collect(expr: ir.Expr) -> None:
+        if cpm.is_call_to(expr, "and_"):
+            for arg in expr.args:
+                _collect(arg)
+        elif cpm.is_call_to(expr, "cartesian_domain"):
+            for nr in expr.args:
+                if cpm.is_call_to(nr, "named_range") and len(nr.args) == 3:
+                    name = _get_axis_name(nr.args[0])
+                    if name is not None:
+                        by_axis[name] = copy.deepcopy(nr)
+
+    _collect(cond)
+    if not by_axis:
+        return None
+
+    # Collect non-horizontal axes (e.g. K) from fallback_domain.
+    def _collect_fallback(domain: ir.Expr) -> None:
+        if cpm.is_call_to(domain, "cartesian_domain"):
+            for nr in domain.args:
+                if cpm.is_call_to(nr, "named_range") and len(nr.args) == 3:
+                    name = _get_axis_name(nr.args[0])
+                    if name is not None and name not in {"IDim", "JDim", "Kolor"}:
+                        by_axis.setdefault(name, copy.deepcopy(nr))
+        elif cpm.is_call_to(domain, "make_tuple"):
+            for sub in domain.args:
+                _collect_fallback(sub)
+                break  # only need the first sub-domain for K ranges
+
+    _collect_fallback(fallback_domain)
+
+    # Emit ranges in canonical order: IDim, JDim, Kolor, then everything else.
+    canonical = ["IDim", "JDim", "Kolor"]
+    ordered = [by_axis[n] for n in canonical if n in by_axis]
+    for name, nr in by_axis.items():
+        if name not in canonical:
+            ordered.append(nr)
+
+    return im.call("cartesian_domain")(*ordered)
+
+
+def _expr_uses_edge_to_edge_connectivity(node: ir.Node) -> bool:
+    """Return True if node contains any edge-to-edge connectivity offset (e.g. E2C2EO)."""
+    for lit in node.pre_walk_values().if_isinstance(ir.OffsetLiteral):
+        if isinstance(lit.value, str) and lit.value.rstrip("ₒ") in _EDGE_TO_EDGE_CONNECTIVITIES:
+            return True
+    return False
+
+
+def _e2c2e_on_local_intermediate(node: ir.Node) -> bool:
+    """Return True if node has an edge-to-edge neighbor access on a lambda-bound (local) field.
+
+    When an E2C2EO/E2C2E reduction operates on a field that is a lambda parameter (local
+    intermediate computed within the same SetAt), per-kolor branch visiting is unsafe: the
+    intermediate is only materialized for the current kolor's domain, so cross-kolor shifts
+    in E2C2EO would access uninitialized data.
+
+    Heuristic: if the argument to `neighbors(E2C2EO, ...)` inside an applied reduce is NOT
+    a direct SymRef into the top-level program params — i.e. it is itself the result of an
+    as_fieldop (a computed field) rather than a bare program-parameter reference — then it
+    is a local intermediate. We detect this by checking whether any outer Lambda in the tree
+    binds the SymRef used as the E2C2EO source.
+    """
+    # Collect all lambda parameter names at any nesting level within node.
+    lambda_params: set[str] = set()
+    for lam in node.pre_walk_values().if_isinstance(ir.Lambda):
+        for p in lam.params:
+            lambda_params.add(str(p.id))
+
+    def _unwrap_to_symref(expr: ir.Expr) -> ir.SymRef | None:
+        """Unwrap cast/identity as_fieldop wrappers to find the underlying SymRef, if any."""
+        if isinstance(expr, ir.SymRef):
+            return expr
+        # Unwrap single-arg as_fieldop (e.g. cast_, identity) applied to a field.
+        if cpm.is_applied_as_fieldop(expr) and len(expr.args) == 1:
+            return _unwrap_to_symref(expr.args[0])
+        return None
+
+    # Now look for neighbors(E2C2EO/E2C2E, it) where `it` resolves to a lambda-bound field.
+    for fun_call in node.pre_walk_values().if_isinstance(ir.FunCall):
+        if not (cpm.is_applied_as_fieldop(fun_call) and len(fun_call.args) == 1):
+            continue
+        stencil = fun_call.fun.args[0]
+        if not isinstance(stencil, ir.Lambda):
+            continue
+        if not (
+            cpm.is_call_to(stencil.expr, "neighbors")
+            and len(stencil.expr.args) == 2
+            and len(stencil.params) == 1
+        ):
+            continue
+        conn_expr = stencil.expr.args[0]
+        if not (isinstance(conn_expr, ir.OffsetLiteral) and isinstance(conn_expr.value, str)):
+            continue
+        if conn_expr.value.rstrip("ₒ") not in _EDGE_TO_EDGE_CONNECTIVITIES:
+            continue
+        # Unwrap cast/identity wrappers on the field argument, then check if it is a
+        # lambda-bound parameter (local intermediate) rather than a program param.
+        sym = _unwrap_to_symref(fun_call.args[0])
+        if sym is not None and str(sym.id) in lambda_params:
+            return True
+    return False
+
+
 def _kolor_from_domain(domain: ir.Expr | None) -> int | None:
     """Return k if *domain* has a single-kolor Kolor:[k, k+1) range, else None."""
     if domain is None or not cpm.is_call_to(domain, "cartesian_domain"):
@@ -621,7 +756,14 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
             # Split edge-domain SetAts into 3 per-kolor SetAts so that the
             # CartesianReductionUnroller can use the fixed kolor from the domain
             # to select shift branches directly (avoiding inner kolor concat_where).
-            if isinstance(stmt, ir.SetAt) and _is_unstructured_edge_domain_stmt(stmt.domain):
+            # Skip splitting when the SetAt uses edge-to-edge connectivity (E2C2EO, E2C2E)
+            # because those accesses span multiple kolors on a local intermediate field
+            # that is only defined for the current kolor — splitting would produce wrong results.
+            if (
+                isinstance(stmt, ir.SetAt)
+                and _is_unstructured_edge_domain_stmt(stmt.domain)
+                and not _expr_uses_edge_to_edge_connectivity(stmt.expr)
+            ):
                 for k in range(3):
                     new_body.append(self.visit(stmt, current_kolor=k, **child_kwargs))
             else:
@@ -2013,14 +2155,17 @@ class CartesianReductionUnroller(NodeTranslator):
                                 domain,
                             )
                         if entry["kind"] == "concat_where":
-                            # Only use kolor for edge-center connectivities (prefix "E").
-                            is_edge_conn = conn.rstrip("ₒ").startswith("E")
+                            normalized = conn.rstrip("ₒ")
+                            is_edge_to_non_edge = (
+                                normalized.startswith("E")
+                                and normalized not in _EDGE_TO_EDGE_CONNECTIVITIES
+                            )
                             return _build_field_concat_where_from_branches(
                                 field_expr,
                                 cast(tuple, entry["branches"]),
                                 domain,
                                 apply_edge_shape_bounds=_needs_edge_shape_bounds(conn),
-                                current_kolor=current_kolor if is_edge_conn else None,
+                                current_kolor=current_kolor if is_edge_to_non_edge else None,
                             )
 
                 # Is it map_ ?
@@ -2030,7 +2175,9 @@ class CartesianReductionUnroller(NodeTranslator):
                     mapped_op = stencil.expr.fun.args[0]
                     new_args = []
                     for arg in expr.args:
-                        inner_elem = cls._eval_list_field_at_idx(arg, idx, domain, neutral_element)
+                        inner_elem = cls._eval_list_field_at_idx(
+                            arg, idx, domain, neutral_element, current_kolor=current_kolor
+                        )
                         if inner_elem is None:
                             return None
                         new_args.append(inner_elem)
@@ -2248,11 +2395,76 @@ class CartesianReductionUnroller(NodeTranslator):
                 current_kolor = _kolor_from_domain(sub)
                 if current_kolor is not None:
                     break
-        new_expr = self.visit(
-            node.expr, current_domain=new_domain, current_kolor=current_kolor, **kwargs
-        )
+
+        if current_kolor is None and not _e2c2e_on_local_intermediate(node.expr):
+            # Non-split SetAt: the expression may be wrapped in the 3-kolor domain concat_where
+            # by _build_edge_validity_masked_expr. Peel each kolor branch and visit with the
+            # correct current_kolor so inner shift concat_wheres are resolved per-kolor.
+            # Excluded: stencils where E2C2EO/E2C2E operates on a LOCAL intermediate edge field
+            # (lambda-bound variable). Those intermediates are only defined for the current kolor,
+            # so cross-kolor E2C2EO shifts on them would read garbage.
+            new_expr = self._visit_expr_with_kolor_branches(
+                node.expr, new_domain, **kwargs
+            )
+        else:
+            new_expr = self.visit(
+                node.expr, current_domain=new_domain, current_kolor=current_kolor, **kwargs
+            )
         new_target = self.visit(node.target, **kwargs)
         return ir.SetAt(expr=new_expr, domain=new_domain, target=new_target)
+
+    def _visit_expr_with_kolor_branches(
+        self, expr: ir.Expr, domain: ir.Expr, **kwargs
+    ) -> ir.Expr:
+        """Visit a 3-kolor domain concat_where expression branch-by-branch with per-kolor context.
+
+        When CartesianDomainAndTypeRemapper wraps an expression in:
+            concat_where(cond_k0 ∧ domain_k0, expr,
+              concat_where(cond_k1 ∧ domain_k1, expr,
+                concat_where(cond_k2 ∧ domain_k2, expr, target)))
+        each branch contains identical copies of the full expression, but the inner shift
+        concat_wheres still branch on kolor. Since we know which kolor each outer branch
+        corresponds to, we can resolve the inner shift concat_where immediately by visiting
+        each branch with the matching current_kolor.
+        """
+        branches: list[tuple[int, ir.Expr, ir.Expr]] = []  # (kolor, condition, branch_expr)
+        tail: ir.Expr | None = None
+        cur = expr
+
+        while cpm.is_call_to(cur, "concat_where") and len(cur.args) == 3:
+            cond, branch_expr, rest = cur.args
+            k = _kolor_from_cw_condition(cond)
+            if k is None:
+                break
+            branches.append((k, cond, branch_expr))
+            cur = rest
+
+        if not branches:
+            # No peelable kolor structure — visit normally without kolor context.
+            return self.visit(expr, current_domain=domain, current_kolor=None, **kwargs)
+
+        tail = cur  # remaining expression after all kolor branches (usually the target field)
+
+        # Visit each kolor branch with the known current_kolor.
+        visited: list[tuple[int, ir.Expr, ir.Expr]] = []
+        for k, cond, branch_expr in branches:
+            # Build a per-kolor domain from the condition for use as current_domain.
+            per_kolor_domain = _kolor_cw_condition_to_domain(cond, domain)
+            visited_expr = self.visit(
+                branch_expr,
+                current_domain=per_kolor_domain if per_kolor_domain is not None else domain,
+                current_kolor=k,
+                **kwargs,
+            )
+            visited.append((k, cond, visited_expr))
+
+        visited_tail = self.visit(tail, current_domain=domain, current_kolor=None, **kwargs)
+
+        # Reassemble the concat_where chain.
+        result = visited_tail
+        for k, cond, visited_expr in reversed(visited):
+            result = im.concat_where(copy.deepcopy(cond), visited_expr, result)
+        return result
 
     def visit_FunCall(self, node: ir.FunCall, **kwargs) -> ir.Expr:
         current_domain = kwargs.get("current_domain")
@@ -2285,13 +2497,21 @@ class CartesianReductionUnroller(NodeTranslator):
                             if isinstance(key[0], ir.OffsetLiteral) and isinstance(key[0].value, str)
                             else ""
                         )
-                        is_edge_conn = conn_name_str.rstrip("ₒ").startswith("E")
+                        normalized_conn = conn_name_str.rstrip("ₒ")
+                        # Pass current_kolor only for edge-to-cell/vertex connectivities (E2C, E2V).
+                        # Edge-to-edge (E2C2EO, E2C2E) accesses a DIFFERENT kolor on an edge
+                        # field — when that field is a local intermediate (not a program param),
+                        # it is only defined for the current kolor, so cross-kolor reads are wrong.
+                        is_edge_to_non_edge_conn = (
+                            normalized_conn.startswith("E")
+                            and normalized_conn not in _EDGE_TO_EDGE_CONNECTIVITIES
+                        )
                         return _build_field_concat_where_from_branches(
                             rewritten_arg,
                             cast(tuple, entry["branches"]),
                             current_domain,
                             apply_edge_shape_bounds=_needs_edge_shape_bounds(conn_name_str or None),
-                            current_kolor=current_kolor if is_edge_conn else None,
+                            current_kolor=current_kolor if is_edge_to_non_edge_conn else None,
                         )
                     elif entry["kind"] == "shift":
                         return _make_lifted_deref_shift(
@@ -2328,14 +2548,18 @@ class CartesianReductionUnroller(NodeTranslator):
                         if key and isinstance(key[0], ir.OffsetLiteral) and isinstance(key[0].value, str)
                         else None
                     )
-                    is_edge_conn2 = conn_name is not None and conn_name.rstrip("ₒ").startswith("E")
+                    normalized_conn2 = conn_name.rstrip("ₒ") if conn_name else ""
+                    is_edge_to_non_edge_conn2 = (
+                        normalized_conn2.startswith("E")
+                        and normalized_conn2 not in _EDGE_TO_EDGE_CONNECTIVITIES
+                    )
                     if current_domain is not None:
                         return _build_field_concat_where_from_branches(
                             arg,
                             entry["branches"],
                             current_domain,
                             apply_edge_shape_bounds=_needs_edge_shape_bounds(conn_name),
-                            current_kolor=current_kolor if is_edge_conn2 else None,
+                            current_kolor=current_kolor if is_edge_to_non_edge_conn2 else None,
                         )
                     return _build_concat_where_from_branches(arg, entry["branches"])
 
