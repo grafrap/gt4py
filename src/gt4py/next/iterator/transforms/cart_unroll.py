@@ -76,12 +76,13 @@ def _derive_entity_start_bounds_from_mapping(
     if horizontal_start >= len(mapping_rows):
         return None
 
-    if entity_name == "Edge":
+    if entity_name in {"Edge", "Cell"}:
+        valid_kolors = {0, 1, 2} if entity_name == "Edge" else {0, 1}
         by_kolor: dict[int, tuple[int, int, int, int]] = {}
         for i_val, j_val, kolor in mapping_rows[horizontal_start:]:
             if i_val < 0 or j_val < 0 or kolor < 0:
                 continue
-            if kolor not in {0, 1, 2}:
+            if kolor not in valid_kolors:
                 continue
             prev = by_kolor.get(kolor)
             if prev is None:
@@ -100,7 +101,7 @@ def _derive_entity_start_bounds_from_mapping(
         _ENTITY_START_BOUNDS_CACHE[cache_key] = by_kolor
         return by_kolor
 
-    # Vertex/Cell: scalar horizontal_start maps to a single (i,j) lower shell.
+    # Vertex: scalar horizontal_start maps to a single (i,j) lower shell.
     min_i: int | None = None
     min_j: int | None = None
     max_i_seen: int | None = None
@@ -120,6 +121,42 @@ def _derive_entity_start_bounds_from_mapping(
     bounds = {0: (min_i, min_j, max_i_seen, max_j_seen)}
     _ENTITY_START_BOUNDS_CACHE[cache_key] = bounds
     return bounds
+
+
+def _derive_entity_range_bounds_from_mapping(
+    entity_name: str,
+    *,
+    mapping_rows: tuple[tuple[int, ...], ...],
+    horizontal_start: int,
+    horizontal_end: int,
+    max_i: int,
+    max_j: int,
+) -> dict[int, tuple[int, int, int, int]] | None:
+    """Return per-kolor bounding boxes for mapping_rows[horizontal_start:horizontal_end]."""
+    if horizontal_start < 0:
+        horizontal_start = 0
+    if horizontal_end > len(mapping_rows):
+        horizontal_end = len(mapping_rows)
+    if horizontal_start >= horizontal_end:
+        return None
+
+    valid_kolors = {0, 1, 2} if entity_name == "Edge" else {0, 1}
+    by_kolor: dict[int, tuple[int, int, int, int]] = {}
+    for i_val, j_val, kolor in mapping_rows[horizontal_start:horizontal_end]:
+        if i_val < 0 or j_val < 0 or kolor < 0 or kolor not in valid_kolors:
+            continue
+        prev = by_kolor.get(kolor)
+        if prev is None:
+            by_kolor[kolor] = (i_val, j_val, i_val, j_val)
+        else:
+            by_kolor[kolor] = (
+                min(prev[0], i_val),
+                min(prev[1], j_val),
+                max(prev[2], i_val),
+                max(prev[3], j_val),
+            )
+    return by_kolor if by_kolor else None
+
 
 # =====================================================================
 # Shift and Concat-Where Helpers
@@ -592,11 +629,15 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
     @staticmethod
     def _validate_structured_remap_requirements(
         node: ir.Node, symbolic_domain_sizes: dict[str, Any]
-    ) -> None:
+    ) -> bool:
+        """Return True to proceed with the structured transform, False to skip gracefully."""
         if not isinstance(node, ir.Program):
-            return
+            return False
         if not CartesianDomainAndTypeRemapper._program_uses_horizontal_unstructured_axis(node):
-            return
+            return False
+        import os as _os
+        if _os.environ.get("GT4PY_CART_DEBUG", "0") == "1":
+            print(f"[cart_unroll] {node.id}: proceeding with structured remap")
 
         program_param_ids = {str(param.id) for param in node.params}
 
@@ -612,16 +653,21 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
         )
 
         if not has_symbolic_signal:
-            return
+            return False
 
-        missing_groups: list[str] = []
         use_mapping = symbolic_domain_sizes.get("use_horizontal_start_mapping") in {
             True, 1, "1", "true", "on", "yes"
         } and "edge_to_ijk" in symbolic_domain_sizes
+
+        # If neither the mapping path nor the lateral path is configured, skip gracefully.
+        # This happens for stencils compiled before the index_map is available, or for
+        # stencils that were not meant to be transformed.
         if has_symbolic_structured_sizes and not use_mapping and not _has_any(
             "lateral", "lateral_bounds", "lateral_edge"
         ):
-            missing_groups.append("lateral")
+            return False
+
+        missing_groups: list[str] = []
         if not _has_any("i_max", "domain_i_max", "max_i", "domain_max_i", "nx", "num_i", "ni"):
             missing_groups.append("IDim upper bound")
         if not _has_any("j_max", "domain_j_max", "max_j", "domain_max_j", "ny", "num_j", "nj"):
@@ -635,6 +681,7 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                 "Provide these values via backend option "
                 "'otf_workflow__bare_translation__symbolic_domain_sizes'."
             )
+        return True
 
     @staticmethod
     def _cartesian_remapped_type(type_: ts.TypeSpec | None) -> ts.TypeSpec | None:
@@ -688,7 +735,8 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
             for key, value in inferred_sizes.items():
                 effective_symbolic_sizes.setdefault(key, value)
 
-        cls._validate_structured_remap_requirements(node, effective_symbolic_sizes)
+        if not cls._validate_structured_remap_requirements(node, effective_symbolic_sizes):
+            return node
 
         return cls().visit(node, symbolic_domain_sizes=effective_symbolic_sizes)
 
@@ -1278,6 +1326,73 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
     def visit_FunCall(self, node: ir.FunCall, **kwargs) -> ir.Expr:
         program_param_ids: set[str] = kwargs.get("program_param_ids", set())
         symbolic_domain_sizes: dict[str, Any] | None = kwargs.get("symbolic_domain_sizes")
+
+        # Intercept `and_(EdgeDim_cmp_a, EdgeDim_cmp_b)` BEFORE children are remapped.
+        # If both are edge threshold comparisons that form a (start, end) pair with pre-computed
+        # range bounds, return a single per-kolor range domain condition instead of
+        # `and_(interior_cond_start, not_(interior_cond_end))`.
+        if (
+            cpm.is_call_to(node, "and_")
+            and len(node.args) == 2
+            and symbolic_domain_sizes is not None
+        ):
+            def _extract_edge_cmp(expr: ir.Expr):
+                """Return (axis_side, op_name, threshold_id) for an edge comparison, else None."""
+                if not (
+                    cpm.is_call_to(expr, ("greater_equal", "greater", "less_equal", "less"))
+                    and len(expr.args) == 2
+                ):
+                    return None
+                lhs, rhs = expr.args
+                lhs_ax = _get_axis_name(lhs)
+                rhs_ax = _get_axis_name(rhs)
+                if lhs_ax == "Edge":
+                    side, thresh = "lhs", rhs
+                elif rhs_ax == "Edge":
+                    side, thresh = "rhs", lhs
+                else:
+                    return None
+                tid = str(thresh.id) if isinstance(thresh, ir.SymRef) else None
+                if tid is None:
+                    return None
+                return (side, str(expr.fun.id), tid)
+
+            cmp_a = _extract_edge_cmp(node.args[0])
+            cmp_b = _extract_edge_cmp(node.args[1])
+            if cmp_a is not None and cmp_b is not None:
+                for ca, cb in ((cmp_a, cmp_b), (cmp_b, cmp_a)):
+                    _, _, start_id = ca
+                    _, _, end_id = cb
+                    range_key = f"{start_id}|{end_id}"
+                    if f"{range_key}_k0_ilo" in symbolic_domain_sizes:
+                        IDim_d = common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL)
+                        JDim_d = common.Dimension("JDim", kind=common.DimensionKind.HORIZONTAL)
+                        Kolor_d = common.Dimension("Kolor", kind=common.DimensionKind.HORIZONTAL)
+
+                        def _rdom(axis, lo: int, hi: int) -> ir.Expr:
+                            return im.call("cartesian_domain")(
+                                im.named_range(copy.deepcopy(axis), ir.OffsetLiteral(value=lo), ir.OffsetLiteral(value=hi))
+                            )
+
+                        conds = []
+                        for k in range(3):
+                            ilo = symbolic_domain_sizes.get(f"{range_key}_k{k}_ilo")
+                            jlo = symbolic_domain_sizes.get(f"{range_key}_k{k}_jlo")
+                            ihi = symbolic_domain_sizes.get(f"{range_key}_k{k}_ihi")
+                            jhi = symbolic_domain_sizes.get(f"{range_key}_k{k}_jhi")
+                            if None in (ilo, jlo, ihi, jhi):
+                                break
+                            conds.append(im.and_(
+                                _rdom(Kolor_d, k, k + 1),
+                                im.and_(_rdom(IDim_d, int(ilo), int(ihi)), _rdom(JDim_d, int(jlo), int(jhi))),
+                            ))
+                        if len(conds) == 3:
+                            return im.or_(conds[0], im.or_(conds[1], conds[2]))
+                        if len(conds) == 2:
+                            return im.or_(conds[0], conds[1])
+                        if len(conds) == 1:
+                            return conds[0]
+
         new_node = copy.deepcopy(self.generic_visit(node, **kwargs))
 
         def _structured_axis_literals() -> list[ir.Expr]:
@@ -1794,8 +1909,10 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                             )
                         )
 
+                    # Cell has 2 kolors, Edge has 3 kolors.
+                    n_kolors = 2 if entity_axis == "Cell" else 3
                     conds = []
-                    for k in range(3):
+                    for k in range(n_kolors):
                         ilo = symbolic_domain_sizes.get(f"{tid}_k{k}_ilo")
                         jlo = symbolic_domain_sizes.get(f"{tid}_k{k}_jlo")
                         ihi = symbolic_domain_sizes.get(f"{tid}_k{k}_ihi")
@@ -1809,11 +1926,15 @@ class CartesianDomainAndTypeRemapper(NodeTranslator):
                                 _dom(JDim_d, int(jlo), int(jhi)),
                             ),
                         ))
-                    return im.or_(conds[0], im.or_(conds[1], conds[2])) if len(conds) == 3 else None
+                    if len(conds) == 2:
+                        return im.or_(conds[0], conds[1])
+                    elif len(conds) == 3:
+                        return im.or_(conds[0], im.or_(conds[1], conds[2]))
+                    return None
 
                 # Prefer exact mapping-based bounds (injected at compile time by the wrapper).
                 has_threshold_mapping = (
-                    entity_axis == "Edge"
+                    entity_axis in {"Edge", "Cell"}
                     and threshold_id is not None
                     and symbolic_domain_sizes is not None
                     and f"{threshold_id}_k0_ilo" in symbolic_domain_sizes
@@ -2385,8 +2506,28 @@ class CartesianReductionUnroller(NodeTranslator):
     def apply(cls, node: ir.Node) -> ir.Node:
         return cls().visit(node)
 
+    @staticmethod
+    def _is_structured_domain(domain: ir.Expr) -> bool:
+        """Return True if this SetAt domain is structured (cartesian), meaning the type remapper ran."""
+        if cpm.is_call_to(domain, "cartesian_domain"):
+            return True
+        if cpm.is_call_to(domain, "make_tuple"):
+            return any(
+                cpm.is_call_to(sub, "cartesian_domain") for sub in domain.args
+            )
+        return False
+
     def visit_SetAt(self, node: ir.SetAt, **kwargs) -> ir.SetAt:
         new_domain = self.visit(node.domain, **kwargs)
+        # Only unroll connectivities for SetAts that went through CartesianDomainAndTypeRemapper
+        # (i.e. have a structured/cartesian domain). Unstructured SetAts (geometry, utility
+        # stencils) must not have their neighbor shifts expanded into Kolor-branched concat_where,
+        # because that would add a spurious Kolor dimension to the field types and break
+        # infer_domain type reconciliation.
+        if not self._is_structured_domain(new_domain):
+            new_expr = self.visit(node.expr, **kwargs)
+            return ir.SetAt(expr=new_expr, domain=new_domain, target=self.visit(node.target, **kwargs))
+
         # Extract a fixed kolor from the domain (set by CartesianDomainAndTypeRemapper's
         # per-kolor split) and propagate it so shift expansion uses kolor-specific branches.
         current_kolor = _kolor_from_domain(new_domain)

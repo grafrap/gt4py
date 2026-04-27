@@ -146,8 +146,55 @@ _KNOWN_EDGE_THRESHOLD_PARAMS: frozenset[str] = frozenset({
     "start_edge_nudging_level_2",
     "end_edge_nudging",
     "end_edge_halo",
-
+    "horizontal_start_distance",
+    "horizontal_end_distance",
 })
+
+_KNOWN_CELL_THRESHOLD_PARAMS: frozenset[str] = frozenset({
+    "lateral_boundary_level_2",
+})
+
+
+def _inject_edge_range_bounds(
+    edge_mapping_rows: tuple[tuple[int, ...], ...],
+    thresh_dict: dict[str, int],
+    sds: dict,
+    max_i: int,
+    max_j: int,
+) -> None:
+    """Detect paired (horizontal_start_X / horizontal_end_X) thresholds and inject per-kolor
+    range bounds for [start, end) so that `and_(EdgeDim>=start, EdgeDim<end)` can be expressed
+    as a single structured domain condition rather than `and_(cond, not_(cond))`."""
+    from gt4py.next.iterator.transforms.cart_unroll import _derive_entity_range_bounds_from_mapping
+
+    for start_name, start_val in thresh_dict.items():
+        for prefix in ("horizontal_start_", "start_"):
+            if not start_name.startswith(prefix):
+                continue
+            suffix = start_name[len(prefix):]
+            end_prefix = prefix.replace("start", "end")
+            end_name = f"{end_prefix}{suffix}"
+            if end_name not in thresh_dict:
+                continue
+            end_val = thresh_dict[end_name]
+            if end_val <= start_val:
+                continue
+            range_bounds = _derive_entity_range_bounds_from_mapping(
+                "Edge",
+                mapping_rows=edge_mapping_rows,
+                horizontal_start=start_val,
+                horizontal_end=end_val,
+                max_i=max_i,
+                max_j=max_j,
+            )
+            if range_bounds is None:
+                continue
+            range_key = f"{start_name}|{end_name}"
+            for kolor, (ilo, jlo, ihi, jhi) in range_bounds.items():
+                sds[f"{range_key}_k{kolor}_ilo"] = ilo
+                sds[f"{range_key}_k{kolor}_jlo"] = jlo
+                sds[f"{range_key}_k{kolor}_ihi"] = ihi + 1  # exclusive
+                sds[f"{range_key}_k{kolor}_jhi"] = jhi + 1  # exclusive
 
 
 def pack_sparse_local_field_to_structured(
@@ -526,22 +573,45 @@ class GenericStructuredWrapper:
         sds["horizontal_start_cell"] = horizontal_start
         sds["horizontal_start_vertex"] = horizontal_start
 
-        # Inject per-kolor bounds for each known edge-threshold parameter.
-        if extra_thresholds and self.index_map is not None:
-            edge_to_ijk = getattr(self.index_map, "edge_to_ijk", None)
+        # Inject per-kolor bounds for each known threshold parameter (edge and cell).
+        if extra_thresholds:
+            from gt4py.next.iterator.transforms.cart_unroll import (
+                _derive_entity_start_bounds_from_mapping,
+            )
+            edge_to_ijk = getattr(self.index_map, "edge_to_ijk", None) if self.index_map is not None else None
             if edge_to_ijk is not None:
-                from gt4py.next.iterator.transforms.cart_unroll import (
-                    _derive_entity_start_bounds_from_mapping,
-                )
-                mapping_rows = tuple(
+                edge_mapping_rows = tuple(
                     tuple(int(x) for x in row) for row in edge_to_ijk
                 )
                 for param_name, threshold_value in extra_thresholds:
-                    if threshold_value <= 0:
+                    if param_name not in _KNOWN_EDGE_THRESHOLD_PARAMS or threshold_value <= 0:
                         continue
                     bounds = _derive_entity_start_bounds_from_mapping(
                         "Edge",
-                        mapping_rows=mapping_rows,
+                        mapping_rows=edge_mapping_rows,
+                        horizontal_start=threshold_value,
+                        max_i=self.max_i,
+                        max_j=self.max_j,
+                    )
+                    if bounds is not None:
+                        for kolor, (ilo, jlo, ihi, jhi) in bounds.items():
+                            sds[f"{param_name}_k{kolor}_ilo"] = ilo
+                            sds[f"{param_name}_k{kolor}_jlo"] = jlo
+                            sds[f"{param_name}_k{kolor}_ihi"] = ihi + 1  # exclusive
+                            sds[f"{param_name}_k{kolor}_jhi"] = jhi + 1  # exclusive
+                # Detect paired (start_X, end_X) edge threshold params and inject range bounds.
+                thresh_dict = dict(extra_thresholds)
+                _inject_edge_range_bounds(edge_mapping_rows, thresh_dict, sds, self.max_i, self.max_j)
+            if self.cell_to_ijk is not None:
+                cell_mapping_rows = tuple(
+                    tuple(int(x) for x in row) for row in self.cell_to_ijk
+                )
+                for param_name, threshold_value in extra_thresholds:
+                    if param_name not in _KNOWN_CELL_THRESHOLD_PARAMS or threshold_value <= 0:
+                        continue
+                    bounds = _derive_entity_start_bounds_from_mapping(
+                        "Cell",
+                        mapping_rows=cell_mapping_rows,
                         horizontal_start=threshold_value,
                         max_i=self.max_i,
                         max_j=self.max_j,
@@ -927,11 +997,12 @@ class GenericStructuredWrapper:
         )
         horizontal_start = int(hs_raw) if hs_raw is not None else 0
 
-        # Collect known edge-threshold parameters so per-kolor bounds can be computed.
+        # Collect known threshold parameters (edge and cell) so per-kolor bounds can be computed.
+        _all_threshold_params = _KNOWN_EDGE_THRESHOLD_PARAMS | _KNOWN_CELL_THRESHOLD_PARAMS
         extra_thresholds = tuple(sorted(
             (name, int(val))
             for name, val in kwargs.items()
-            if name in _KNOWN_EDGE_THRESHOLD_PARAMS
+            if name in _all_threshold_params
             and isinstance(val, (int, np.integer))
             and int(val) > 0
         ))

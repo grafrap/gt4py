@@ -403,14 +403,51 @@ def _infer_concat_where(
     symbolic_cond = domain_utils.SymbolicDomain.from_expr(cond)
     cond_complement = domain_utils.domain_complement(symbolic_cond)
 
+    def _remap_legacy_horizontal_domain(
+        symbolic_domain: domain_utils.SymbolicDomain,
+        target_dims: typing.Iterable[common.Dimension],
+    ) -> domain_utils.SymbolicDomain:
+        target_dims = tuple(target_dims)
+        if set(symbolic_domain.ranges.keys()).issubset(target_dims):
+            return symbolic_domain
+
+        structured_horizontal_dims = tuple(
+            dim for dim in target_dims if dim.kind == common.DimensionKind.HORIZONTAL
+        )
+        if not structured_horizontal_dims:
+            return symbolic_domain
+
+        remapped_ranges: dict[common.Dimension, domain_utils.SymbolicRange] = {}
+        remapped = False
+        for dim, range_ in symbolic_domain.ranges.items():
+            if dim in target_dims:
+                remapped_ranges[dim] = range_  # pragma: no cover - covered by subset check above
+                continue
+            if dim.value in {"Cell", "Edge", "Vertex"}:
+                remapped = True
+                for structured_dim in structured_horizontal_dims:
+                    remapped_ranges[structured_dim] = range_
+            else:
+                remapped_ranges[dim] = range_
+
+        return (
+            domain_utils.SymbolicDomain(symbolic_domain.grid_type, remapped_ranges)
+            if remapped
+            else symbolic_domain
+        )
+
     for arg in [true_field, false_field]:
 
         @tree_map
         def mapper(d: NonTupleDomainAccess):
             if isinstance(d, DomainAccessDescriptor):
                 return d
+            promoted_source = _remap_legacy_horizontal_domain(
+                symbolic_cond if arg == true_field else cond_complement,
+                d.ranges.keys(),
+            )
             promoted_cond = domain_utils.promote_domain(
-                symbolic_cond if arg == true_field else cond_complement,  # noqa: B023 # function is never used outside the loop
+                promoted_source,
                 d.ranges.keys(),
             )
             return domain_utils.domain_intersection(d, promoted_cond)

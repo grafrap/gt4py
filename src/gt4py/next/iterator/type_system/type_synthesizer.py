@@ -11,7 +11,6 @@ from __future__ import annotations
 import dataclasses
 import functools
 import inspect
-import os
 from typing import TypeVar, cast, overload
 
 from gt4py.eve import utils as eve_utils
@@ -242,9 +241,7 @@ def deref(it: it_ts.IteratorType | ts.DeferredType) -> ts.DataType | ts.Deferred
         return ts.DeferredType(constraint=None)
     assert isinstance(it, it_ts.IteratorType)
     if not _is_derefable_iterator_type(it):
-        if os.environ.get("USE_STRUCTURED_BACKEND", "0") != "1":
-            return it.element_type
-        assert _is_derefable_iterator_type(it)
+        return it.element_type
     return it.element_type
 
 

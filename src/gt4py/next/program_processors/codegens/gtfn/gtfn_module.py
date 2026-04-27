@@ -343,7 +343,7 @@ class GTFNTranslationStep(
         except Exception:
             return {}
 
-        return {
+        result: dict[str, Any] = {
             "i_min": 0,
             "j_min": 0,
             "i_max": int(sizes.max_i),
@@ -356,6 +356,31 @@ class GTFNTranslationStep(
             "ny": int(sizes.ny),
             "mesh_path": str(Path(mesh_path).expanduser().resolve()),
         }
+
+        # Also inject the edge_to_ijk mapping so all stencils use the horizontal_start
+        # mapping path instead of the legacy lateral path. This ensures that even utility
+        # stencils (geometry, math helpers) compiled via the standard GTFN backend go
+        # through the structured pass correctly when USE_STRUCTURED_BACKEND=1.
+        try:
+            from gt4py.next.modules.cartesian_interceptor import get_global_grid_mapping
+            index_map, _ = get_global_grid_mapping()
+            if index_map is not None:
+                import numpy as np
+                edge_to_ijk = getattr(index_map, "edge_to_ijk", None)
+                if edge_to_ijk is not None:
+                    result["use_horizontal_start_mapping"] = True
+                    result["edge_to_ijk"] = [
+                        (int(i), int(j), int(k)) for i, j, k in np.asarray(edge_to_ijk)
+                    ]
+                vertex_to_ij = getattr(index_map, "vertex_to_ij", None)
+                if vertex_to_ij is not None:
+                    result["vertex_to_ij"] = [
+                        (int(i), int(j)) for i, j in np.asarray(vertex_to_ij)
+                    ]
+        except Exception:
+            pass
+
+        return result
 
     @staticmethod
     def _infer_kolor_extent_from_program(program: itir.Program) -> Optional[int]:
