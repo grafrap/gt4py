@@ -968,7 +968,19 @@ class GenericStructuredWrapper:
 
         np.copyto(orig_np, unstruct_np)
     
-    def __call__(self, **kwargs):
+    def __call__(self, *args, **kwargs):
+        # Map positional args to kwargs using the program's declared param order.
+        # This handles callers (like diffusion init_run) that pass some args positionally.
+        if args:
+            try:
+                program_params = self._operator.past_stage.past_node.params
+                param_names = [str(p.id) for p in program_params]
+                for i, arg in enumerate(args):
+                    if i < len(param_names) and param_names[i] not in kwargs:
+                        kwargs[param_names[i]] = arg
+            except AttributeError:
+                pass
+
         structured_kwargs = {}
         packed_fields: list[tuple[object, object]] = []
 

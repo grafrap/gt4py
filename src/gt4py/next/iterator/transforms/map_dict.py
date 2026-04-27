@@ -489,10 +489,10 @@ map_dict = {  # V2E:
                 ),
             ),
             (
-                _kolor_slice(1, 2),  # edge kolor 1 -> vertex (i+1, j, 0)
+                _kolor_slice(1, 2),  # edge kolor 1 -> vertex (i, j, 0)
                 (
                     ir.OffsetLiteral(value="IDim"),
-                    ir.OffsetLiteral(value=1),
+                    ir.OffsetLiteral(value=0),
                     ir.OffsetLiteral(value="JDim"),
                     ir.OffsetLiteral(value=0),
                     ir.OffsetLiteral(value="Kolor"),
@@ -527,10 +527,10 @@ map_dict = {  # V2E:
                 ),
             ),
             (
-                _kolor_slice(1, 2),  # edge kolor 1 -> vertex (i, j, 0)
+                _kolor_slice(1, 2),  # edge kolor 1 -> vertex (i+1, j, 0)
                 (
                     ir.OffsetLiteral(value="IDim"),
-                    ir.OffsetLiteral(value=0),
+                    ir.OffsetLiteral(value=1),
                     ir.OffsetLiteral(value="JDim"),
                     ir.OffsetLiteral(value=0),
                     ir.OffsetLiteral(value="Kolor"),
@@ -557,9 +557,9 @@ map_dict = {  # V2E:
                 _kolor_slice(0, 1),  # edge kolor 0 -> vertex (i, j, 1)
                 (
                     ir.OffsetLiteral(value="IDim"),
-                    ir.OffsetLiteral(value=1),
+                    ir.OffsetLiteral(value=-1),
                     ir.OffsetLiteral(value="JDim"),
-                    ir.OffsetLiteral(value=0),
+                    ir.OffsetLiteral(value=1),
                     ir.OffsetLiteral(value="Kolor"),
                     ir.OffsetLiteral(value=0),
                 ),
@@ -579,9 +579,9 @@ map_dict = {  # V2E:
                 None,  # edge kolor 2 -> vertex (i, j+1, 0)
                 (
                     ir.OffsetLiteral(value="IDim"),
-                    ir.OffsetLiteral(value=0),
+                    ir.OffsetLiteral(value=1),
                     ir.OffsetLiteral(value="JDim"),
-                    ir.OffsetLiteral(value=0),
+                    ir.OffsetLiteral(value=1),
                     ir.OffsetLiteral(value="Kolor"),
                     ir.OffsetLiteral(value=-2),
                 ),
@@ -595,9 +595,9 @@ map_dict = {  # V2E:
                 _kolor_slice(0, 1),  # edge kolor 0 -> vertex (i, j, 1)
                 (
                     ir.OffsetLiteral(value="IDim"),
-                    ir.OffsetLiteral(value=-1),
-                    ir.OffsetLiteral(value="JDim"),
                     ir.OffsetLiteral(value=1),
+                    ir.OffsetLiteral(value="JDim"),
+                    ir.OffsetLiteral(value=0),
                     ir.OffsetLiteral(value="Kolor"),
                     ir.OffsetLiteral(value=0),
                 ),
@@ -617,9 +617,9 @@ map_dict = {  # V2E:
                 None,  # edge kolor 2 -> vertex (i, j+1, 0)
                 (
                     ir.OffsetLiteral(value="IDim"),
-                    ir.OffsetLiteral(value=1),
+                    ir.OffsetLiteral(value=0),
                     ir.OffsetLiteral(value="JDim"),
-                    ir.OffsetLiteral(value=1),
+                    ir.OffsetLiteral(value=0),
                     ir.OffsetLiteral(value="Kolor"),
                     ir.OffsetLiteral(value=-2),
                 ),
