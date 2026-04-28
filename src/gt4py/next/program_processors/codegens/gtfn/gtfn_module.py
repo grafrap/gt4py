@@ -309,6 +309,12 @@ class GTFNTranslationStep(
 
     @staticmethod
     def _resolve_symbolic_domain_sizes_from_mesh_metadata() -> dict[str, Any]:
+        # Only inject structured mapping metadata when the structured backend is active.
+        # When USE_STRUCTURED_BACKEND=0 the cart_unroll pass is not applied and these
+        # sizes are unused, but they change the cache hash — causing unstructured runs to
+        # pick up cached structured (4-D) compilations.
+        if os.environ.get("USE_STRUCTURED_BACKEND", "0") != "1":
+            return {}
         mesh_path = os.environ.get("GT4PY_TRANSLATOR_MESH")
         lateral_env = os.environ.get("GT4PY_TRANSLATOR_LATERAL")
         if lateral_env is None:
