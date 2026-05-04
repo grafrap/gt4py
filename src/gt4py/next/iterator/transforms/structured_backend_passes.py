@@ -41,6 +41,22 @@ from gt4py.next.type_system import type_specifications as ts
 map_dict = map_dict_module.map_dict
 
 # =====================================================================
+# Module-level constants
+# =====================================================================
+
+#: Unstructured horizontal entity axis names (before structured remapping).
+_UNSTRUCTURED_AXES: frozenset[str] = frozenset({"Edge", "Vertex", "Cell"})
+
+#: Structured Cartesian horizontal axis names (after structured remapping).
+_STRUCTURED_HORIZONTAL_AXES: frozenset[str] = frozenset({"IDim", "JDim", "Kolor"})
+
+#: Edge-to-edge connectivity tags that span multiple kolors on local intermediates.
+_EDGE_TO_EDGE_CONNECTIVITIES: frozenset[str] = frozenset({"E2C2EO", "E2C2E"})
+
+#: Threshold parameter name for the 2nd nudge line (edge entity).
+_EDGE_NUDGE_THRESHOLD_ID = "start_2nd_nudge_line_idx_e"
+
+# =====================================================================
 # Module-level cache
 # =====================================================================
 
@@ -178,7 +194,7 @@ def _derive_entity_range_bounds_from_mapping(
 def _apply_shift_chain(arg: ir.Expr, shift_spec: tuple[ir.OffsetLiteral, ...]) -> ir.Expr:
     normalized: list[ir.OffsetLiteral] = []
     for idx, off in enumerate(shift_spec):
-        if idx % 2 == 0 and isinstance(off.value, str) and off.value in {"IDim", "JDim", "Kolor"}:
+        if idx % 2 == 0 and isinstance(off.value, str) and off.value in _STRUCTURED_HORIZONTAL_AXES:
             normalized.append(
                 ir.OffsetLiteral(value=common.dimension_to_implicit_offset(off.value))
             )
@@ -413,7 +429,7 @@ def _detect_setat_entity(domain_expr: ir.Expr) -> str | None:
         if not cpm.is_call_to(dom, "unstructured_domain"):
             continue
         for nr in dom.args:
-            if cpm.is_call_to(nr, "named_range") and len(nr.args) == 3:
+            if _named_range_args(nr) is not None:
                 axis_name = _get_axis_name(nr.args[0])
                 if axis_name in {"Edge", "Cell", "Vertex"}:
                     return axis_name
@@ -424,7 +440,27 @@ def _is_unstructured_edge_domain_stmt(domain_expr: ir.Expr) -> bool:
     return _detect_setat_entity(domain_expr) == "Edge"
 
 
-_EDGE_TO_EDGE_CONNECTIVITIES: frozenset[str] = frozenset({"E2C2EO", "E2C2E"})
+# _EDGE_TO_EDGE_CONNECTIVITIES is defined at module top as part of the constants block.
+
+
+def _named_range_args(nr: ir.Expr) -> tuple[ir.Expr, ir.Expr, ir.Expr] | None:
+    """Return (axis, lo, hi) if nr is a valid named_range call, else None."""
+    if cpm.is_call_to(nr, "named_range") and len(nr.args) == 3:
+        return nr.args[0], nr.args[1], nr.args[2]
+    return None
+
+
+def _conn_name_and_is_edge_to_non_edge(key: tuple) -> tuple[str, bool]:
+    """Extract connectivity name and determine if it is edge→non-edge.
+
+    Edge→non-edge connectivities (E2C, E2V, …) can have their per-kolor branch
+    resolved directly when current_kolor is known.  Edge→edge (E2C2EO, E2C2E)
+    always crosses kolors so current_kolor must be suppressed.
+    """
+    conn_name = key[0].value if isinstance(key[0], ir.OffsetLiteral) and isinstance(key[0].value, str) else ""
+    normalized = conn_name.rstrip("ₒ")
+    is_edge_to_non_edge = normalized.startswith("E") and normalized not in _EDGE_TO_EDGE_CONNECTIVITIES
+    return conn_name, is_edge_to_non_edge
 
 
 def _expr_uses_edge_to_edge_connectivity(node: ir.Node) -> bool:
@@ -476,7 +512,7 @@ def _kolor_from_domain(domain: ir.Expr | None) -> int | None:
     if domain is None or not cpm.is_call_to(domain, "cartesian_domain"):
         return None
     for nr in domain.args:
-        if not (cpm.is_call_to(nr, "named_range") and len(nr.args) == 3):
+        if _named_range_args(nr) is None:
             continue
         if _get_axis_name(nr.args[0]) != "Kolor":
             continue
@@ -509,7 +545,7 @@ def _kolor_cw_condition_to_domain(cond: ir.Expr, fallback_domain: ir.Expr) -> ir
                 _collect(arg)
         elif cpm.is_call_to(expr, "cartesian_domain"):
             for nr in expr.args:
-                if cpm.is_call_to(nr, "named_range") and len(nr.args) == 3:
+                if _named_range_args(nr) is not None:
                     name = _get_axis_name(nr.args[0])
                     if name is not None:
                         by_axis[name] = copy.deepcopy(nr)
@@ -521,9 +557,9 @@ def _kolor_cw_condition_to_domain(cond: ir.Expr, fallback_domain: ir.Expr) -> ir
     def _collect_fallback(domain: ir.Expr) -> None:
         if cpm.is_call_to(domain, "cartesian_domain"):
             for nr in domain.args:
-                if cpm.is_call_to(nr, "named_range") and len(nr.args) == 3:
+                if _named_range_args(nr) is not None:
                     name = _get_axis_name(nr.args[0])
-                    if name is not None and name not in {"IDim", "JDim", "Kolor"}:
+                    if name is not None and name not in _STRUCTURED_HORIZONTAL_AXES:
                         by_axis.setdefault(name, copy.deepcopy(nr))
         elif cpm.is_call_to(domain, "make_tuple"):
             for sub in domain.args:
@@ -544,6 +580,12 @@ def _kolor_cw_condition_to_domain(cond: ir.Expr, fallback_domain: ir.Expr) -> ir
 # =====================================================================
 
 def _pick_symbolic_int(symbolic_domain_sizes: dict[str, Any], *names: str) -> int | None:
+    """Return the first integer value found under any of *names* in symbolic_domain_sizes.
+
+    Companion to _pick_size_param: use this when you need an int for arithmetic or as a
+    Python-level bound; use _pick_size_param when you need an ir.Expr for embedding in IR nodes.
+    Call sites in the mapping path always receive integer-valued dicts (confirmed by H7 tests).
+    """
     for name in names:
         value = symbolic_domain_sizes.get(name)
         if isinstance(value, numbers.Integral):
@@ -596,14 +638,32 @@ def _offset_int_value(expr: ir.Expr) -> int | None:
     return None
 
 
+def _extract_index_value(expr: ir.Expr) -> int | None:
+    """Extract a non-negative integer index from ir.Literal or ir.OffsetLiteral.
+
+    Used for tuple_get indices: im.tuple_get produces ir.Literal; manually-constructed
+    IR may use ir.OffsetLiteral.
+    """
+    if isinstance(expr, ir.Literal):
+        try:
+            return int(expr.value)
+        except (ValueError, TypeError):
+            return None
+    if isinstance(expr, ir.OffsetLiteral) and isinstance(expr.value, int):
+        return expr.value
+    return None
+
+
 def _offset_add(lhs: ir.Expr, rhs: ir.Expr) -> ir.Expr:
     lv, rv = _offset_int_value(lhs), _offset_int_value(rhs)
     if lv is not None and rv is not None:
         return ir.OffsetLiteral(value=lv + rv)
+    # Zero-offset fast path: return the other operand.  Both OffsetLiteral and SymRef are
+    # value-typed in GT4Py IR (never mutated by callers), so no deepcopy is needed here.
     if rv == 0:
-        return copy.deepcopy(lhs)
+        return lhs
     if lv == 0:
-        return copy.deepcopy(rhs)
+        return rhs
     return im.plus(copy.deepcopy(lhs), copy.deepcopy(rhs))
 
 
@@ -612,7 +672,7 @@ def _offset_sub(lhs: ir.Expr, rhs: ir.Expr) -> ir.Expr:
     if lv is not None and rv is not None:
         return ir.OffsetLiteral(value=lv - rv)
     if rv == 0:
-        return copy.deepcopy(lhs)
+        return lhs
     return im.minus(copy.deepcopy(lhs), copy.deepcopy(rhs))
 
 
@@ -749,13 +809,15 @@ def _entity_cartesian_bounds(
     symbolic_domain_sizes: dict[str, Any],
     kolor: int | None = None,
 ) -> tuple[ir.Expr, ir.Expr] | None:
-    bounds = _mapping_based_axis_bounds(entity_name, axis_name, symbolic_domain_sizes, kolor=kolor)
-    if bounds is None:
-        bounds = _cartesian_axis_bounds(axis_name, program_param_ids, symbolic_domain_sizes)
+    # S1: cache the mapping result to avoid calling _mapping_based_axis_bounds twice.
+    mapping_bounds = _mapping_based_axis_bounds(entity_name, axis_name, symbolic_domain_sizes, kolor=kolor)
+    bounds = mapping_bounds if mapping_bounds is not None else _cartesian_axis_bounds(axis_name, program_param_ids, symbolic_domain_sizes)
     if bounds is None:
         return None
     lo, hi = bounds
-    if entity_name == "Cell" and _mapping_based_axis_bounds(entity_name, axis_name, symbolic_domain_sizes, kolor=kolor) is None:
+    # Cell-centered fields are one element smaller than the vertex extent on each axis
+    # when falling back to cartesian_axis_bounds (no per-kolor mapping available).
+    if entity_name == "Cell" and mapping_bounds is None:
         hi = _offset_sub(hi, ir.OffsetLiteral(value=1))
     return lo, hi
 
@@ -765,9 +827,9 @@ def _is_fully_structured_field(expr: ir.Expr) -> bool:
     if not isinstance(type_, ts.FieldType):
         return False
     dim_names = {dim.value for dim in type_.dims}
-    if {"IDim", "JDim", "Kolor"}.isdisjoint(dim_names):
+    if _STRUCTURED_HORIZONTAL_AXES.isdisjoint(dim_names):
         return False
-    return not any(name in {"Edge", "Vertex", "Cell"} for name in dim_names)
+    return not any(name in _UNSTRUCTURED_AXES for name in dim_names)
 
 
 def _retarget_self_refs(expr: ir.Expr, target: ir.Expr) -> ir.Expr:
@@ -778,7 +840,7 @@ def _retarget_self_refs(expr: ir.Expr, target: ir.Expr) -> ir.Expr:
 
     def _has_unstructured_axis(type_: ts.TypeSpec | None) -> bool:
         return isinstance(type_, ts.FieldType) and any(
-            dim.value in {"Edge", "Vertex", "Cell"} for dim in type_.dims
+            dim.value in _UNSTRUCTURED_AXES for dim in type_.dims
         )
 
     class _RetargetSelfRef(NodeTranslator):
@@ -807,14 +869,14 @@ class StructuredTypeRemapper(NodeTranslator):
     def _cartesian_remapped_type(type_: ts.TypeSpec | None) -> ts.TypeSpec | None:
         if not isinstance(type_, ts.FieldType):
             return type_
-        if not any(dim.value in {"Edge", "Vertex", "Cell"} for dim in type_.dims):
+        if not any(dim.value in _UNSTRUCTURED_AXES for dim in type_.dims):
             return type_
         idim = common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL)
         jdim = common.Dimension("JDim", kind=common.DimensionKind.HORIZONTAL)
         kolor = common.Dimension("Kolor", kind=common.DimensionKind.HORIZONTAL)
         new_dims: list[common.Dimension] = []
         for dim in type_.dims:
-            if dim.value in {"Edge", "Vertex", "Cell"}:
+            if dim.value in _UNSTRUCTURED_AXES:
                 new_dims.extend([idim, jdim, kolor])
             else:
                 new_dims.append(dim)
@@ -825,7 +887,7 @@ class StructuredTypeRemapper(NodeTranslator):
         for fun_call in node.pre_walk_values().if_isinstance(ir.FunCall):
             if not cpm.is_call_to(fun_call, "named_range") or len(fun_call.args) != 3:
                 continue
-            if _get_axis_name(fun_call.args[0]) in {"Edge", "Vertex", "Cell"}:
+            if _get_axis_name(fun_call.args[0]) in _UNSTRUCTURED_AXES:
                 return True
         return False
 
@@ -1106,7 +1168,7 @@ class SetAtRemapper(NodeTranslator):
         i_lo = i_hi = j_lo = j_hi = None
 
         for nr in cart_domain.args:
-            if not (cpm.is_call_to(nr, "named_range") and len(nr.args) == 3):
+            if _named_range_args(nr) is None:
                 continue
             name = _get_axis_name(nr.args[0])
             if name == "IDim":
@@ -1174,7 +1236,15 @@ class SetAtRemapper(NodeTranslator):
         domain_expr: ir.Expr,
         symbolic_domain_sizes: dict[str, Any],
     ) -> ir.Expr | None:
-        """Build 3-kolor concat_where mask for non-split edge SetAts."""
+        """Build 3-kolor concat_where mask for non-split edge SetAts.
+
+        Returns a concat_where expression that restricts each kolor to its valid
+        per-kolor (I, J) extent derived from the edge_to_ijk mapping.  Returns
+        None when mapping data is absent (horizontal_start == 0 or no edge_to_ijk)
+        or when the domain is not a 3-kolor edge domain — in both cases the caller
+        leaves expr unchanged.  In the main pipeline mapping is always present, so
+        this function always produces a concat_where for genuine edge stencils.
+        """
         cart_domain = None
         for dom in _iter_domain_nodes(domain_expr):
             if cpm.is_call_to(dom, "cartesian_domain"):
@@ -1187,7 +1257,7 @@ class SetAtRemapper(NodeTranslator):
         i_lo = i_hi = j_lo = j_hi = k_hi = None
 
         for nr in cart_domain.args:
-            if not (cpm.is_call_to(nr, "named_range") and len(nr.args) == 3):
+            if _named_range_args(nr) is None:
                 continue
             axis_name = _get_axis_name(nr.args[0])
             if axis_name == "IDim":
@@ -1320,7 +1390,7 @@ class SetAtRemapper(NodeTranslator):
                 return copy.deepcopy(dom)
             new_ranges: list[ir.Expr] = []
             for nr in dom.args:
-                if not (cpm.is_call_to(nr, "named_range") and len(nr.args) == 3):
+                if _named_range_args(nr) is None:
                     new_ranges.append(copy.deepcopy(nr))
                     continue
                 axis_name = _get_axis_name(nr.args[0])
@@ -1364,9 +1434,9 @@ class SetAtRemapper(NodeTranslator):
             new_ranges: list[ir.Expr] = []
             needs_remap = False
             for nr in node.args:
-                if cpm.is_call_to(nr, "named_range") and len(nr.args) == 3:
+                if _named_range_args(nr) is not None:
                     axis_name = _get_axis_name(nr.args[0])
-                    if axis_name in {"Edge", "Vertex", "Cell"}:
+                    if axis_name in _UNSTRUCTURED_AXES:
                         idim_b = _entity_cartesian_bounds(axis_name, "IDim", program_param_ids, symbolic_domain_sizes)
                         jdim_b = _entity_cartesian_bounds(axis_name, "JDim", program_param_ids, symbolic_domain_sizes)
                         kolor_b = _entity_kolor_bounds(axis_name)
@@ -1381,11 +1451,11 @@ class SetAtRemapper(NodeTranslator):
                             ])
                             needs_remap = True
                             continue
-                new_ranges.append(copy.deepcopy(self.generic_visit(nr, **kwargs)))
+                new_ranges.append(self.generic_visit(nr, **kwargs))
             if needs_remap:
                 return im.call("cartesian_domain")(*new_ranges)
 
-        return copy.deepcopy(self.generic_visit(node, **kwargs))
+        return self.generic_visit(node, **kwargs)
 
     @classmethod
     def apply(
@@ -1420,7 +1490,7 @@ class BroadcastAxisExpander(NodeTranslator):
 
     @staticmethod
     def _expand_unstructured_axis(axis_expr: ir.Expr) -> list[ir.Expr]:
-        if _get_axis_name(axis_expr) in {"Edge", "Vertex", "Cell"}:
+        if _get_axis_name(axis_expr) in _UNSTRUCTURED_AXES:
             return BroadcastAxisExpander._structured_axis_literals()
         return [copy.deepcopy(axis_expr)]
 
@@ -1437,7 +1507,7 @@ class BroadcastAxisExpander(NodeTranslator):
         return im.call("make_tuple")(*expanded)
 
     def visit_FunCall(self, node: ir.FunCall, **kwargs) -> ir.Expr:
-        new_node = copy.deepcopy(self.generic_visit(node, **kwargs))
+        new_node = self.generic_visit(node, **kwargs)
         if cpm.is_call_to(new_node, "broadcast") and len(new_node.args) == 2:
             remapped_axes = self._remap_broadcast_axes(new_node.args[1])
             return ir.FunCall(
@@ -1563,7 +1633,7 @@ class ThresholdConditionRewriter(NodeTranslator):
     ) -> ir.Expr | None:
         if f"{threshold_id}_k0_ilo" in symbolic_domain_sizes:
             interior_cond = self._mapping_based_threshold_condition(threshold_id, 3, symbolic_domain_sizes)
-        elif threshold_id == "start_2nd_nudge_line_idx_e":
+        elif threshold_id == _EDGE_NUDGE_THRESHOLD_ID:
             interior_cond = self._structured_entity_condition("Edge", program_param_ids, symbolic_domain_sizes, extra_halo=2)
         else:
             interior_cond = self._structured_entity_condition("Edge", program_param_ids, symbolic_domain_sizes)
@@ -1660,7 +1730,7 @@ class ThresholdConditionRewriter(NodeTranslator):
                     if result is not None:
                         return result
 
-        new_node = copy.deepcopy(self.generic_visit(node, **kwargs))
+        new_node = self.generic_visit(node, **kwargs)
 
         if (
             cpm.is_call_to(new_node, ("greater_equal", "greater", "less_equal", "less"))
@@ -1684,6 +1754,7 @@ class ThresholdConditionRewriter(NodeTranslator):
                     return new_node
 
                 def _has_sym(expr: ir.Expr, sym: str) -> bool:
+                    """Return True if expr contains a SymRef with id==sym (early-exit via `or`/`any`)."""
                     if isinstance(expr, ir.SymRef):
                         return str(expr.id) == sym
                     if isinstance(expr, ir.FunCall):
@@ -1693,28 +1764,23 @@ class ThresholdConditionRewriter(NodeTranslator):
                 is_interior = threshold_id == "interior_idx" or _has_sym(threshold_expr, "interior_idx")
                 is_halo = threshold_id == "halo_idx" or _has_sym(threshold_expr, "halo_idx")
 
+                # is_positive: True when the comparison means "entity_index >= threshold"
+                # (lhs side with >= / > operator, or rhs side with <= / < operator).
+                # For halo thresholds the sense is inverted (entity_index <= halo_bound).
+                _interior_positive = (
+                    (axis_side == "lhs" and op_name in {"greater_equal", "greater"})
+                    or (axis_side == "rhs" and op_name in {"less_equal", "less"})
+                )
+
                 if entity_axis == "Edge":
-                    is_positive = (
-                        (axis_side == "lhs" and op_name in {"greater_equal", "greater"})
-                        or (axis_side == "rhs" and op_name in {"less_equal", "less"})
-                    )
                     result = self._rewrite_edge_threshold(
-                        threshold_id, is_positive, symbolic_domain_sizes, program_param_ids
+                        threshold_id, _interior_positive, symbolic_domain_sizes, program_param_ids
                     )
                     if result is not None:
                         return result
 
                 elif entity_axis == "Cell":
-                    if is_halo:
-                        is_positive = (
-                            (axis_side == "lhs" and op_name in {"less_equal", "less"})
-                            or (axis_side == "rhs" and op_name in {"greater_equal", "greater"})
-                        )
-                    else:
-                        is_positive = (
-                            (axis_side == "lhs" and op_name in {"greater_equal", "greater"})
-                            or (axis_side == "rhs" and op_name in {"less_equal", "less"})
-                        )
+                    is_positive = not _interior_positive if is_halo else _interior_positive
                     result = self._rewrite_cell_threshold(
                         threshold_id, is_positive, is_interior, is_halo,
                         symbolic_domain_sizes, program_param_ids
@@ -1759,7 +1825,7 @@ class SymbolicSizeInliner(NodeTranslator):
         symbolic_domain_sizes: dict[str, Any] = kwargs.get("symbolic_domain_sizes") or {}
         program_param_ids: set[str] = kwargs.get("program_param_ids") or set()
 
-        new_node = copy.deepcopy(self.generic_visit(node, **kwargs))
+        new_node = self.generic_visit(node, **kwargs)
 
         # get_domain_range(axis, field) → (lo, hi)
         if cpm.is_call_to(new_node, "get_domain_range") and len(new_node.args) == 2:
@@ -1769,24 +1835,22 @@ class SymbolicSizeInliner(NodeTranslator):
                 if bounds is not None:
                     return im.make_tuple(*bounds)
 
-        # tuple_get(idx, make_tuple(...)) → direct element
+        # tuple_get(idx, make_tuple(...)) or tuple_get(idx, get_domain_range(...))
+        # Accept both ir.Literal (from im.tuple_get) and ir.OffsetLiteral as the index.
         if cpm.is_call_to(new_node, "tuple_get") and len(new_node.args) == 2:
             tuple_index, inner = new_node.args
-            if cpm.is_call_to(inner, "make_tuple") and isinstance(tuple_index, ir.Literal):
-                idx = int(tuple_index.value)
-                if 0 <= idx < len(inner.args):
-                    return copy.deepcopy(inner.args[idx])
+            idx_val = _extract_index_value(tuple_index)
+            # tuple_get(idx, make_tuple(...)) → direct element
+            if cpm.is_call_to(inner, "make_tuple") and idx_val is not None:
+                if 0 <= idx_val < len(inner.args):
+                    return copy.deepcopy(inner.args[idx_val])
             # tuple_get(idx, get_domain_range(axis, field)) → individual bound
             if cpm.is_call_to(inner, "get_domain_range") and len(inner.args) == 2:
                 axis_name = _get_axis_name(inner.args[1])
-                if (
-                    axis_name is not None
-                    and isinstance(tuple_index, ir.OffsetLiteral)
-                    and tuple_index.value in {0, 1}
-                ):
+                if axis_name is not None and idx_val in {0, 1}:
                     bounds = _cartesian_axis_bounds(axis_name, program_param_ids, symbolic_domain_sizes)
                     if bounds is not None:
-                        return copy.deepcopy(bounds[int(tuple_index.value)])
+                        return copy.deepcopy(bounds[idx_val])
 
         return new_node
 
@@ -1813,21 +1877,13 @@ class NeighborReductionUnroller(NodeTranslator):
 
     @staticmethod
     def _collect_neighbor_tags(expr: ir.Expr) -> set[str]:
+        """Return all connectivity names used in neighbors() calls within expr."""
         tags: set[str] = set()
-
-        def _walk(node: ir.Node) -> None:
-            if cpm.is_call_to(node, "neighbors") and len(node.args) == 2:
-                offset = node.args[0]
+        for call in expr.pre_walk_values().if_isinstance(ir.FunCall):
+            if cpm.is_call_to(call, "neighbors") and len(call.args) == 2:
+                offset = call.args[0]
                 if isinstance(offset, ir.OffsetLiteral) and isinstance(offset.value, str):
                     tags.add(offset.value)
-            if isinstance(node, ir.FunCall):
-                _walk(node.fun)
-                for arg in node.args:
-                    _walk(arg)
-            elif isinstance(node, ir.Lambda):
-                _walk(node.expr)
-
-        _walk(expr)
         return tags
 
     @staticmethod
@@ -1841,7 +1897,8 @@ class NeighborReductionUnroller(NodeTranslator):
             for key in map_dict
             if key[0].value == conn and isinstance(key[1].value, int)
         )
-        if not idx_values or idx_values != list(range(len(idx_values))):
+        # Verify slots are a contiguous range [0, N). `list(range(0)) == []` handles empty.
+        if idx_values != list(range(len(idx_values))):
             return None
         return len(idx_values)
 
@@ -1993,17 +2050,15 @@ class NeighborReductionUnroller(NodeTranslator):
                                 domain,
                             )
                         if entry["kind"] == "concat_where":
-                            normalized = conn.rstrip("ₒ")
-                            is_edge_to_non_edge = (
-                                normalized.startswith("E")
-                                and normalized not in _EDGE_TO_EDGE_CONNECTIVITIES
+                            _, is_ene = _conn_name_and_is_edge_to_non_edge(
+                                (ir.OffsetLiteral(value=conn), ir.OffsetLiteral(value=0))
                             )
                             return _build_field_concat_where_from_branches(
                                 field_expr,
                                 cast(tuple, entry["branches"]),
                                 domain,
                                 apply_edge_shape_bounds=_needs_edge_shape_bounds(conn),
-                                current_kolor=current_kolor if is_edge_to_non_edge else None,
+                                current_kolor=current_kolor if is_ene else None,
                             )
 
                 if isinstance(stencil.expr, ir.FunCall) and cpm.is_call_to(stencil.expr.fun, "map_"):
@@ -2040,16 +2095,13 @@ class NeighborReductionUnroller(NodeTranslator):
         domain_bounds: dict[str, tuple[ir.Expr, ir.Expr]] = {}
         if cpm.is_call_to(domain, "cartesian_domain"):
             for range_expr in domain.args:
-                if (
-                    cpm.is_call_to(range_expr, "named_range")
-                    and len(range_expr.args) == 3
-                    and isinstance(range_expr.args[0], ir.AxisLiteral)
-                ):
-                    axis_name = range_expr.args[0].value
+                nra = _named_range_args(range_expr)
+                if nra is not None:
+                    axis_name = _get_axis_name(nra[0])
                     if axis_name in {"IDim", "JDim"}:
                         domain_bounds[axis_name] = (
-                            copy.deepcopy(range_expr.args[1]),
-                            copy.deepcopy(range_expr.args[2]),
+                            copy.deepcopy(nra[1]),
+                            copy.deepcopy(nra[2]),
                         )
 
         widened_init = copy.deepcopy(red_init)
@@ -2063,6 +2115,11 @@ class NeighborReductionUnroller(NodeTranslator):
             widened_init = im.literal(str(red_init.value), "int64")
 
         neutral_element = _neutral_element_for_reduce_op(red_op, widened_init)
+        # If the reduction init is an integer literal but the neutral element (from
+        # _neutral_element_for_reduce_op) is float64 — e.g. for plus/max/min — replace
+        # widened_init with the neutral element so the accumulator starts at the correct
+        # float64 identity rather than an int.  This prevents type mismatches in the
+        # as_fieldop accumulation lambda.
         if (
             isinstance(widened_init, ir.Literal)
             and isinstance(widened_init.type, ts.ScalarType)
@@ -2264,6 +2321,11 @@ class NeighborReductionUnroller(NodeTranslator):
         current_domain = kwargs.get("current_domain")
         current_kolor: int | None = kwargs.get("current_kolor")
 
+        # Path 1 — as_fieldop wrapping a single deref-shift:
+        #   as_fieldop(λit. deref(shift(conn, slot)(it)), domain)(field)
+        #   Matches stencils that are just lifted field accesses (already fieldop-wrapped shifts).
+        #   Mutually exclusive with Path 2 (reduce) and Path 3 (raw shift): an as_fieldop with a
+        #   pure deref-shift stencil cannot simultaneously be a reduce or a bare shift node.
         if cpm.is_applied_as_fieldop(node) and len(node.args) == 1:
             stencil = node.fun.args[0]
             if (
@@ -2280,23 +2342,14 @@ class NeighborReductionUnroller(NodeTranslator):
                 if key in map_dict:
                     entry = cast(dict[str, object], map_dict[key])
                     rewritten_arg = self.visit(node.args[0], **kwargs)
+                    conn_name, is_ene = _conn_name_and_is_edge_to_non_edge(key)
                     if entry["kind"] == "concat_where":
-                        conn_name_str = (
-                            key[0].value
-                            if isinstance(key[0], ir.OffsetLiteral) and isinstance(key[0].value, str)
-                            else ""
-                        )
-                        normalized_conn = conn_name_str.rstrip("ₒ")
-                        is_edge_to_non_edge = (
-                            normalized_conn.startswith("E")
-                            and normalized_conn not in _EDGE_TO_EDGE_CONNECTIVITIES
-                        )
                         return _build_field_concat_where_from_branches(
                             rewritten_arg,
                             cast(tuple, entry["branches"]),
                             current_domain,
-                            apply_edge_shape_bounds=_needs_edge_shape_bounds(conn_name_str or None),
-                            current_kolor=current_kolor if is_edge_to_non_edge else None,
+                            apply_edge_shape_bounds=_needs_edge_shape_bounds(conn_name or None),
+                            current_kolor=current_kolor if is_ene else None,
                         )
                     elif entry["kind"] == "shift":
                         return _make_lifted_deref_shift(
@@ -2305,6 +2358,9 @@ class NeighborReductionUnroller(NodeTranslator):
                             current_domain,
                         )
 
+            # Path 2 — generic reduce: as_fieldop(λit. reduce(op)(init)(deref(it)), domain)(list)
+            #   Matches reduce(plus)(neighbors(conn, field), ...) patterns.
+            #   Only fires when Path 1 did not match (stencil is not a pure deref-shift).
             if (reduce_inputs := self._extract_generic_reduce_inputs(node)) is not None:
                 red_op, red_init, list_expr, conn_size = reduce_inputs
                 rewritten_list_expr = self.visit(list_expr, **kwargs)
@@ -2313,8 +2369,12 @@ class NeighborReductionUnroller(NodeTranslator):
                     current_kolor=current_kolor,
                 )
 
-        new_node = copy.deepcopy(self.generic_visit(node, **kwargs))
+        new_node = self.generic_visit(node, **kwargs)
 
+        # Path 3 — raw shift: shift(conn, slot)(field)
+        #   Matches bare (non-fieldop-wrapped) shifts that appear inside stencil lambdas.
+        #   Only reached after generic_visit because the node must first be visited to resolve
+        #   nested structure.  Mutually exclusive with Paths 1/2 (those return early).
         if cpm.is_applied_shift(new_node):
             key = cast(tuple[ir.OffsetLiteral, ir.OffsetLiteral], tuple(new_node.fun.args))
             if key in map_dict:
@@ -2325,21 +2385,12 @@ class NeighborReductionUnroller(NodeTranslator):
                         copy.deepcopy(arg), cast(tuple[ir.OffsetLiteral, ...], entry["shifts"])
                     )
                 if entry["kind"] == "concat_where":
-                    conn_name = (
-                        key[0].value
-                        if isinstance(key[0].value, str)
-                        else None
-                    )
-                    normalized_conn2 = conn_name.rstrip("ₒ") if conn_name else ""
-                    is_edge_to_non_edge2 = (
-                        normalized_conn2.startswith("E")
-                        and normalized_conn2 not in _EDGE_TO_EDGE_CONNECTIVITIES
-                    )
+                    conn_name, is_ene = _conn_name_and_is_edge_to_non_edge(key)
                     if current_domain is not None:
                         return _build_field_concat_where_from_branches(
                             arg, entry["branches"], current_domain,
-                            apply_edge_shape_bounds=_needs_edge_shape_bounds(conn_name),
-                            current_kolor=current_kolor if is_edge_to_non_edge2 else None,
+                            apply_edge_shape_bounds=_needs_edge_shape_bounds(conn_name or None),
+                            current_kolor=current_kolor if is_ene else None,
                         )
                     return _build_concat_where_from_branches(arg, entry["branches"])
 
@@ -2372,6 +2423,7 @@ class KolorConstantPropagation(NodeTranslator):
     @staticmethod
     def _kolor_range_from_cond(cond: ir.Expr) -> tuple[int, int] | None:
         """Return (lo, hi) if cond contains exactly one Kolor named_range."""
+        # GT4Py IR always represents and_() as a binary operator (exactly 2 args).
         if cpm.is_call_to(cond, "and_") and len(cond.args) == 2:
             for arg in cond.args:
                 result = KolorConstantPropagation._kolor_range_from_cond(arg)
@@ -2381,7 +2433,7 @@ class KolorConstantPropagation(NodeTranslator):
         if not cpm.is_call_to(cond, "cartesian_domain"):
             return None
         for nr in cond.args:
-            if not (cpm.is_call_to(nr, "named_range") and len(nr.args) == 3):
+            if _named_range_args(nr) is None:
                 continue
             if _get_axis_name(nr.args[0]) != "Kolor":
                 continue
