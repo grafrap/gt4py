@@ -80,6 +80,11 @@ def _parse_fieldop_arg(
     """
     arg = sdfg_builder.visit(node, ctx=ctx)
 
+    if arg is None:
+        # domain NEVER: the lambda body never accesses this argument (e.g. `as_fieldop(λ x → 0)(f)`).
+        # Return None so the caller can strip the dead arg + its lambda param.
+        return None  # type: ignore[return-value]
+
     if not isinstance(arg, gtir_to_sdfg_types.FieldopData):
         raise ValueError("Expected a field, found a tuple of fields.")
     return arg.get_local_view(domain, ctx.sdfg)
@@ -279,7 +284,19 @@ def translate_as_fieldop(
         )
 
     # visit the list of arguments to be passed to the lambda expression
-    fieldop_args = [_parse_fieldop_arg(arg, ctx, sdfg_builder, field_domain) for arg in node.args]
+    raw_fieldop_args = [_parse_fieldop_arg(arg, ctx, sdfg_builder, field_domain) for arg in node.args]
+
+    # Filter out None args: domain inference marks a symbol as NEVER when the lambda body
+    # never accesses the corresponding parameter (e.g. `as_fieldop(λ x → 0)(unused_field)`).
+    # Remove both the dead argument and the corresponding dead lambda parameter so that
+    # translate_lambda_to_dataflow receives matching param/arg lists.
+    assert isinstance(stencil_expr, gtir.Lambda)
+    live_pairs = [(p, a) for p, a in zip(stencil_expr.params, raw_fieldop_args) if a is not None]
+    if len(live_pairs) < len(stencil_expr.params):
+        live_params, fieldop_args = zip(*live_pairs) if live_pairs else ([], [])
+        stencil_expr = gtir.Lambda(params=list(live_params), expr=stencil_expr.expr)
+    else:
+        fieldop_args = raw_fieldop_args  # type: ignore[assignment]
 
     # represent the field operator as a mapped tasklet graph, which will range over the field domain
     input_edges, output_edge = gtir_dataflow.translate_lambda_to_dataflow(

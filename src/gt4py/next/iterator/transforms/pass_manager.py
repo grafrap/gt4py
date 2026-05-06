@@ -462,31 +462,52 @@ def apply_fieldview_transforms(
     unroll_reduce: bool = False,
     cartesian_reduce_axis_ranges: Optional[dict[common.Dimension, tuple[int, int]]] = None,
     use_max_domain_range_on_unstructured_shift: Optional[bool] = None,
+    symbolic_domain_sizes: Optional[dict[str, str | int]] = None,
 ) -> itir.Program:
     offset_provider_type = common.offset_provider_to_type(offset_provider)
 
     uids = utils.IDGeneratorPool()
-
+    _print_ir_block("=== FIELDVIEW IR BEFORE TRANSFORMS ===", ir, enabled=True)
     symbolic_domain_sizes = _process_symbolic_domains_option(
-        ir, offset_provider, None, use_max_domain_range_on_unstructured_shift
+        ir,
+        offset_provider,
+        cast(Optional[dict[str, itir.Expr]], symbolic_domain_sizes),
+        use_max_domain_range_on_unstructured_shift,
     )
-
+    _print_ir_block(
+        "=== FIELDVIEW IR AFTER PROCESSING DOMAIN OPTIONS ===", ir, enabled=True
+    )
     ir = inline_fundefs.InlineFundefs().visit(ir)
     ir = inline_fundefs.prune_unreferenced_fundefs(ir)
-
+    _print_ir_block("=== FIELDVIEW IR AFTER INLINING FUNDEFS ===", ir, enabled=True)
     # required for dead-code-elimination and `prune_empty_concat_where` pass
     ir = concat_where.expand_tuple_args(ir, offset_provider_type=offset_provider_type)  # type: ignore[assignment]  # always an itir.Program
 
     ir = dead_code_elimination.dead_code_elimination(
         ir, offset_provider_type=offset_provider_type, uids=uids
     )
-
+    _print_ir_block("=== FIELDVIEW IR AFTER DEAD CODE ELIMINATION ===", ir, enabled=True)
     ir = inline_dynamic_shifts.InlineDynamicShifts.apply(
         ir, offset_provider_type=offset_provider_type, uids=uids
     )  # domain inference does not support dynamic offsets yet
 
+    if os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1":
+        ir = NormalizeShifts().visit(ir)
+        ir = inline_lifts.InlineLifts().visit(ir)
+        ir = cart_unroll.CartesianDomainAndTypeRemapper.apply(  # type: ignore[assignment]
+            ir,
+            symbolic_domain_sizes=cast(dict[str, str | int] | None, symbolic_domain_sizes),
+            offset_provider=offset_provider,
+        )
+        ir = cart_unroll.CartesianReductionUnroller.apply(ir)  # type: ignore[assignment]
+        ir = NormalizeShifts().visit(ir)
+        ir = concat_where.expand_tuple_args(ir, offset_provider_type=offset_provider_type)  # type: ignore[assignment]  # always an itir.Program
+        ir = dead_code_elimination.dead_code_elimination(
+            ir, offset_provider_type=offset_provider_type, uids=uids
+        )
+    _print_ir_block("=== FIELDVIEW IR AFTER CARTESIAN UNROLLING ===", ir, enabled=True)
     ir = infer_domain_ops.InferDomainOps.apply(ir)
-
+    _print_ir_block("=== FIELDVIEW IR AFTER INFERRING DOMAIN OPS ===", ir, enabled=True)
     ir = concat_where.canonicalize_domain_argument(ir)
 
     ir = ConstantFolding.apply(ir)  # type: ignore[assignment]  # always an itir.Program
@@ -503,7 +524,8 @@ def apply_fieldview_transforms(
     ir = ConstantFolding.apply(ir)  # type: ignore[assignment]  # always an itir.Program
 
     ir = prune_empty_concat_where.prune_empty_concat_where(ir)
+    _print_ir_block("=== FIELDVIEW IR AFTER PRUNING EMPTY CONCAT WHERE ===", ir, enabled=True)
 
     ir = remove_broadcast.RemoveBroadcast.apply(ir)
-
+    _print_ir_block("=== FINAL FIELDVIEW IR ===", ir, enabled=True)
     return ir

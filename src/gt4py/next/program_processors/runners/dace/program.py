@@ -56,10 +56,19 @@ class Program(decorator.Program, dace.frontend.python.common.SDFGConvertible):
             )
         )
         program = gtir_stage.data
+        import os as _os
+        _sds = None
+        if _os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1":
+            try:
+                from gt4py.next.modules.cartesian_interceptor import get_compile_sds
+                _sds = get_compile_sds()
+            except ImportError:
+                pass
         program = itir_transforms.apply_fieldview_transforms(  # run the transforms separately because they require the runtime info
             program,
             offset_provider=offset_provider,
             unroll_reduce=True,
+            symbolic_domain_sizes=_sds,
         )
         object.__setattr__(
             gtir_stage,

@@ -381,14 +381,44 @@ class DaCeTranslator(
         offset_provider: common.OffsetProvider,
         column_axis: Optional[common.Dimension],
     ) -> dace.SDFG:
+        import os as _os
+
+        symbolic_domain_sizes = None
+        if _os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1":
+            try:
+                from gt4py.next.modules.cartesian_interceptor import get_compile_sds
+                symbolic_domain_sizes = get_compile_sds()
+            except ImportError:
+                pass
+            if symbolic_domain_sizes is None:
+                try:
+                    from gt4py.next.program_processors.codegens.gtfn.gtfn_module import (
+                        GTFNTranslationStep,
+                    )
+                    symbolic_domain_sizes = (
+                        GTFNTranslationStep._resolve_symbolic_domain_sizes_from_mesh_metadata()
+                    ) or None
+                except Exception:
+                    pass
+
         if not self.disable_itir_transforms:
             ir = itir_transforms.apply_fieldview_transforms(
                 ir,
                 use_max_domain_range_on_unstructured_shift=self.use_max_domain_range_on_unstructured_shift,
                 offset_provider=offset_provider,
                 unroll_reduce=True,
+                symbolic_domain_sizes=symbolic_domain_sizes,
             )
         offset_provider_type = common.offset_provider_to_type(offset_provider)
+
+        if _os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1":
+            structured_dim_entries = {
+                "IDim": common.Dimension("IDim"),
+                "JDim": common.Dimension("JDim"),
+                "Kolor": common.Dimension("Kolor"),
+            }
+            offset_provider_type = {**offset_provider_type, **structured_dim_entries}
+
         on_gpu = self.device_type != core_defs.DeviceType.CPU
 
         sdfg = gtx_dace_lowering.build_sdfg_from_gtir(ir, offset_provider_type, column_axis)
@@ -404,12 +434,24 @@ class DaCeTranslator(
         if self.auto_optimize:
             auto_optimize_args = {} if self.auto_optimize_args is None else self.auto_optimize_args
 
-            gtx_transformations.gt_auto_optimize(
-                sdfg,
-                gpu=on_gpu,
-                constant_symbols=constant_symbols,
-                **auto_optimize_args,
-            )
+            if _os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1":
+                # Structured code with per-kolor split SetAts (single-element Kolor ranges like
+                # Kolor=1:2) produces SDFGs where both gt_auto_optimize and gt_simplify collapse
+                # 3D Kolor accesses to scalars, creating invalid SDFGs. The only safe optimization
+                # is gt_substitute_compiletime_symbols, which replaces constant symbols without
+                # restructuring the SDFG at all. gt_simplify is not called because its transforms
+                # (CopyChainRemover, etc.) also break the per-kolor split structure.
+                if constant_symbols:
+                    gtx_transformations.gt_substitute_compiletime_symbols(
+                        sdfg, constant_symbols, validate=False
+                    )
+            else:
+                gtx_transformations.gt_auto_optimize(
+                    sdfg,
+                    gpu=on_gpu,
+                    constant_symbols=constant_symbols,
+                    **auto_optimize_args,
+                )
         elif on_gpu:
             # Note that `gt_substitute_compiletime_symbols()` will run `gt_simplify()`
             # at entry, in order to avoid some issue in constant propagatation.
@@ -459,7 +501,20 @@ class DaCeTranslator(
             inp.args.column_axis,
         )
 
-        arg_types = inp.args.args
+        import os as _os
+        if _os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1":
+            # apply_fieldview_transforms remaps param types inside StructuredTypeRemapper,
+            # but that transformation is on a NEW program object not accessible here.
+            # Re-apply _cartesian_remapped_type to each arg type so the bindings
+            # match the SDFG (which was built with the structured remapped types).
+            from gt4py.next.iterator.transforms.structured_backend_passes import (
+                StructuredTypeRemapper as _STR,
+            )
+            arg_types = tuple(
+                _STR._cartesian_remapped_type(t) for t in inp.args.args
+            )
+        else:
+            arg_types = inp.args.args
 
         program_parameters = tuple(
             interface.Parameter(param.id, arg_type)

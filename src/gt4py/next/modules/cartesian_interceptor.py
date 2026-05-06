@@ -24,6 +24,18 @@ from gt4py.next.modules.translator import (
 from gt4py.next.iterator.transforms.map_dict import map_dict as _MAP_DICT
 from gt4py.next.iterator import ir
 
+# Module-level global used to communicate symbolic_domain_sizes to the DaCe backend's
+# apply_fieldview_transforms at compile time. This works across threads because:
+# - The main thread sets it before calling _compiled_programs() (which blocks until done).
+# - The DaCe thread-pool compilation reads it while the main thread is blocked.
+# - It is cleared only after the blocking call returns, so no race condition exists.
+_CURRENT_COMPILE_SDS: dict | None = None
+
+
+def get_compile_sds() -> dict | None:
+    """Return the symbolic_domain_sizes currently being compiled, or None."""
+    return _CURRENT_COMPILE_SDS
+
 
 def _parse_map_dict_remap_table() -> dict[str, dict[int, dict[int, tuple[int, int, int]]]]:
     """
@@ -555,8 +567,12 @@ class GenericStructuredWrapper:
         self._operator = operator
         self._backend_factory = backend_factory
         self._symbolic_domain_sizes_base = symbolic_domain_sizes
-        # Cache keyed by (horizontal_start, extra_thresholds) tuple.
+        # Caches keyed by (horizontal_start, extra_thresholds) tuple.
         self._compiled_cache: dict[tuple, object] = {}
+        # Stores the full symbolic_domain_sizes for each cache_key so that the
+        # thread-local can be re-set at DaCe JIT-compilation time (which fires
+        # on first execution, not at _setup() time).
+        self._sds_cache: dict[tuple, dict] = {}
 
     def _get_or_compile(
         self,
@@ -627,17 +643,70 @@ class GenericStructuredWrapper:
             f"[structured] compiling '{self.operator_name}' for "
             f"horizontal_start={horizontal_start}, thresholds={extra_thresholds}"
         )
-        structured_backend = self._backend_factory(
-            cached=True,
-            otf_workflow__cached_translation=True,
-            otf_workflow__bare_translation__symbolic_domain_sizes=sds,
-        )
+        # Build the backend instance. DaCe requires auto_optimize to be passed explicitly
+        # (factory.Trait is not accessible via SelfAttribute unless set). GTfn passes
+        # symbolic_domain_sizes through the factory hierarchy; DaCe reads it from the
+        # thread-local set below.
+        try:
+            from gt4py.next.program_processors.runners.dace.workflow.backend import (
+                DaCeBackendFactory as _DaCeBackendFactory,
+            )
+            _factory_is_dace = (
+                isinstance(self._backend_factory, type)
+                and issubclass(self._backend_factory, _DaCeBackendFactory)
+            )
+        except ImportError:
+            _factory_is_dace = False
+
+        if _factory_is_dace:
+            # We need cached=True (outer CachedStep, keyed by SDFG content hash) for C++
+            # compilation caching, but otf_workflow__cached_translation=False because the
+            # translation cache is keyed by ITIR hash — which does NOT include
+            # symbolic_domain_sizes / horizontal_start, causing wrong cached SDFGs to be
+            # reused across different horizontal_start values.
+            # _compiled_cache provides in-process caching per (horizontal_start, thresholds).
+            from gt4py.next.program_processors.runners.dace.workflow.backend import (
+                DaCeBackendFactory as _DaCeBackendFactory2,
+            )
+            from gt4py.next import config as _gt4py_config
+            from gt4py.next import common as _common
+            structured_backend = _DaCeBackendFactory2(  # type: ignore[return-value]
+                gpu=False,
+                cached=True,
+                auto_optimize=True,
+                otf_workflow__cached_translation=False,
+                otf_workflow__bare_translation__async_sdfg_call=False,
+                otf_workflow__bare_translation__auto_optimize_args={
+                    "unit_strides_kind": _common.DimensionKind.HORIZONTAL
+                    if _gt4py_config.UNSTRUCTURED_HORIZONTAL_HAS_UNIT_STRIDE
+                    else None,
+                },
+                otf_workflow__bare_translation__unstructured_horizontal_has_unit_stride=(
+                    _gt4py_config.UNSTRUCTURED_HORIZONTAL_HAS_UNIT_STRIDE
+                ),
+                otf_workflow__bare_translation__use_metrics=False,
+                otf_workflow__bare_translation__disable_field_origin_on_program_arguments=False,
+                otf_workflow__bare_translation__use_max_domain_range_on_unstructured_shift=None,
+            )
+        else:
+            structured_backend = self._backend_factory(
+                cached=True,
+                otf_workflow__cached_translation=True,
+                otf_workflow__bare_translation__symbolic_domain_sizes=sds,
+            )
+        # Store sds so __call__ can re-set the ContextVar at DaCe pool-thread compile time.
+        self._sds_cache[cache_key] = sds
         from gt4py.next.program_processors.program_setup_utils import setup_program as _setup
-        compiled = _setup(
-            self._operator,
-            backend=structured_backend,
-            offset_provider=self.structured_offset_provider,
-        )
+        global _CURRENT_COMPILE_SDS
+        _CURRENT_COMPILE_SDS = sds
+        try:
+            compiled = _setup(
+                self._operator,
+                backend=structured_backend,
+                offset_provider=self.structured_offset_provider,
+            )
+        finally:
+            _CURRENT_COMPILE_SDS = None
         self._compiled_cache[cache_key] = compiled
         return compiled
 
@@ -1020,28 +1089,42 @@ class GenericStructuredWrapper:
         ))
         compiled = self._get_or_compile(horizontal_start, extra_thresholds)
 
-        if isinstance(compiled, functools.partial) and hasattr(compiled.func, "_compiled_programs"):
-            bound_kwargs = dict(compiled.keywords or {})
-            offset_provider = bound_kwargs.pop("offset_provider", self.structured_offset_provider)
-            enable_jit = bound_kwargs.pop("enable_jit", None)
+        # Re-set the ContextVar so DaCe pool-thread compilation sees the correct
+        # symbolic_domain_sizes. ContextVar is inherited by ThreadPoolExecutor threads
+        # (via contextvars.copy_context), unlike threading.local.
+        # Set global so the DaCe pool-thread compilation can read it.
+        # The main thread is blocked inside _compiled_programs() while the pool thread
+        # compiles, so this global is stable for the duration — no race condition.
+        global _CURRENT_COMPILE_SDS
+        _call_sds = self._sds_cache.get((horizontal_start, extra_thresholds))
+        if _call_sds is not None:
+            _CURRENT_COMPILE_SDS = _call_sds
+        try:
+            if isinstance(compiled, functools.partial) and hasattr(compiled.func, "_compiled_programs"):
+                bound_kwargs = dict(compiled.keywords or {})
+                offset_provider = bound_kwargs.pop("offset_provider", self.structured_offset_provider)
+                enable_jit = bound_kwargs.pop("enable_jit", None)
 
-            merged_kwargs = {**bound_kwargs, **structured_kwargs}
+                merged_kwargs = {**bound_kwargs, **structured_kwargs}
 
-            params = getattr(compiled.func.past_stage.past_node, "params", ())
-            ordered_args = []
-            for param in params:
-                name = str(param.id)
-                if name in merged_kwargs:
-                    ordered_args.append(merged_kwargs.pop(name))
+                params = getattr(compiled.func.past_stage.past_node, "params", ())
+                ordered_args = []
+                for param in params:
+                    name = str(param.id)
+                    if name in merged_kwargs:
+                        ordered_args.append(merged_kwargs.pop(name))
 
-            compiled.func._compiled_programs(
-                *ordered_args,
-                offset_provider=offset_provider,
-                enable_jit=enable_jit,
-            )
-        else:
-            # Fallback for non-partial wrappers.
-            compiled(**structured_kwargs)
+                compiled.func._compiled_programs(
+                    *ordered_args,
+                    offset_provider=offset_provider,
+                    enable_jit=enable_jit,
+                )
+            else:
+                # Fallback for non-partial wrappers.
+                compiled(**structured_kwargs)
+        finally:
+            if _call_sds is not None:
+                _CURRENT_COMPILE_SDS = None
 
 
         for original_field, packed_field in packed_fields:
