@@ -458,36 +458,25 @@ def pack_vertex_field_to_structured(vertex_values: np.ndarray, m: IndexMap) -> n
     ni, max_nj = m.ij_to_vertex.shape
     trailing_shape = vertex_values.shape[1:]
     out = np.zeros((ni, max_nj, 1, *trailing_shape), dtype=vertex_values.dtype)
-    for v in range(vertex_values.shape[0]):
-        i, local_j = int(m.vertex_to_ij[v, 0]), int(m.vertex_to_ij[v, 1])
-        if i >= 0:
-            out[i, local_j, 0, ...] = vertex_values[v, ...]
+    i_arr = m.vertex_to_ij[:, 0]
+    j_arr = m.vertex_to_ij[:, 1]
+    valid = i_arr >= 0
+    out[i_arr[valid], j_arr[valid], 0] = vertex_values[valid]
     return out
 
 
-# def pack_edge_field_to_structured(edge_values: np.ndarray, m: IndexMap) -> np.ndarray:
-#     ni, max_nj, _ = m.ijk_to_edge.shape
-#     out = np.zeros((ni, max_nj, 3), dtype=edge_values.dtype)
-#     valid = m.ijk_to_edge >= 0
-#     out[valid] = edge_values[m.ijk_to_edge[valid]]
-#     return out
 def pack_edge_field_to_structured(edge_values: np.ndarray, m: IndexMap) -> np.ndarray:
     ni, max_nj, n_kolor = m.ijk_to_edge.shape
-    out = np.zeros((ni, max_nj, n_kolor), dtype=edge_values.dtype)
+    valid = m.ijk_to_edge >= 0
+    edge_indices = m.ijk_to_edge[valid]
     n_edge = edge_values.shape[0]
-    for i in range(ni):
-        for j in range(max_nj):
-            for k in range(n_kolor):
-                e = m.ijk_to_edge[i, j, k]
-                if e < 0:
-                    continue
-                if e >= n_edge:
-                    raise IndexError(
-                        f"IndexMap edge id {e} at (i={i}, j={j}, kolor={k}) exceeds available edge axis {n_edge}. "
-                        "Use an index map generated for the current grid."
-                    )
-                if 0 <= e < n_edge:
-                    out[i, j, k] = edge_values[e]
+    if edge_indices.size > 0 and int(edge_indices.max()) >= n_edge:
+        raise IndexError(
+            f"IndexMap edge id {edge_indices.max()} exceeds available edge axis {n_edge}. "
+            "Use an index map generated for the current grid."
+        )
+    out = np.zeros((ni, max_nj, n_kolor), dtype=edge_values.dtype)
+    out[valid] = edge_values[edge_indices]
     return out
 
 
@@ -495,9 +484,10 @@ def unpack_vertex_field_to_unstructured(struct_values: np.ndarray, m: IndexMap) 
     n_vertex = m.vertex_to_ij.shape[0]
     trailing_shape = struct_values.shape[3:]
     out = np.zeros((n_vertex, *trailing_shape), dtype=struct_values.dtype)
-    for v in range(n_vertex):
-        i, local_j = int(m.vertex_to_ij[v, 0]), int(m.vertex_to_ij[v, 1])
-        out[v, ...] = struct_values[i, local_j, 0, ...]
+    i_arr = m.vertex_to_ij[:, 0]
+    j_arr = m.vertex_to_ij[:, 1]
+    valid = i_arr >= 0
+    out[valid] = struct_values[i_arr[valid], j_arr[valid], 0]
     return out
 
 
@@ -513,59 +503,37 @@ KDim = gtx.Dimension("KDim", kind=gtx.DimensionKind.VERTICAL)
 def pack_edge_field(edge_values: np.ndarray, m: "IndexMap") -> np.ndarray:
     """Packs 1D or 2D unstructured edge fields into structured [I, J, Kolor, (K)]."""
     ni, max_nj, n_kolor = m.ijk_to_edge.shape
-    has_k = edge_values.ndim == 2
+    valid = m.ijk_to_edge >= 0
+    edge_indices = m.ijk_to_edge[valid]
     n_edge = edge_values.shape[0]
-
+    if edge_indices.size > 0 and int(edge_indices.max()) >= n_edge:
+        raise IndexError(
+            f"IndexMap edge id {edge_indices.max()} exceeds available edge axis {n_edge}. "
+            "Use an index map generated for the current grid."
+        )
+    has_k = edge_values.ndim == 2
     if has_k:
         nk = edge_values.shape[1]
         out = np.zeros((ni, max_nj, n_kolor, nk), dtype=edge_values.dtype)
+        out[valid] = edge_values[edge_indices]
     else:
         out = np.zeros((ni, max_nj, n_kolor), dtype=edge_values.dtype)
-
-    for i in range(ni):
-        for j in range(max_nj):
-            for k in range(n_kolor):
-                e = m.ijk_to_edge[i, j, k]
-                if e < 0:
-                    continue
-                if e >= n_edge:
-                    raise IndexError(
-                        f"IndexMap edge id {e} at (i={i}, j={j}, kolor={k}) exceeds available edge axis {n_edge}. "
-                        "Use an index map generated for the current grid."
-                    )
-                if has_k:
-                    out[i, j, k, :] = edge_values[e, :]
-                else:
-                    out[i, j, k] = edge_values[e]
+        out[valid] = edge_values[edge_indices]
     return out
 
 
 def unpack_edge_field(struct_values: np.ndarray, m: "IndexMap", n_edge: int) -> np.ndarray:
     """Unpacks structured [I, J, Kolor, (K)] fields back to unstructured."""
+    valid = m.ijk_to_edge >= 0
+    edge_indices = m.ijk_to_edge[valid]
     has_k = struct_values.ndim == 4
-
     if has_k:
         nk = struct_values.shape[3]
         out = np.zeros((n_edge, nk), dtype=struct_values.dtype)
+        out[edge_indices] = struct_values[valid]
     else:
         out = np.zeros((n_edge,), dtype=struct_values.dtype)
-
-    ni, max_nj, n_kolor = m.ijk_to_edge.shape
-    for i in range(ni):
-        for j in range(max_nj):
-            for k in range(n_kolor):
-                e = m.ijk_to_edge[i, j, k]
-                if e < 0:
-                    continue
-                if e >= n_edge:
-                    raise IndexError(
-                        f"IndexMap edge id {e} at (i={i}, j={j}, kolor={k}) exceeds output edge axis {n_edge}. "
-                        "Use an index map generated for the current grid."
-                    )
-                if has_k:
-                    out[e, :] = struct_values[i, j, k, :]
-                else:
-                    out[e] = struct_values[i, j, k]
+        out[edge_indices] = struct_values[valid]
     return out
 
 
@@ -573,15 +541,15 @@ def pack_vertex_field(vertex_values: np.ndarray, m: IndexMap) -> np.ndarray:
     """Packs an unstructured vertex field into [IDim, JDim, Kolor=1, (KDim)]."""
     has_k = vertex_values.ndim == 2
     ni, nj = m.ij_to_vertex.shape
-
-    # Allocate with Kolor dimension of size 1
-    out = np.zeros((ni, nj, 1, vertex_values.shape[1] if has_k else 1), dtype=vertex_values.dtype)
-    for i in range(ni):
-        for j in range(nj):
-            v = m.ij_to_vertex[i, j]
-            if v >= 0:
-                # Place data exactly at Kolor index 0
-                out[i, j, 0, :] = vertex_values[v, :] if has_k else vertex_values[v]
+    nk = vertex_values.shape[1] if has_k else 1
+    out = np.zeros((ni, nj, 1, nk), dtype=vertex_values.dtype)
+    i_arr = m.vertex_to_ij[:, 0]
+    j_arr = m.vertex_to_ij[:, 1]
+    valid = i_arr >= 0
+    if has_k:
+        out[i_arr[valid], j_arr[valid], 0, :] = vertex_values[valid, :]
+    else:
+        out[i_arr[valid], j_arr[valid], 0, 0] = vertex_values[valid]
     return out if has_k else out[:, :, :, 0]
 
 
@@ -657,18 +625,16 @@ def build_cell_ijk_maps(c2v: np.ndarray, m: IndexMap) -> tuple[np.ndarray, np.nd
 
 def pack_cell_field(cell_values: np.ndarray, ijk_to_cell: np.ndarray) -> np.ndarray:
     """Packs 1D/2D unstructured Cell arrays into [IDim, JDim, Kolor, (KDim)]."""
-    import numpy as np
-
     ni, nj, n_kolor = ijk_to_cell.shape
     has_k = cell_values.ndim == 2
-    out = np.zeros((ni, nj, n_kolor, cell_values.shape[1] if has_k else 1), dtype=cell_values.dtype)
-
-    for i in range(ni):
-        for j in range(nj):
-            for k in range(n_kolor):
-                c = ijk_to_cell[i, j, k]
-                if c >= 0:
-                    out[i, j, k, :] = cell_values[c, :] if has_k else cell_values[c]
+    nk = cell_values.shape[1] if has_k else 1
+    valid = ijk_to_cell >= 0
+    cell_indices = ijk_to_cell[valid]
+    out = np.zeros((ni, nj, n_kolor, nk), dtype=cell_values.dtype)
+    if has_k:
+        out[valid] = cell_values[cell_indices]
+    else:
+        out[valid] = cell_values[cell_indices, np.newaxis]
     return out if has_k else out[:, :, :, 0]
 
 
@@ -690,18 +656,16 @@ def unpack_cell_field(
     struct_values: np.ndarray, ijk_to_cell: np.ndarray, n_cells: int
 ) -> np.ndarray:
     """Unpacks [IDim, JDim, Kolor, (KDim)] Cell arrays back to unstructured."""
-    import numpy as np
-
     has_k = struct_values.ndim == 4
-    out = np.zeros((n_cells, struct_values.shape[3] if has_k else 1), dtype=struct_values.dtype)
-
-    ni, nj, n_kolor = ijk_to_cell.shape
-    for i in range(ni):
-        for j in range(nj):
-            for k in range(n_kolor):
-                c = ijk_to_cell[i, j, k]
-                if c >= 0:
-                    out[c, :] = struct_values[i, j, k, :] if has_k else struct_values[i, j, k]
+    valid = ijk_to_cell >= 0
+    cell_indices = ijk_to_cell[valid]
+    if has_k:
+        nk = struct_values.shape[3]
+        out = np.zeros((n_cells, nk), dtype=struct_values.dtype)
+        out[cell_indices] = struct_values[valid]
+    else:
+        out = np.zeros((n_cells, 1), dtype=struct_values.dtype)
+        out[cell_indices, 0] = struct_values[valid]
     return out if has_k else out[:, 0]
 
 
@@ -712,14 +676,20 @@ def unpack_cell_field_from_structured(
 ) -> np.ndarray:
     """Compatibility API to unpack structured cell fields via cell_to_ijk map."""
     has_k = struct_values.ndim == 4
-    out = np.zeros((n_cells, struct_values.shape[3] if has_k else 1), dtype=struct_values.dtype)
-
-    for c in range(min(n_cells, cell_to_ijk.shape[0])):
-        i, j, k = int(cell_to_ijk[c, 0]), int(cell_to_ijk[c, 1]), int(cell_to_ijk[c, 2])
-        if i < 0 or j < 0 or k < 0:
-            continue
-        out[c, :] = struct_values[i, j, k, :] if has_k else struct_values[i, j, k]
-
+    m = min(n_cells, cell_to_ijk.shape[0])
+    ijk = cell_to_ijk[:m]
+    valid_mask = ijk[:, 0] >= 0
+    c_valid = np.where(valid_mask)[0]
+    i_arr = ijk[c_valid, 0]
+    j_arr = ijk[c_valid, 1]
+    k_arr = ijk[c_valid, 2]
+    if has_k:
+        nk = struct_values.shape[3]
+        out = np.zeros((n_cells, nk), dtype=struct_values.dtype)
+        out[c_valid] = struct_values[i_arr, j_arr, k_arr]
+    else:
+        out = np.zeros((n_cells, 1), dtype=struct_values.dtype)
+        out[c_valid, 0] = struct_values[i_arr, j_arr, k_arr]
     return out if has_k else out[:, 0]
 
 
