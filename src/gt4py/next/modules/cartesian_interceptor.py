@@ -1,5 +1,6 @@
 import os
 import functools
+import time
 import xarray as xr
 import gt4py.next as gtx
 import numpy as np
@@ -664,6 +665,7 @@ class GenericStructuredWrapper:
         except ImportError:
             _factory_is_dace = False
 
+        _compile_start = time.perf_counter()
         if _factory_is_dace:
             # We need cached=True (outer CachedStep, keyed by SDFG content hash) for C++
             # compilation caching, but otf_workflow__cached_translation=False because the
@@ -713,6 +715,9 @@ class GenericStructuredWrapper:
             )
         finally:
             _CURRENT_COMPILE_SDS = None
+        _compile_end = time.perf_counter()
+        _compile_elapsed = _compile_end - _compile_start
+        print(f"[timing] {self.operator_name} compilation: {_compile_elapsed:.4f}s")
         self._compiled_cache[cache_key] = compiled
         return compiled
 
@@ -1076,6 +1081,7 @@ class GenericStructuredWrapper:
         structured_kwargs = {}
         packed_fields: list[tuple[object, object]] = []
 
+        _pack_start = time.perf_counter()
         for arg_name, arg_val in kwargs.items():
             if arg_name == "offset_provider":
                 continue
@@ -1091,6 +1097,8 @@ class GenericStructuredWrapper:
                 structured_kwargs[arg_name] = packed_arg
                 if getattr(arg_val, "domain", None) is not None:
                     packed_fields.append((arg_val, packed_arg))
+        _pack_end = time.perf_counter()
+        _pack_elapsed = _pack_end - _pack_start
 
         # Determine horizontal_start for lazy compilation (use 0 if not present).
         hs_raw = (
@@ -1123,6 +1131,7 @@ class GenericStructuredWrapper:
         if _call_sds is not None:
             _CURRENT_COMPILE_SDS = _call_sds
         try:
+            _exec_start = time.perf_counter()
             if isinstance(compiled, functools.partial) and hasattr(compiled.func, "_compiled_programs"):
                 bound_kwargs = dict(compiled.keywords or {})
                 offset_provider = bound_kwargs.pop("offset_provider", self.structured_offset_provider)
@@ -1145,12 +1154,20 @@ class GenericStructuredWrapper:
             else:
                 # Fallback for non-partial wrappers.
                 compiled(**structured_kwargs)
+            _exec_end = time.perf_counter()
+            _exec_elapsed = _exec_end - _exec_start
         finally:
             if _call_sds is not None:
                 _CURRENT_COMPILE_SDS = None
 
+        _unpack_start = time.perf_counter()
         for original_field, packed_field in packed_fields:
             self._unpack_to_buffer(packed_field, original_field)
+        _unpack_end = time.perf_counter()
+        _unpack_elapsed = _unpack_end - _unpack_start
+
+        # Print timing summary
+        print(f"[timing] {self.operator_name} pack={_pack_elapsed:.4f}s exec={_exec_elapsed:.4f}s unpack={_unpack_elapsed:.4f}s total={_pack_elapsed + _exec_elapsed + _unpack_elapsed:.4f}s")
 
         # if (
         #     debug_tangential

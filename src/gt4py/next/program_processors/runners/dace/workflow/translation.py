@@ -95,6 +95,7 @@ def find_constant_symbols(
     return constant_symbols
 
 
+
 def make_sdfg_call_async(sdfg: dace.SDFG, gpu: bool) -> None:
     """Configure an SDFG to immediately return once all work has been scheduled.
 
@@ -435,15 +436,55 @@ class DaCeTranslator(
             auto_optimize_args = {} if self.auto_optimize_args is None else self.auto_optimize_args
 
             if _os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1":
-                # Structured code with per-kolor split SetAts (single-element Kolor ranges like
-                # Kolor=1:2) produces SDFGs where both gt_auto_optimize and gt_simplify collapse
-                # 3D Kolor accesses to scalars, creating invalid SDFGs. The only safe optimization
-                # is gt_substitute_compiletime_symbols, which replaces constant symbols without
-                # restructuring the SDFG at all. gt_simplify is not called because its transforms
-                # (CopyChainRemover, etc.) also break the per-kolor split structure.
+                # Step 1: constant folding — always safe, no structural SDFG changes.
                 if constant_symbols:
                     gtx_transformations.gt_substitute_compiletime_symbols(
                         sdfg, constant_symbols, validate=False
+                    )
+
+                # Step 2: gt_auto_optimize with disable_splitting=True for all structured stencils.
+                # Only the two propagate_memlets_sdfg calls in Phase 1's splitting block
+                # (auto_optimize.py lines 557, 572) are unsafe for per-kolor split stencils
+                # (they collapse single-element Kolor:[k,k+1) ranges → InvalidSDFGEdgeError).
+                # disable_splitting=True skips exactly that block; all other phases are safe:
+                #   Phase 1: MapFusionVertical/Horizontal, MapPromoter, GT4PyMapBufferElimination
+                #   Phase 3: GT4PyMoveTaskletIntoMap, RemoveScalarCopies, FuseHorizontalConditionBlocks
+                #   Phase 4: gt_set_iteration_order + gt_change_strides (with unit_strides_kind)
+                # unit_strides_kind=VERTICAL makes K (stride-1 in [IDim,JDim,Kolor,K]) the
+                # innermost CPU loop for cache-coherent memory access.
+                #
+                # Fallback: for a small subset of stencils, Phase 1 map fusion creates a
+                # temporary with wrong dimensionality (scalar vs array mismatch).
+                # Phase 3's FuseHorizontalConditionBlocks hardcodes validate=True and catches
+                # this as InvalidSDFGEdgeError. We snapshot the SDFG before attempting
+                # gt_auto_optimize and restore+apply a safe subset on failure.
+                structured_opt_args: dict = {
+                    "unit_strides_kind": common.DimensionKind.VERTICAL,
+                    "disable_splitting": True,
+                    "validate": False,
+                    **(auto_optimize_args or {}),
+                }
+                sdfg_snapshot = sdfg.to_json()
+                try:
+                    gtx_transformations.gt_auto_optimize(
+                        sdfg,
+                        gpu=on_gpu,
+                        constant_symbols=None,  # already substituted above
+                        **structured_opt_args,
+                    )
+                except Exception:
+                    # Restore SDFG from snapshot and apply safe fallback:
+                    # buffer elimination + iteration order (no map fusion).
+                    sdfg = dace.SDFG.from_json(sdfg_snapshot)
+                    sdfg.apply_transformations_repeated(
+                        gtx_transformations.GT4PyMapBufferElimination(assume_pointwise=True),
+                        validate=False,
+                        validate_all=False,
+                    )
+                    gtx_transformations.gt_set_iteration_order(
+                        sdfg,
+                        unit_strides_kind=common.DimensionKind.VERTICAL,
+                        validate=False,
                     )
             else:
                 gtx_transformations.gt_auto_optimize(
