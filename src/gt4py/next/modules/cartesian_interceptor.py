@@ -18,6 +18,8 @@ from gt4py.next.modules.translator import (
     unpack_vertex_field_to_unstructured,
     unpack_edge_field,
     unpack_cell_field_from_structured,
+    precompute_sparse_pack_mapping,
+    apply_sparse_pack_mapping,
     _read_e2v,
     _read_lonlat
 )
@@ -281,8 +283,9 @@ def pack_sparse_local_field_to_structured(
         return None
 
     def _neighbor_ijk(neighbor_idx: int) -> tuple[int, int, int] | None:
-        last_char = local_dim_name[-1] if local_dim_name[-1] != "O" else local_dim_name[-2]
-        ntype = _CENTER_ELEMENT_BY_PREFIX.get(last_char, "Edge")
+        _last2 = local_dim_name.rfind("2")
+        _nb_char = local_dim_name[_last2 + 1] if _last2 >= 0 and _last2 + 1 < len(local_dim_name) else local_dim_name[-1]
+        ntype = _CENTER_ELEMENT_BY_PREFIX.get(_nb_char, "Edge")
         if ntype == "Edge":
             ijk = index_map.edge_to_ijk[neighbor_idx]
             return int(ijk[0]), int(ijk[1]), int(ijk[2])
@@ -557,6 +560,13 @@ class GenericStructuredWrapper:
         self._symbolic_domain_sizes_base = symbolic_domain_sizes
         # Cache keyed by (horizontal_start, extra_thresholds) tuple.
         self._compiled_cache: dict[tuple, object] = {}
+        # Stores the full symbolic_domain_sizes for each cache_key so that the
+        # thread-local can be re-set at DaCe JIT-compilation time (which fires
+        # on first execution, not at _setup() time).
+        self._sds_cache: dict[tuple, dict] = {}
+        # Cache for precomputed sparse pack index arrays (built on first use).
+        # Key: local_dim_name str; Value: tuple of 6 numpy arrays or None.
+        self._sparse_pack_mappings: dict[str, tuple | None] = {}
 
     def _get_or_compile(
         self,
@@ -918,13 +928,33 @@ class GenericStructuredWrapper:
                 return np.full((ni, nj, n_kolor, n_local, *tail_shape), -1, dtype=coeff.dtype)
             return np.zeros((ni, nj, n_kolor, n_local, *tail_shape), dtype=coeff.dtype)
 
-        packed = pack_sparse_local_field_to_structured(
-            coeff=coeff,
-            connectivity=conn,
-            index_map=self.index_map,
-            local_dim_name=local_dim,
-            cell_to_ijk=self.cell_to_ijk,
-        )
+        # Use precomputed index arrays if available — avoids Python loops on every call.
+        # Build once on first use (slow), then all subsequent calls are pure numpy.
+        if local_dim not in self._sparse_pack_mappings:
+            self._sparse_pack_mappings[local_dim] = precompute_sparse_pack_mapping(
+                conn=conn,
+                index_map=self.index_map,
+                local_dim_name=local_dim,
+                cell_to_ijk=self.cell_to_ijk,
+            )
+
+        mapping = self._sparse_pack_mappings.get(local_dim)
+        ni, nj, n_kolor = self.index_map.ijk_to_edge.shape
+        n_local = coeff.shape[1]
+        tail_shape = coeff.shape[2:]
+        out_shape = (ni, nj, n_kolor, n_local, *tail_shape)
+        if mapping is not None and tail_shape == ():
+            # Fast path: pure numpy indexing using precomputed index arrays.
+            packed = apply_sparse_pack_mapping(coeff, mapping, out_shape)
+        else:
+            # Slow fallback for unusual shapes or first-call precompute failure
+            packed = pack_sparse_local_field_to_structured(
+                coeff=coeff,
+                connectivity=conn,
+                index_map=self.index_map,
+                local_dim_name=local_dim,
+                cell_to_ijk=self.cell_to_ijk,
+            )
 
         # Default OFF: zeroing clipped sparse coefficients was causing false mismatches
         # for divergence-damping stencils near edge-shape boundaries.
@@ -942,9 +972,8 @@ class GenericStructuredWrapper:
         return packed
 
     def _pack_argument(self, field):
-        # print(f"packing field:", field)
         if not getattr(field, "domain", None):
-            return field 
+            return field
 
         np_data = field.asnumpy()
 
@@ -957,19 +986,17 @@ class GenericStructuredWrapper:
                 struct_np,
                 allocator=self.allocator,
             )
-            
-        # 2. Standard unstructured fields
+
         if self._is_unstructured(field, "Vertex"):
             struct_np = pack_vertex_field_to_structured(np_data, self.index_map)
             trailing_dims = list(field.domain.dims[1:]) if np_data.ndim > 1 else []
             return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np, allocator=self.allocator)
-            
+
         elif self._is_unstructured(field, "Edge"):
-            # print(f"Packing edge field '{getattr(field, 'name', '')}' with shape {np_data.shape}")
             struct_np = pack_edge_field(np_data, self.index_map)
             trailing_dims = list(field.domain.dims[1:]) if np_data.ndim > 1 else []
             return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np, allocator=self.allocator)
-        
+
         elif self._is_unstructured(field, "Cell"):
             if self.cell_to_ijk is None or self.ijk_to_cell is None:
                 return field
@@ -977,7 +1004,7 @@ class GenericStructuredWrapper:
             trailing_dims = list(field.domain.dims[1:]) if np_data.ndim > 1 else []
             return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np, allocator=self.allocator)
 
-        return field 
+        return field
 
     def _unpack_to_buffer(self, structured_field, original_unstructured_field):
         # print(f"unpacking field:", structured_field, "to", original_unstructured_field)
@@ -1081,15 +1108,17 @@ class GenericStructuredWrapper:
                 if name in merged_kwargs:
                     ordered_args.append(merged_kwargs.pop(name))
 
-            compiled.func._compiled_programs(
-                *ordered_args,
-                offset_provider=offset_provider,
-                enable_jit=enable_jit,
-            )
-        else:
-            # Fallback for non-partial wrappers.
-            compiled(**structured_kwargs)
-
+                compiled.func._compiled_programs(
+                    *ordered_args,
+                    offset_provider=offset_provider,
+                    enable_jit=enable_jit,
+                )
+            else:
+                # Fallback for non-partial wrappers.
+                compiled(**structured_kwargs)
+        finally:
+            if _call_sds is not None:
+                _CURRENT_COMPILE_SDS = None
 
         for original_field, packed_field in packed_fields:
             self._unpack_to_buffer(packed_field, original_field)
