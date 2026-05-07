@@ -172,7 +172,11 @@ def pack_sparse_local_field_to_structured(
         return None
 
     def _neighbor_ijk(neighbor_idx: int) -> tuple[int, int, int] | None:
-        ntype = _CENTER_ELEMENT_BY_PREFIX.get(local_dim_name[-1], "Edge")
+        # Use the character after the last "2" to determine neighbor element type.
+        # E.g. "E2C2EO" → last "2" at idx 3 → neighbor char = "E" (Edge), not "O".
+        _last2 = local_dim_name.rfind("2")
+        _nb_char = local_dim_name[_last2 + 1] if _last2 >= 0 and _last2 + 1 < len(local_dim_name) else local_dim_name[-1]
+        ntype = _CENTER_ELEMENT_BY_PREFIX.get(_nb_char, "Edge")
         if ntype == "Edge":
             ijk = index_map.edge_to_ijk[neighbor_idx]
             return int(ijk[0]), int(ijk[1]), int(ijk[2])
@@ -186,7 +190,130 @@ def pack_sparse_local_field_to_structured(
             return int(ijk[0]), int(ijk[1]), int(ijk[2])
         return None
 
-    n_elem = min(coeff.shape[0], conn.shape[0])
+    # The index mapping is fixed for a given grid+connectivity.
+    # Build it once here; callers can cache the result for subsequent fast packing.
+    idx = _build_sparse_pack_index_arrays(
+        conn, index_map, local_dim_name, rel_to_slots, n_elem, n_local,
+        max_i, max_j, _center_ijk, _neighbor_ijk, _normalize
+    )
+    if idx is not None:
+        ea, la, cia, cja, cka, sa = idx
+        out[cia, cja, cka, sa] = coeff[ea, la]
+    return out
+
+
+def precompute_sparse_pack_mapping(
+    conn: np.ndarray,
+    index_map: "IndexMap",
+    local_dim_name: str,
+    *,
+    cell_to_ijk: np.ndarray | None = None,
+) -> tuple | None:
+    """Precompute and return sparse pack index arrays for caching.
+
+    Returns (elem_arr, local_arr, ci_arr, cj_arr, ck_arr, slot_arr) or None.
+    Cache this result and pass it to apply_sparse_pack_mapping for fast O(1) packing.
+    """
+    conn = np.asarray(conn, dtype=np.int32)
+    n_local = conn.shape[1] if conn.ndim == 2 else 0
+
+    # E2C special case: weights stored directly at the edge's structured position (no remap).
+    # Mirrors the special case in pack_sparse_local_field_to_structured.
+    if local_dim_name == "E2C":
+        n_elem = min(conn.shape[0], index_map.edge_to_ijk.shape[0])
+        n_local_eff = min(n_local, conn.shape[1])
+        ijk = index_map.edge_to_ijk[:n_elem]
+        valid = (ijk[:, 0] >= 0) & (ijk[:, 1] >= 0) & (ijk[:, 2] >= 0)
+        vidx = np.where(valid)[0]
+        if vidx.size == 0:
+            return None
+        ea = np.repeat(vidx, n_local_eff).astype(np.intp)
+        la = np.tile(np.arange(n_local_eff, dtype=np.intp), vidx.size)
+        cia = np.repeat(ijk[vidx, 0], n_local_eff).astype(np.intp)
+        cja = np.repeat(ijk[vidx, 1], n_local_eff).astype(np.intp)
+        cka = np.repeat(ijk[vidx, 2], n_local_eff).astype(np.intp)
+        sa = la  # slot index = local index for E2C
+        return (ea, la, cia, cja, cka, sa)
+
+    remap = _SPARSE_REMAP_TABLE.get(local_dim_name)
+    if remap is None:
+        return None
+    ni, nj, n_kolor = index_map.ijk_to_edge.shape
+    max_i, max_j = index_map.ij_to_vertex.shape
+    rel_to_slots: dict = {}
+    for ck, slot_map in remap.items():
+        r2s: dict = {}
+        for slot, (di, dj, nk) in slot_map.items():
+            r2s.setdefault((di, dj, nk), []).append(slot)
+        rel_to_slots[int(ck)] = r2s
+    center_type = _CENTER_ELEMENT_BY_PREFIX.get(local_dim_name[0], "Edge")
+
+    def _normalize(delta, period):
+        if period <= 0: return delta
+        half = period // 2
+        if delta > half: return delta - period
+        if delta < -half: return delta + period
+        return delta
+
+    def _center_ijk(eidx):
+        if center_type == "Edge":
+            ijk = index_map.edge_to_ijk[eidx]
+            return int(ijk[0]), int(ijk[1]), int(ijk[2])
+        if center_type == "Vertex":
+            ij = index_map.vertex_to_ij[eidx]
+            return int(ij[0]), int(ij[1]), 0
+        if center_type == "Cell":
+            if cell_to_ijk is None or eidx >= cell_to_ijk.shape[0]: return None
+            ijk = cell_to_ijk[eidx]
+            return int(ijk[0]), int(ijk[1]), int(ijk[2])
+        return None
+
+    def _neighbor_ijk(nidx):
+        _last2 = local_dim_name.rfind("2")
+        _nb_char = local_dim_name[_last2 + 1] if _last2 >= 0 and _last2 + 1 < len(local_dim_name) else local_dim_name[-1]
+        ntype = _CENTER_ELEMENT_BY_PREFIX.get(_nb_char, "Edge")
+        if ntype == "Edge":
+            ijk = index_map.edge_to_ijk[nidx]
+            return int(ijk[0]), int(ijk[1]), int(ijk[2])
+        if ntype == "Vertex":
+            ij = index_map.vertex_to_ij[nidx]
+            return int(ij[0]), int(ij[1]), 0
+        if ntype == "Cell":
+            if cell_to_ijk is None or nidx >= cell_to_ijk.shape[0]: return None
+            ijk = cell_to_ijk[nidx]
+            return int(ijk[0]), int(ijk[1]), int(ijk[2])
+        return None
+
+    n_elem = conn.shape[0]
+    return _build_sparse_pack_index_arrays(
+        conn, index_map, local_dim_name, rel_to_slots, n_elem, n_local,
+        max_i, max_j, _center_ijk, _neighbor_ijk, _normalize
+    )
+
+
+def apply_sparse_pack_mapping(
+    coeff: np.ndarray,
+    mapping: tuple,
+    out_shape: tuple,
+) -> np.ndarray:
+    """Apply precomputed sparse pack index arrays to pack coeff into structured layout."""
+    ea, la, cia, cja, cka, sa = mapping
+    out = np.zeros(out_shape, dtype=coeff.dtype)
+    if ea.size > 0:
+        out[cia, cja, cka, sa] = coeff[ea, la]
+    return out
+
+
+def _build_sparse_pack_index_arrays(
+    conn, index_map, local_dim_name, rel_to_slots, n_elem, n_local,
+    max_i, max_j, _center_ijk, _neighbor_ijk, _normalize
+):
+    """Build (elem, local, ci, cj, ck, slot) index arrays for sparse field packing.
+
+    Returns a tuple of 6 numpy arrays, or None if no valid mappings exist.
+    These arrays can be cached to make subsequent pack calls O(1) numpy ops.
+    """
+    elem_list, local_list, ci_list, cj_list, ck_list, slot_list = [], [], [], [], [], []
     for elem in range(n_elem):
         center = _center_ijk(elem)
         if center is None:
@@ -209,8 +336,22 @@ def pack_sparse_local_field_to_structured(
                 continue
             for slot in slots:
                 if slot < n_local:
-                    out[ci, cj, ck, slot, ...] = coeff[elem, local, ...]
-    return out
+                    elem_list.append(elem)
+                    local_list.append(local)
+                    ci_list.append(ci)
+                    cj_list.append(cj)
+                    ck_list.append(ck)
+                    slot_list.append(slot)
+    if not elem_list:
+        return None
+    return (
+        np.array(elem_list, dtype=np.intp),
+        np.array(local_list, dtype=np.intp),
+        np.array(ci_list, dtype=np.intp),
+        np.array(cj_list, dtype=np.intp),
+        np.array(ck_list, dtype=np.intp),
+        np.array(slot_list, dtype=np.intp),
+    )
 
 
 @dataclass(frozen=True)
