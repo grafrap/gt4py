@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import dace
 import factory
@@ -27,6 +27,49 @@ from gt4py.next.program_processors.runners.dace import (
 )
 from gt4py.next.program_processors.runners.dace.workflow import common as gtx_wfdcommon
 from gt4py.next.type_system import type_specifications as ts
+
+
+# DaCe SDFG map parameter name for the Kolor dimension.
+# Computed once using the same function the SDFG lowering uses — guaranteed to match actual params.
+_KOLOR_MAP_PARAM: str = gtx_dace_lowering.get_map_variable(common.Dimension("Kolor"))
+
+
+def _kolor_aware_fusion_callback(
+    self: Any,
+    first_map_node: Union[dace.nodes.MapExit, dace.nodes.MapEntry],
+    second_map_entry: dace.nodes.MapEntry,
+    graph: dace.SDFGState,
+    sdfg: dace.SDFG,
+) -> bool:
+    """Refuse to fuse maps with different single-element Kolor ranges.
+
+    Per-kolor split stencils produce separate maps per Kolor value (Kolor:[k,k+1)).
+    Fusing two such maps with different k values creates a dimensionality mismatch
+    in the fusion temporary (InvalidSDFGEdgeError). Fusion is allowed when either
+    map has no Kolor parameter, both share the same Kolor start index, or the range
+    is symbolic and cannot be evaluated at transform time.
+    """
+    first_map_entry = (
+        first_map_node
+        if isinstance(first_map_node, dace.nodes.MapEntry)
+        else graph.entry_node(first_map_node)
+    )
+    first_params = first_map_entry.map.params
+    second_params = second_map_entry.map.params
+
+    if _KOLOR_MAP_PARAM not in first_params or _KOLOR_MAP_PARAM not in second_params:
+        return True  # One or both maps have no Kolor — allow fusion
+
+    first_kolor_range = first_map_entry.map.range[first_params.index(_KOLOR_MAP_PARAM)]
+    second_kolor_range = second_map_entry.map.range[second_params.index(_KOLOR_MAP_PARAM)]
+
+    try:
+        if int(first_kolor_range[0]) != int(second_kolor_range[0]):
+            return False  # Different Kolor values — refuse fusion
+    except (TypeError, ValueError):
+        pass  # Symbolic range — cannot determine, allow fusion conservatively
+
+    return True
 
 
 def find_constant_symbols(
@@ -458,10 +501,38 @@ class DaCeTranslator(
                 # Phase 3's FuseHorizontalConditionBlocks hardcodes validate=True and catches
                 # this as InvalidSDFGEdgeError. We snapshot the SDFG before attempting
                 # gt_auto_optimize and restore+apply a safe subset on failure.
+                # Experiment selector: set DACE_OPT_EXPERIMENT env var to override defaults:
+                #   "D"  → blocking_dim=JDim, blocking_size=8  (loop tiling)
+                #   "E"  → fuse_tasklets=True  (tasklet fusion — catastrophic for E2C2V, avoid)
+                #   "F"  → scan_loop_unrolling=True  (K-loop unrolling, now the default below)
+                #   "G"  → reuse_transients=True  (catastrophic SDFG corruption, avoid)
+                #   "none" → disable all extras (pure opt_v2 baseline)
+                _exp = _os.environ.get("DACE_OPT_EXPERIMENT", "FD")
+                _extra: dict = {}
+                if _exp != "none":
+                    if "D" in _exp:
+                        _extra["blocking_dim"] = common.Dimension("JDim")
+                        _extra["blocking_size"] = 8
+                    if "E" in _exp:
+                        _extra["fuse_tasklets"] = True
+                    if "F" in _exp:
+                        _extra["scan_loop_unrolling"] = True
+                        _extra["scan_loop_unrolling_factor"] = 0
+                    if "G" in _exp:
+                        _extra["reuse_transients"] = True
+
+                _hooks = {
+                    gtx_transformations.GT4PyAutoOptHook.TopLevelDataFlowMapFusionVerticalCallBack:
+                        _kolor_aware_fusion_callback,
+                    gtx_transformations.GT4PyAutoOptHook.TopLevelDataFlowMapFusionHorizontalCallBack:
+                        _kolor_aware_fusion_callback,
+                }
                 structured_opt_args: dict = {
                     "unit_strides_kind": common.DimensionKind.VERTICAL,
                     "disable_splitting": True,
                     "validate": False,
+                    "optimization_hooks": _hooks,
+                    **_extra,
                     **(auto_optimize_args or {}),
                 }
                 sdfg_snapshot = sdfg.to_json()

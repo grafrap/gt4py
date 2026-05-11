@@ -717,7 +717,7 @@ class GenericStructuredWrapper:
             _CURRENT_COMPILE_SDS = None
         _compile_end = time.perf_counter()
         _compile_elapsed = _compile_end - _compile_start
-        print(f"[timing] {self.operator_name} compilation: {_compile_elapsed:.4f}s")
+        print(f"[timing] {self.operator_name} compilation: {_compile_elapsed:.8f}s")
         self._compiled_cache[cache_key] = compiled
         return compiled
 
@@ -1167,7 +1167,7 @@ class GenericStructuredWrapper:
         _unpack_elapsed = _unpack_end - _unpack_start
 
         # Print timing summary
-        print(f"[timing] {self.operator_name} pack={_pack_elapsed:.4f}s exec={_exec_elapsed:.4f}s unpack={_unpack_elapsed:.4f}s total={_pack_elapsed + _exec_elapsed + _unpack_elapsed:.4f}s")
+        print(f"[timing] {self.operator_name} pack={_pack_elapsed:.8f}s exec={_exec_elapsed:.8f}s unpack={_unpack_elapsed:.8f}s total={_pack_elapsed + _exec_elapsed + _unpack_elapsed:.8f}s")
 
         # if (
         #     debug_tangential
