@@ -493,6 +493,17 @@ class DaCeTranslator(
 
         arg_types = inp.args.args
 
+        if self.symbolic_domain_sizes:
+            # After StructuredTypeRemapper runs, the SDFG has IDim/JDim/Kolor-shaped
+            # arrays, but inp.args.args still carries the original unstructured types.
+            # Remap them so the bindings generator sees the correct dimensions.
+            from gt4py.next.iterator.transforms.structured_backend_passes import (
+                StructuredTypeRemapper,
+            )
+            arg_types = tuple(
+                StructuredTypeRemapper._cartesian_remapped_type(t) or t for t in arg_types
+            )
+
         program_parameters = tuple(
             interface.Parameter(param.id, arg_type)
             for param, arg_type in zip(program.params, arg_types)

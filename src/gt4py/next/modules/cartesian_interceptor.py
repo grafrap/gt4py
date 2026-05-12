@@ -627,11 +627,58 @@ class GenericStructuredWrapper:
             f"[structured] compiling '{self.operator_name}' for "
             f"horizontal_start={horizontal_start}, thresholds={extra_thresholds}"
         )
-        structured_backend = self._backend_factory(
-            cached=True,
-            otf_workflow__cached_translation=True,
-            otf_workflow__bare_translation__symbolic_domain_sizes=sds,
-        )
+
+        # Detect whether the stored factory is a DaCe backend factory.
+        # DaCe requires auto_optimize and apply_common_transform to be passed explicitly
+        # because DaCeBackendFactory.auto_optimize is a factory.Trait (not accessible
+        # via SelfAttribute unless set) and apply_common_transform must be True for the
+        # structured backend transforms to run.
+        try:
+            from gt4py.next.program_processors.runners.dace.workflow.backend import (
+                DaCeBackendFactory as _DaCeBackendFactory,
+            )
+            _factory_is_dace = (
+                isinstance(self._backend_factory, type)
+                and issubclass(self._backend_factory, _DaCeBackendFactory)
+            )
+        except ImportError:
+            _factory_is_dace = False
+
+        if _factory_is_dace:
+            from gt4py.next import config as _gt4py_config
+            from gt4py.next import common as _common
+            structured_backend = self._backend_factory(
+                gpu=False,
+                cached=True,
+                auto_optimize=True,
+                # Disable translation caching: the translation cache is keyed by ITIR
+                # hash which does NOT include symbolic_domain_sizes / horizontal_start.
+                # Reusing a cached translation for a different horizontal_start produces
+                # wrong SDFGs.  _compiled_cache provides in-process caching per
+                # (horizontal_start, thresholds).
+                otf_workflow__cached_translation=False,
+                otf_workflow__bare_translation__apply_common_transform=True,
+                otf_workflow__bare_translation__async_sdfg_call=False,
+                otf_workflow__bare_translation__auto_optimize_args={
+                    "unit_strides_kind": _common.DimensionKind.HORIZONTAL
+                    if _gt4py_config.UNSTRUCTURED_HORIZONTAL_HAS_UNIT_STRIDE
+                    else None,
+                },
+                otf_workflow__bare_translation__unstructured_horizontal_has_unit_stride=(
+                    _gt4py_config.UNSTRUCTURED_HORIZONTAL_HAS_UNIT_STRIDE
+                ),
+                otf_workflow__bare_translation__use_metrics=False,
+                otf_workflow__bare_translation__disable_field_origin_on_program_arguments=False,
+                otf_workflow__bare_translation__use_max_domain_range_on_unstructured_shift=None,
+                otf_workflow__bare_translation__symbolic_domain_sizes=sds,
+            )
+        else:
+            structured_backend = self._backend_factory(
+                cached=True,
+                otf_workflow__cached_translation=True,
+                otf_workflow__bare_translation__symbolic_domain_sizes=sds,
+            )
+
         from gt4py.next.program_processors.program_setup_utils import setup_program as _setup
         compiled = _setup(
             self._operator,
