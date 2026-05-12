@@ -8,6 +8,7 @@
 
 import os
 import sys
+import warnings
 from typing import Optional, Protocol, cast
 
 from gt4py import eve
@@ -260,6 +261,14 @@ def _process_symbolic_domains_option(
 
     if use_max_domain_range_on_unstructured_shift is None:
         use_max_domain_range_on_unstructured_shift = _has_dynamic_domains(ir)
+    elif use_max_domain_range_on_unstructured_shift:
+        if not _has_dynamic_domains(ir):
+            warnings.warn(
+                "You are using static domains together with "
+                "'use_max_domain_range_on_unstructured_shift'. This is "
+                "likely not what you wanted.",
+                stacklevel=2,
+            )
     if use_max_domain_range_on_unstructured_shift:
         # TODO(havogt): ICON4Py uses this codepath as default for now. Once we use the minimal domain range, we should re-enable this warning.
         # if not _has_dynamic_domains(ir):
@@ -284,6 +293,7 @@ def apply_common_transforms(
     unroll_reduce=False,
     common_subexpression_elimination=True,
     force_inline_lambda_args=False,
+    transform_concat_where_to_as_fieldop=True,
     #: A dictionary mapping axes names to their length. See :func:`infer_domain.infer_expr` for
     #: more details.
     symbolic_domain_sizes: Optional[dict[str, itir.Expr]] = None,
@@ -369,7 +379,8 @@ def apply_common_transforms(
     _print_ir_block(
         "=== GTIR AFTER COMMON TRANSFORMS BEFORE INFER_DOMAIN ===", ir, enabled=print_ir
     )
-    ir = concat_where.transform_to_as_fieldop(ir)
+    if transform_concat_where_to_as_fieldop:
+        ir = concat_where.transform_to_as_fieldop(ir)
     _print_ir_block("=== GTIR AFTER TRANSFORM AS FIELDOP ===", ir, enabled=print_ir)
     for _ in range(10):
         inlined = ir
@@ -448,7 +459,12 @@ def apply_common_transforms(
     ir = InlineLambdas.apply(
         ir, opcount_preserving=True, force_inline_lambda_args=force_inline_lambda_args
     )
-    ir = NormalizeShifts().visit(ir)
+
+    ir = infer_domain.infer_program(
+        ir,
+        offset_provider=offset_provider,
+        symbolic_domain_sizes=symbolic_domain_sizes,
+    )
     _print_ir_block("=== GTIR END ===", ir, enabled=print_ir)
 
     assert isinstance(ir, itir.Program)
