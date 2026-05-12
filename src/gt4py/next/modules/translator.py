@@ -19,6 +19,12 @@ from gt4py.next.iterator import atlas_utils, ir
 from gt4py.next.iterator.transforms.map_dict import map_dict as _MAP_DICT
 
 
+# Define Dimensions
+IDim = gtx.Dimension("IDim")
+JDim = gtx.Dimension("JDim")
+Kolor = gtx.Dimension("Kolor")
+
+
 def _parse_sparse_remap_table() -> dict[str, dict[int, dict[int, tuple[int, int, int]]]]:
     """Parse map_dict remaps into conn -> center_kolor -> slot -> (di, dj, neighbor_kolor)."""
     max_kolor = 3

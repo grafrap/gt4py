@@ -369,6 +369,7 @@ class DaCeTranslator(
     disable_itir_transforms: bool = False
     disable_field_origin_on_program_arguments: bool = False
     use_max_domain_range_on_unstructured_shift: bool | None = None
+    symbolic_domain_sizes: dict[str, Any] | None = None
 
     def generate_sdfg(
         self,
@@ -389,6 +390,7 @@ class DaCeTranslator(
             force_inline_lambda_args=True,
             transform_concat_where_to_as_fieldop=False,
             use_max_domain_range_on_unstructured_shift=self.use_max_domain_range_on_unstructured_shift,
+            symbolic_domain_sizes=self.symbolic_domain_sizes,
         )
 
         new_program = apply_common_transforms(program, unroll_reduce=False)
@@ -511,3 +513,13 @@ class DaCeTranslator(
 class DaCeTranslationStepFactory(factory.Factory):
     class Meta:
         model = DaCeTranslator
+
+    # Required fields; device_type and auto_optimize are forwarded by DaCeWorkflowFactory.
+    # All others need defaults here so that DaCeBackendFactory can be called with only
+    # a subset of kwargs (e.g. symbolic_domain_sizes) without TypeError.
+    apply_common_transform = False
+    auto_optimize_args = None
+    async_sdfg_call = False
+    unstructured_horizontal_has_unit_stride = False
+    use_metrics = True
+    symbolic_domain_sizes = None

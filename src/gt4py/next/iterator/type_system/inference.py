@@ -93,6 +93,17 @@ def _is_structured_remap_compatibility_case(existing: ts.TypeSpec, inferred: ts.
         if existing.position_dims[0].value not in {"Edge", "Cell", "Vertex"}:
             return False
         if tuple(existing.position_dims[1:]) != tuple(inferred.position_dims):
+            # Case B2: Edge/Cell/Vertex remapped to structured dimensions (e.g., Edge → [Kolor, Vertex])
+            # In structured backend, unstructured elements like Edge can be decomposed into 
+            # structured Kolor×Vertex or similar patterns.
+            if (
+                len(existing.position_dims) == 1
+                and existing.position_dims[0].value in {"Edge", "Cell", "Vertex"}
+                and len(inferred.position_dims) >= 2
+                and "Kolor" in {d.value for d in inferred.position_dims}
+            ):
+                # Allow Edge/Cell/Vertex to be remapped to structured patterns like [Kolor, Vertex]
+                return True
             return False
 
         if tuple(existing.defined_dims) == tuple(inferred.defined_dims):
