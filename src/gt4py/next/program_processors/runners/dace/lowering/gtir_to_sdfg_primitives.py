@@ -83,6 +83,20 @@ def _parse_fieldop_arg(
 
     if isinstance(arg, gtir_to_sdfg_types.FieldopData):
         return arg.get_local_view(domain, ctx.sdfg)
+    elif arg is None:
+        # translate_symbol_ref returns None for NEVER-domain symbols.  In the
+        # structured backend, domain inference may mark sparse-local fields (e.g.
+        # Field[IDim, JDim, Kolor, C2EDim]) as NEVER because their access pattern
+        # after structural type remapping is not recognized.  Recover by retrieving
+        # the field directly from the SDFG.
+        if isinstance(node, gtir.SymRef):
+            symbol_name = str(node.id)
+            gt_symbol_type = ctx.get_symbol_type(symbol_name)
+            if gt_symbol_type is not None:
+                recovered = _get_data_nodes(ctx.sdfg, ctx.state, sdfg_builder, symbol_name, gt_symbol_type)
+                if isinstance(recovered, gtir_to_sdfg_types.FieldopData):
+                    return recovered.get_local_view(domain, ctx.sdfg)
+        return None
     else:
         # handle tuples of fields
         return gtx_utils.tree_map(lambda targ: targ.get_local_view(domain, ctx.sdfg))(arg)

@@ -1108,17 +1108,14 @@ class GenericStructuredWrapper:
                 if name in merged_kwargs:
                     ordered_args.append(merged_kwargs.pop(name))
 
-                compiled.func._compiled_programs(
-                    *ordered_args,
-                    offset_provider=offset_provider,
-                    enable_jit=enable_jit,
-                )
-            else:
-                # Fallback for non-partial wrappers.
-                compiled(**structured_kwargs)
-        finally:
-            if _call_sds is not None:
-                _CURRENT_COMPILE_SDS = None
+            compiled.func._compiled_programs(
+                *ordered_args,
+                offset_provider=offset_provider,
+                enable_jit=enable_jit,
+            )
+        else:
+            # Fallback for non-partial wrappers.
+            compiled(**structured_kwargs)
 
         for original_field, packed_field in packed_fields:
             self._unpack_to_buffer(packed_field, original_field)
