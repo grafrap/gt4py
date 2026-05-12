@@ -188,8 +188,12 @@ def fuse_as_fieldop(
         new_stencil, is_stencil=True, uids=uids
     )  # to keep the tree small
     new_stencil = merge_let.MergeLet().visit(new_stencil)
+    import os as _os
+    # opcount_preserving=False (more aggressive) is needed for structured backend stencils
+    # but causes non-symbolic cell index issues for unstructured ListType field access.
+    _opcount_preserving = _os.environ.get("USE_STRUCTURED_BACKEND", "0") != "1"
     new_stencil = inline_lambdas.InlineLambdas.apply(
-        new_stencil, opcount_preserving=False, force_inline_lift_args=True
+        new_stencil, opcount_preserving=_opcount_preserving, force_inline_lift_args=True
     )
     new_stencil = inline_lifts.InlineLifts().visit(new_stencil)
 
@@ -211,7 +215,9 @@ def _arg_inline_predicate(node: itir.Expr, shifts: set[tuple[itir.OffsetLiteral,
         is_applied_fieldop := cpm.is_applied_as_fieldop(node)
         and not cpm.is_call_to(node.fun.args[0], "scan")
     ) or cpm.is_call_to(node, "if_"):
-        return True
+        import os as _os2
+        if _os2.environ.get("USE_STRUCTURED_BACKEND", "0") == "1":
+            return True
         # always inline arg if it is an applied fieldop with only a single arg
         if is_applied_fieldop and len(node.args) == 1:
             return True
