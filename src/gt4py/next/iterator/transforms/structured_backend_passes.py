@@ -37,6 +37,7 @@ from gt4py.next.iterator import ir
 from gt4py.next.iterator.ir_utils import common_pattern_matcher as cpm, ir_makers as im
 from gt4py.next.iterator.type_system import type_specifications as it_ts
 from gt4py.next.type_system import type_specifications as ts
+import numpy as np
 
 map_dict = map_dict_module.map_dict
 
@@ -81,6 +82,17 @@ def _coerce_int(value: Any) -> int | None:
 
 
 def _coerce_mapping_rows(value: Any, expected_len: int) -> tuple[tuple[int, ...], ...] | None:
+    if isinstance(value, np.ndarray):
+        if value.ndim != 2 or value.shape[1] < expected_len:
+            return None
+        rows = []
+        for row in value:
+            parsed = tuple(_coerce_int(item) for item in row[:expected_len])
+            if any(item is None for item in parsed):
+                return None
+            rows.append(cast(tuple[int, ...], parsed))
+        return tuple(rows)
+    
     if not isinstance(value, (list, tuple)):
         return None
     rows: list[tuple[int, ...]] = []

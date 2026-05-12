@@ -153,6 +153,19 @@ def compute_zavgS(
     zavg = 0.5 * (pp(E2V[0]) + pp(E2V[1]))
     return S_M * zavg
 
+EdgeDim = gtx.Dimension("Edge")
+
+
+@gtx.program
+def compute_zavgS_program_(
+    pp: gtx.Field[[Vertex], float],
+    S_M: gtx.Field[[Edge], float],
+    out: gtx.Field[[Edge], float],
+    horizontal_start: gtx.int32,
+    horizontal_end: gtx.int32,
+) -> None:
+    compute_zavgS(pp, S_M, out=out, domain={EdgeDim: (horizontal_start, horizontal_end)})
+
 
 @gtx.field_operator
 def compute_pnabla(
@@ -301,14 +314,17 @@ def test_ffront_compute_zavgS_parallelogram_grid(exec_alloc_descriptor):
         cached=True,
         otf_workflow__cached_translation=True,
         otf_workflow__bare_translation__symbolic_domain_sizes={
-            "max_i": int(remap_sizes.max_i),
-            "max_j": int(remap_sizes.max_j),
-            "lateral": int(remap_sizes.lateral),
+            "use_horizontal_start_mapping": True,
+            "edge_to_ijk": index_map.edge_to_ijk,
+            "horizontal_start": int(844),
+            "horizontal_end": setup.edges_size,
         },
     )
+    print("the selected_backend is:", selected_backend)
     compute_zavgS_program = setup_program(
         compute_zavgS,
         backend=selected_backend,
+        # horizontal_sizes={"horizontal_start": int(844), "horizontal_end": setup.edges_size},
         offset_provider={"E2V": setup.edges2node_connectivity},
     )
 
@@ -460,6 +476,7 @@ def test_ffront_nabla_parallelogram_grid(exec_alloc_descriptor):
             "lateral": int(remap_sizes.lateral),
         },
     )
+    print("the selected_backend is:", selected_backend)
     pnabla_mxx_program = setup_program(
         compute_pnabla,
         backend=selected_backend,
