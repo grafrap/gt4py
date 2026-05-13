@@ -527,5 +527,54 @@ def apply_fieldview_transforms(
     _print_ir_block("=== FIELDVIEW IR AFTER PRUNING EMPTY CONCAT WHERE ===", ir, enabled=True)
 
     ir = remove_broadcast.RemoveBroadcast.apply(ir)
+
+    # Fuse the per-op as_fieldop nodes produced by the structured backend passes. Without this,
+    # the IR keeps every `+`, `×`, `cast_`, `if`, `list_get` as a separate as_fieldop over the
+    # full structured domain (513×513×3×K for a 512² grid). Each as_fieldop becomes its own
+    # DaCe nested-SDFG/map writing to a per-op transient — works at tiny grids but exhausts and
+    # corrupts the GPU transient pool at 512² (CUDA_ERROR_ILLEGAL_ADDRESS). See CLAUDE.md
+    # § "Bug 6 — CUDA ILLEGAL_ADDRESS on big grids".
+    #
+    # We deliberately do NOT call `concat_where.transform_to_as_fieldop` here. The DaCe path
+    # in grafrap3 restricts `translate_as_fieldop` to single-field outputs (see
+    # gtir_to_sdfg_primitives.py:255 — raises NotImplementedError for tuple outputs). Calling
+    # transform_to_as_fieldop on a tuple-returning concat_where collapses it into a single
+    # tuple-output as_fieldop that DaCe cannot lower. concat_where is left intact and lowered
+    # by gtir_to_sdfg_concat_where.py — this matches what grafrap_dace did with
+    # `transform_concat_where_to_as_fieldop=False` in `apply_common_transforms`.
+    if os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1":
+        for _ in range(10):
+            inlined = ir
+            inlined = InlineLambdas.apply(inlined, opcount_preserving=True)
+            inlined = ConstantFolding.apply(inlined)  # type: ignore[assignment]
+            inlined = CollapseTuple.apply(
+                inlined,
+                enabled_transformations=~CollapseTuple.Transformation.PROPAGATE_TO_IF_ON_TUPLES,
+                uids=uids,
+                offset_provider_type=offset_provider_type,
+            )  # type: ignore[assignment]
+            inlined = InlineScalar.apply(inlined, offset_provider_type=offset_provider_type)
+            inlined = simplify_cart_shifts.SimplifyCartesianShifts.apply(inlined)  # type: ignore[assignment]
+            try:
+                inlined = fuse_as_fieldop.FuseAsFieldOp.apply(
+                    inlined, uids=uids, offset_provider_type=offset_provider_type
+                )
+            except Exception:
+                pass
+            inlined = ConstantFolding.apply(inlined)  # type: ignore[assignment]
+            if inlined == ir:
+                break
+            ir = inlined
+        ir = NormalizeShifts().visit(ir)
+        ir = InlineLambdas.apply(ir, opcount_preserving=True, force_inline_lambda_args=True)
+        # The fusion loop rebuilds the IR tree (InlineLambdas / FuseAsFieldOp create new nodes),
+        # which strips the `node.annex.domain` that gtir_to_sdfg_concat_where.translate_concat_where
+        # reads at lowering time. Re-run domain inference so the annex is repopulated on the
+        # rebuilt concat_where nodes.
+        ir = infer_domain.infer_program(
+            ir,
+            symbolic_domain_sizes=symbolic_domain_sizes,
+            offset_provider=offset_provider,
+        )
     _print_ir_block("=== FINAL FIELDVIEW IR ===", ir, enabled=True)
     return ir

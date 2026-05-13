@@ -12,6 +12,7 @@ import dataclasses
 import enum
 import functools
 import operator
+import sys
 from typing import Optional
 
 from gt4py import eve
@@ -125,8 +126,14 @@ class ConstantFolding(
     ) -> ir.Node:
         enabled_transformations = enabled_transformations or cls.Transformation.all()
 
-        node = cls(enabled_transformations=enabled_transformations).visit(node)
-        return UndoCanonicalizeMinus().visit(node)
+        old_limit = sys.getrecursionlimit()
+        if old_limit < 10000:
+            sys.setrecursionlimit(10000)
+        try:
+            node = cls(enabled_transformations=enabled_transformations).visit(node)
+            return UndoCanonicalizeMinus().visit(node)
+        finally:
+            sys.setrecursionlimit(old_limit)
 
     def transform_canonicalize_op_funcall_symref_literal(
         self, node: ir.FunCall, **kwargs

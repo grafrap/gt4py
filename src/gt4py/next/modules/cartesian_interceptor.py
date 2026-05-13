@@ -656,10 +656,7 @@ class GenericStructuredWrapper:
                             sds[f"{param_name}_k{kolor}_ihi"] = ihi + 1  # exclusive
                             sds[f"{param_name}_k{kolor}_jhi"] = jhi + 1  # exclusive
 
-        print(
-            f"[structured] compiling '{self.operator_name}' for "
-            f"horizontal_start={horizontal_start}, thresholds={extra_thresholds}"
-        )
+
         # Build the backend instance. DaCe requires auto_optimize to be passed explicitly
         # (factory.Trait is not accessible via SelfAttribute unless set). GTfn passes
         # symbolic_domain_sizes through the factory hierarchy; DaCe reads it from the
@@ -689,7 +686,7 @@ class GenericStructuredWrapper:
             from gt4py.next import config as _gt4py_config
             from gt4py.next import common as _common
             structured_backend = _DaCeBackendFactory2(  # type: ignore[return-value]
-                gpu=False,
+                gpu=self._use_gpu,
                 cached=True,
                 auto_optimize=True,
                 otf_workflow__cached_translation=False,

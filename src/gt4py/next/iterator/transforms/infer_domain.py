@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import sys
 import typing
 
 from gt4py import eve
@@ -628,6 +629,34 @@ def _infer_stmt(
 
 
 def infer_program(
+    program: itir.Program,
+    *,
+    offset_provider: common.OffsetProvider | common.OffsetProviderType,
+    symbolic_domain_sizes: Optional[dict[str, itir.Expr]] = None,
+    allow_uninferred: bool = False,
+    keep_existing_domains: bool = False,
+) -> itir.Program:
+    """
+    Infer the domain of all field subexpressions inside a program.
+
+    See :func:`infer_expr` for more details.
+    """
+    old_limit = sys.getrecursionlimit()
+    if old_limit < 10000:
+        sys.setrecursionlimit(10000)
+    try:
+        return _infer_program_impl(
+            program,
+            offset_provider=offset_provider,
+            symbolic_domain_sizes=symbolic_domain_sizes,
+            allow_uninferred=allow_uninferred,
+            keep_existing_domains=keep_existing_domains,
+        )
+    finally:
+        sys.setrecursionlimit(old_limit)
+
+
+def _infer_program_impl(
     program: itir.Program,
     *,
     offset_provider: common.OffsetProvider | common.OffsetProviderType,
