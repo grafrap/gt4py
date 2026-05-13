@@ -18,6 +18,7 @@ from gt4py._core import definitions as core_defs
 from gt4py.next import common, config
 from gt4py.next.instrumentation import metrics
 from gt4py.next.iterator import ir as itir, transforms as itir_transforms
+from gt4py.next.iterator.transforms import pass_manager
 from gt4py.next.otf import code_specs, definitions, stages, workflow
 from gt4py.next.otf.binding import interface
 from gt4py.next.program_processors.runners.dace import (
