@@ -6,6 +6,11 @@ import gt4py.next as gtx
 import numpy as np
 from icon4py.model.common.dimension import IDim, JDim, Kolor
 
+try:
+    import cupy as cp
+except ImportError:
+    cp = None
+
 from gt4py.next.modules.translator import (
     IndexMap,
     StructuredRemapSizes,
@@ -468,7 +473,7 @@ def get_global_grid_mapping(e2v_override=None):
     # Read the grid file specified in the environment (or default)
     mesh_nc = os.environ.get(
         "GT4PY_TRANSLATOR_MESH",
-        "/home/raphael/Documents/Studium/Msc_thesis/grid-generator/parallelogram_grid.nc"
+        "../grid_generator/parallelogram_grid.nc"
     )
     
     # Put your standard reading logic here...
@@ -580,6 +585,11 @@ class GenericStructuredWrapper:
         # Cache for precomputed sparse pack index arrays (built on first use).
         # Key: local_dim_name str; Value: tuple of 6 numpy arrays or None.
         self._sparse_pack_mappings: dict[str, tuple | None] = {}
+        from gt4py._core import definitions as core_defs
+        self._use_gpu = getattr(allocator, "device_type", core_defs.DeviceType.CPU) in (
+            core_defs.DeviceType.CUDA,
+            core_defs.DeviceType.ROCM,
+        )
 
     def _get_or_compile(
         self,
@@ -699,8 +709,9 @@ class GenericStructuredWrapper:
         else:
             structured_backend = self._backend_factory(
                 cached=True,
-                otf_workflow__cached_translation=True,
+                otf_workflow__cached_translation=False,
                 otf_workflow__bare_translation__symbolic_domain_sizes=sds,
+                gpu=self._use_gpu,
             )
         # Store sds so __call__ can re-set the ContextVar at DaCe pool-thread compile time.
         self._sds_cache[cache_key] = sds
@@ -1035,6 +1046,7 @@ class GenericStructuredWrapper:
             return
 
         struct_np = structured_field.asnumpy()
+        orig_array = original_unstructured_field.ndarray
         orig_np = original_unstructured_field.asnumpy()
 
         # Sparse local-connectivity inputs (e.g. [Edge, E2C2E]) are read-only coefficients
@@ -1063,7 +1075,10 @@ class GenericStructuredWrapper:
         else:
             return 
 
-        np.copyto(orig_np, unstruct_np)
+        if cp is not None and getattr(original_unstructured_field, "array_ns", None) == cp:
+            cp.copyto(orig_array, cp.asarray(unstruct_np))
+        else:
+            np.copyto(orig_array, unstruct_np)
     
     def __call__(self, *args, **kwargs):
         # Map positional args to kwargs using the program's declared param order.

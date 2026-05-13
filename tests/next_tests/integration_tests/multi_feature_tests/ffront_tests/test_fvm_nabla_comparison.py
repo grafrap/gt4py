@@ -173,7 +173,7 @@ def print_structured_vertex_edges(v, m, S_field):
 def test_structured_bridge_matches_unstructured(exec_alloc_descriptor):
     mesh_nc = (
         os.environ.get("GT4PY_TRANSLATOR_MESH")
-        or "/home/raphael/Documents/Studium/Msc_thesis/grid-generator/parallelogram_grid.nc"
+        or "../grid_generator/parallelogram_grid.nc"
     )
     if mesh_nc:
         xr = pytest.importorskip("xarray")
