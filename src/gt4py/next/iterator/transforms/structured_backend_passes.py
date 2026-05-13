@@ -82,16 +82,16 @@ def _coerce_int(value: Any) -> int | None:
 
 
 def _coerce_mapping_rows(value: Any, expected_len: int) -> tuple[tuple[int, ...], ...] | None:
-    if isinstance(value, np.ndarray):
-        if value.ndim != 2 or value.shape[1] < expected_len:
-            return None
-        rows = []
-        for row in value:
-            parsed = tuple(_coerce_int(item) for item in row[:expected_len])
-            if any(item is None for item in parsed):
-                return None
-            rows.append(cast(tuple[int, ...], parsed))
-        return tuple(rows)
+    # if isinstance(value, np.ndarray):
+    #     if value.ndim != 2 or value.shape[1] < expected_len:
+    #         return None
+    #     rows = []
+    #     for row in value:
+    #         parsed = tuple(_coerce_int(item) for item in row[:expected_len])
+    #         if any(item is None for item in parsed):
+    #             return None
+    #         rows.append(cast(tuple[int, ...], parsed))
+    #     return tuple(rows)
     
     if not isinstance(value, (list, tuple)):
         return None

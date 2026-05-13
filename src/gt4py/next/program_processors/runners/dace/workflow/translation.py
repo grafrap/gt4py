@@ -420,11 +420,13 @@ class DaCeTranslator(
                     use_max_domain_range_on_unstructured_shift=self.use_max_domain_range_on_unstructured_shift,
                     offset_provider=offset_provider,
                 )
+        pass_manager._print_ir_block("IR after common transforms", ir, enabled=True)
         offset_provider_type = common.offset_provider_to_type(offset_provider)
         on_gpu = self.device_type != core_defs.DeviceType.CPU
 
         sdfg = gtx_dace_lowering.build_sdfg_from_gtir(ir, offset_provider_type, column_axis)
-
+        # get sdfg here sdfg.save()
+        sdfg.save("before_gpu_transformation.sdfg", compress=True)
         constant_symbols = find_constant_symbols(
             ir,
             sdfg,
@@ -467,7 +469,7 @@ class DaCeTranslator(
             gtx_transformations.gt_substitute_compiletime_symbols(
                 sdfg, constant_symbols, validate=True
             )
-
+        sdfg.save("after_gpu_transformation.sdfg")
         if self.async_sdfg_call:
             make_sdfg_call_async(sdfg, on_gpu)
         else:
