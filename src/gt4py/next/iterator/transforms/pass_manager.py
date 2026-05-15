@@ -555,12 +555,31 @@ def apply_fieldview_transforms(
             )  # type: ignore[assignment]
             inlined = InlineScalar.apply(inlined, offset_provider_type=offset_provider_type)
             inlined = simplify_cart_shifts.SimplifyCartesianShifts.apply(inlined)  # type: ignore[assignment]
-            try:
-                inlined = fuse_as_fieldop.FuseAsFieldOp.apply(
-                    inlined, uids=uids, offset_provider_type=offset_provider_type
-                )
-            except Exception:
-                pass
+            # CSE before FuseAsFieldOp: normalises repeated accesses to the same field.
+            inlined = CommonSubexpressionElimination.apply(
+                inlined, offset_provider_type=offset_provider_type, uids=uids
+            )
+            inlined = MergeLet().visit(inlined)
+            if not os.environ.get("GT4PY_DISABLE_FUSE_AS_FIELDOP"):
+                _n_before = str(inlined).count("as_fieldop")
+                _pre_fuse = inlined
+                try:
+                    inlined = fuse_as_fieldop.FuseAsFieldOp.apply(
+                        inlined, uids=uids, offset_provider_type=offset_provider_type
+                    )
+                except Exception:
+                    inlined = _pre_fuse
+                _n_after = str(inlined).count("as_fieldop")
+                # Reject fusion that collapses too aggressively in one step.
+                # nabla2_smag: 249→3 (83×) — FuseAsFieldOp merges as_fieldop nodes shared
+                # across kolor-split SetAts, creating a dangling connector (tlet_42_minus)
+                # in DaCe SDFG lowering. Threshold of 20 blocks this (83 > 20) while
+                # allowing typical 2-10× reductions for simpler stencils.
+                _ratio = int(os.environ.get("GT4PY_FUSE_RATIO_THRESHOLD", "20"))
+                if _n_before > 0 and _n_after > 0 and (_n_before // _n_after) > _ratio:
+                    inlined = _pre_fuse
+                    _n_after = _n_before
+                print(f"[fusion] FuseAsFieldOp: {_n_before} -> {_n_after} as_fieldop nodes")
             inlined = ConstantFolding.apply(inlined)  # type: ignore[assignment]
             if inlined == ir:
                 break
