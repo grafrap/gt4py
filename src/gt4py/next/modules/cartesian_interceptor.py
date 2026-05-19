@@ -685,6 +685,24 @@ class GenericStructuredWrapper:
             )
             from gt4py.next import config as _gt4py_config
             from gt4py.next import common as _common
+            # import sys as _sys_diag
+            # print(
+            #     f"[diag] DaCe wrapper compile: _use_gpu={self._use_gpu}  "
+            #     f"allocator={type(self.allocator).__name__}  "
+            #     f"allocator.device_type={getattr(self.allocator, 'device_type', '?')}",
+            #     file=_sys_diag.stderr, flush=True,
+            # )
+            # NOTE: auto_optimize=True is required for CPU.
+            # Setting it to False makes translation.py call
+            # `gt_substitute_compiletime_symbols(..., validate=True)` which strictly
+            # rejects the `dwdz[Kolor=-2]` memlets produced by the structured
+            # backend's narrow-Kolor IR pattern. With auto_optimize=True,
+            # `gt_auto_optimize` raises on the same memlets, but the fallback
+            # path skips validation and the CPU C++ codegen tolerates these reads
+            # (they land in the concat_where masked region at runtime). This is a
+            # known-bad pattern that needs a deeper fix in `gtir_to_sdfg`'s
+            # `translate_as_fieldop` to handle non-zero output Kolor origins; until
+            # then, keep auto_optimize=True to preserve CPU working state.
             structured_backend = _DaCeBackendFactory2(  # type: ignore[return-value]
                 gpu=self._use_gpu,
                 cached=True,
@@ -700,6 +718,10 @@ class GenericStructuredWrapper:
                     _gt4py_config.UNSTRUCTURED_HORIZONTAL_HAS_UNIT_STRIDE
                 ),
                 otf_workflow__bare_translation__use_metrics=False,
+                # Set to False to restore original working CPU state.
+                # See update notes in CLAUDE.md: setting True exposes a
+                # `dwdz[-2]` validation error during `gt_substitute_compiletime_symbols`
+                # that is otherwise tolerated by the auto_optimize fallback.
                 otf_workflow__bare_translation__disable_field_origin_on_program_arguments=False,
                 otf_workflow__bare_translation__use_max_domain_range_on_unstructured_shift=None,
             )

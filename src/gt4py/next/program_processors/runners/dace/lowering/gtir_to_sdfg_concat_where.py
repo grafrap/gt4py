@@ -133,6 +133,7 @@ def _translate_concat_where_branch(
         source = sdfg_builder.visit(source_expr, ctx=ctx)
 
     assert source.gt_type == output_type
+
     source_domain_range = source_domain.ranges[concat_dim]
     source_range_0 = gtir_to_sdfg_utils.get_symbolic(source_domain_range.start)
     source_range_1 = gtir_to_sdfg_utils.get_symbolic(
@@ -140,11 +141,25 @@ def _translate_concat_where_branch(
     )
     source_range_size = source_range_1 - source_range_0
 
+
+    # Source range comes from the source's actual FieldopData (origin + array
+    # shape) rather than `source_expr.annex.domain`. The annex may have been
+    # set to a parent-view domain by `infer_program(keep_existing_domains=True)`
+    # — e.g. for per-kolor narrowed branches the annex can hold the outer
+    # `Kolor:[0,3)` while the as_fieldop's actual output is `Kolor:[2,3)`. Using
+    # `source.origin[i]` and the array shape keeps memlet offsets correct.
+    # source_desc = source.dc_node.desc(ctx.sdfg)
     if isinstance(output_type.dtype, ts.ScalarType):
         all_dims = gtx_common.order_dimensions(output_type.dims)
     else:
         assert output_type.dtype.offset_type
         all_dims = gtx_common.order_dimensions([*output_type.dims, output_type.dtype.offset_type])
+    # concat_dim_index = all_dims.index(concat_dim)
+    # src_concat_origin = source.origin[concat_dim_index]
+    # src_concat_size = source_desc.shape[concat_dim_index]
+    # source_range_0 = src_concat_origin
+    # source_range_1 = src_concat_origin + src_concat_size
+    # source_range_size = src_concat_size
 
     source_subset = []
     output_subset = []

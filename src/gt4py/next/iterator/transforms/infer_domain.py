@@ -230,7 +230,13 @@ def _infer_as_fieldop(
         raise ValueError("'target_domain' cannot be 'NEVER' unless `allow_uninferred=True`.")
 
     if len(applied_fieldop.fun.args) == 2 and keep_existing_domains:
-        target_domain = SymbolicDomain.from_expr(applied_fieldop.fun.args[1])
+        # `fun.args[1]` can be a single `cartesian_domain`/`unstructured_domain` (for
+        # field-output as_fieldop) or a `make_tuple` of domain expressions (for
+        # tuple-output as_fieldop, e.g. fused E2C2EO sums producing a tuple of fields).
+        # `_make_symbolic_domain_tuple` handles both cases; the downstream
+        # `isinstance(target_domain, tuple)` branch below already collapses the tuple
+        # via `_domain_union`.
+        target_domain = _make_symbolic_domain_tuple(applied_fieldop.fun.args[1])
 
     # FIXME[#1582](tehrengruber): Temporary solution for `tuple_get` on scan result. See `test_solve_triag`.
     if isinstance(target_domain, tuple):

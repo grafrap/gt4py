@@ -286,6 +286,26 @@ def _build_field_concat_where_from_branches(
                 return lo.value, hi.value
         return None
 
+    def _narrow_domain_kolor(domain_expr: ir.Expr, kolor_interval: tuple[int, int]) -> ir.Expr:
+        if not cpm.is_call_to(domain_expr, "cartesian_domain"):
+            return domain_expr
+        lo, hi = kolor_interval
+        new_args: list[ir.Expr] = []
+        for range_expr in domain_expr.args:
+            if not (cpm.is_call_to(range_expr, "named_range") and len(range_expr.args) == 3):
+                new_args.append(copy.deepcopy(range_expr))
+                continue
+            axis = range_expr.args[0]
+            if _get_axis_name(axis) == "Kolor":
+                new_args.append(im.named_range(
+                    cast(ir.AxisLiteral | common.Dimension, copy.deepcopy(axis)),
+                    ir.OffsetLiteral(value=lo),
+                    ir.OffsetLiteral(value=hi),
+                ))
+            else:
+                new_args.append(copy.deepcopy(range_expr))
+        return im.call("cartesian_domain")(*new_args)
+
     def _kolor_shift(shift_spec: tuple[ir.OffsetLiteral, ...]) -> int:
         kolor_axis_tags = {common.dimension_to_implicit_offset("Kolor"), "Kolor"}
         for idx in range(0, len(shift_spec), 2):
@@ -399,9 +419,67 @@ def _build_field_concat_where_from_branches(
         edge_domain = _edge_shape_domain(source_kolor, shift_spec)
         if edge_domain is not None:
             branch_domain = edge_domain
+    # Narrow the Kolor range of `branch_domain` to match the concat_where `cond`.
+    # Otherwise the as_fieldop stores the full outer Kolor:[0,3) and `infer_program`
+    # back-propagates `[0,3)+shift` to the source — widening past valid field extents
+    # and producing OOB reads in DaCe (SIGSEGV on CPU, ILLEGAL_ADDRESS on GPU).
+    kolor_interval = _extract_kolor_interval(cond)
+    if kolor_interval is not None:
+        branch_domain = _narrow_domain_kolor(branch_domain, kolor_interval)
     expr = _make_lifted_deref_shift(arg, shift_spec, branch_domain)
+
     if len(branches) == 1:
+        # Trailing-else branch (cond=None in `map_dict.py`). A bare wide-domain
+        # `as_fieldop` here causes GPU OOB at 512×512 — e.g. E2C[1] trailing with
+        # shift `_OffKolor:-2` reading cell field at Kolor=output-2 OOBs at output
+        # K=0,1 (source K=-2,-1) on cell (Kolor=2). At 26×26 the OOB reads land in
+        # adjacent valid memory; at 512×512 they land outside any allocation and
+        # CUDA traps it.
+        #
+        # Naïvely narrowing this branch's as_fieldop domain to Kolor:[k,k+1) breaks
+        # CPU numerical verification (`+inf location mismatch`): the let-lifted
+        # `concat_where` structure created by `canonicalize_domain_argument` reads
+        # the resulting 1-slot temp at *other* kolors that are downstream-masked
+        # but still materialized by DaCe — those reads are OOB on the 1-slot temp.
+        #
+        # Right fix: produce a wider field with valid values at ALL kolors so the
+        # consumer's reads are always in-bounds. Wrap as:
+        #
+        #   concat_where(Kolor:[source_kolor, source_kolor+1),
+        #                narrow_trailing_shift,         # the actual trailing computation
+        #                literal_zero_fallback)         # NEVER-arg → no field reads
+        #
+        # The fallback is a constant `0.0` field-op whose lambda doesn't reference its
+        # input, so `infer_domain` marks `arg` as NEVER and DaCe's
+        # `_parse_fieldop_arg` strips the unused arg. This avoids OOB reads regardless
+        # of the source field's Kolor extent (a previous identity-based fallback
+        # read `arg` at output position K=0..source_kolor-1, which OOB'd on vertex
+        # fields with Kolor=1 — observed in stencils 01/10 E2C2V).
+        if source_kolor is not None and source_kolor > 0 and isinstance(branch_domain, ir.FunCall):
+            narrow_trailing_domain = _narrow_domain_kolor(
+                branch_domain, (source_kolor, source_kolor + 1)
+            )
+            narrow_trailing_expr = _make_lifted_deref_shift(
+                arg, shift_spec, narrow_trailing_domain
+            )
+            fallback_domain = _narrow_domain_kolor(branch_domain, (0, source_kolor))
+            fallback_expr = im.as_fieldop(
+                im.lambda_("__cart_trailing_unused")(im.literal("0.0", "float64")),
+                fallback_domain,
+            )(copy.deepcopy(arg))
+            kolor_axis = ir.AxisLiteral(
+                value="Kolor", kind=common.DimensionKind.HORIZONTAL
+            )
+            narrow_cond = im.call("cartesian_domain")(
+                im.named_range(
+                    kolor_axis,
+                    ir.OffsetLiteral(value=source_kolor),
+                    ir.OffsetLiteral(value=source_kolor + 1),
+                )
+            )
+            return im.concat_where(narrow_cond, narrow_trailing_expr, fallback_expr)
         return expr
+
     return im.concat_where(
         cond,
         expr,

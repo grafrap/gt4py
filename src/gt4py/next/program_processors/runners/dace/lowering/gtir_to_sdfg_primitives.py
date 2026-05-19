@@ -271,9 +271,19 @@ def translate_as_fieldop(
 
     # Parse the domain of the field operator.
     assert isinstance(fieldop_domain_expr.type, ts.DomainType)
-    field_domain = gtir_domain.get_field_domain(
-        domain_utils.SymbolicDomain.from_expr(fieldop_domain_expr)
-    )
+    fieldop_domain = domain_utils.SymbolicDomain.from_expr(fieldop_domain_expr)
+    field_domain = gtir_domain.get_field_domain(fieldop_domain)
+
+    # Sync `node.annex.domain` to the as_fieldop's explicit `(stencil, domain)`
+    # form. `infer_program(keep_existing_domains=True)` preserves `fun.args[1]`
+    # but sets `annex.domain` to the parent's call value, which may be a wider
+    # parent-view union. Downstream lowering (notably
+    # `_translate_concat_where_branch`) reads `source_expr.annex.domain` to
+    # compute memlet ranges; using the parent-view yields wrong memlet offsets
+    # when the explicit domain doesn't start at 0 (e.g. per-kolor branch with
+    # `Kolor:[2, 3)`). Sync the annex here so the lowering matches the SDFG
+    # layout that `_create_field_operator_impl` actually produces below.
+    node.annex.domain = fieldop_domain
 
     if cpm.is_ref_to(fieldop_expr, "deref"):
         arg_type = node.args[0].type

@@ -466,6 +466,12 @@ class DaCeTranslator(
             offset_provider_type = {**offset_provider_type, **structured_dim_entries}
 
         on_gpu = self.device_type != core_defs.DeviceType.CPU
+        # import sys as _sys_diag2
+        # print(
+        #     f"[diag] DaCeTranslator: device_type={self.device_type} on_gpu={on_gpu} "
+        #     f"auto_optimize={self.auto_optimize}",
+        #     file=_sys_diag2.stderr, flush=True,
+        # )
 
         sdfg = gtx_dace_lowering.build_sdfg_from_gtir(ir, offset_provider_type, column_axis)
         # get sdfg here sdfg.save()
@@ -546,7 +552,18 @@ class DaCeTranslator(
                         constant_symbols=None,  # already substituted above
                         **structured_opt_args,
                     )
-                except Exception:
+                    # import sys as _sys_diag3
+                    # print(
+                    #     f"[diag] gt_auto_optimize SUCCEEDED (gpu={on_gpu})",
+                    #     file=_sys_diag3.stderr, flush=True,
+                    # )
+                except Exception as _e:
+                    # import sys as _sys_diag3
+                    # print(
+                    #     f"[diag] gt_auto_optimize FAILED (gpu={on_gpu}): "
+                    #     f"{type(_e).__name__}: {_e}  -- using fallback path",
+                    #     file=_sys_diag3.stderr, flush=True,
+                    # )
                     # Restore SDFG from snapshot and apply safe fallback:
                     # buffer elimination + iteration order (no map fusion).
                     sdfg = dace.SDFG.from_json(sdfg_snapshot)
@@ -560,6 +577,17 @@ class DaCeTranslator(
                         unit_strides_kind=common.DimensionKind.VERTICAL,
                         validate=False,
                     )
+                    # Crucial: when on GPU, the fallback bypassed gt_auto_optimize's
+                    # gt_gpu_transformation call. Apply GPU transformation here so the
+                    # SDFG arrays get StorageType.GPU_Global instead of CPU_Heap.
+                    if on_gpu:
+                        gtx_transformations.gt_gpu_transformation(
+                            sdfg, try_removing_trivial_maps=True
+                        )
+                        # print(
+                        #     "[diag] applied gt_gpu_transformation in fallback",
+                        #     file=_sys_diag3.stderr, flush=True,
+                        # )
             else:
                 gtx_transformations.gt_auto_optimize(
                     sdfg,
