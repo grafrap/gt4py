@@ -539,7 +539,7 @@ def apply_fieldview_transforms(
         ir,
         symbolic_domain_sizes=symbolic_domain_sizes,
         offset_provider=offset_provider,
-        keep_existing_domains=True,
+        allow_uninferred=True,
     )
     ir = ConstantFolding.apply(ir)  # type: ignore[assignment]  # always an itir.Program
 
