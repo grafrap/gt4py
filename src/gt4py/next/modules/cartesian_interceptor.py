@@ -483,7 +483,6 @@ def get_global_grid_mapping(e2v_override=None):
         lateral = int(os.environ.get("GT4PY_TRANSLATOR_LATERAL", "1"))
         remap_sizes = load_structured_remap_sizes_from_netcdf(mesh_nc, lateral=lateral)
 
-    # print(f"lateral={remap_sizes.lateral}, max_i={remap_sizes.max_i}, max_j={remap_sizes.max_j}")        
     index_map = build_index_map_from_lonlat_e2v(lonlat, e2v) # Add your exact sizes here
     
     _CACHED_INDEX_MAP = index_map
@@ -685,13 +684,6 @@ class GenericStructuredWrapper:
             )
             from gt4py.next import config as _gt4py_config
             from gt4py.next import common as _common
-            # import sys as _sys_diag
-            # print(
-            #     f"[diag] DaCe wrapper compile: _use_gpu={self._use_gpu}  "
-            #     f"allocator={type(self.allocator).__name__}  "
-            #     f"allocator.device_type={getattr(self.allocator, 'device_type', '?')}",
-            #     file=_sys_diag.stderr, flush=True,
-            # )
             # NOTE: auto_optimize=True is required for CPU.
             # Setting it to False makes translation.py call
             # `gt_substitute_compiletime_symbols(..., validate=True)` which strictly
@@ -776,7 +768,6 @@ class GenericStructuredWrapper:
         # valid placeholder for connectivities that do not encode masking via -1.
         has_valid = row_max >= 0
         fill_values = np.where(has_valid, 0, sanitized)
-        # print(f"[structured-debug] fill values: {fill_values}")
         sanitized = np.where(invalid_mask, fill_values, sanitized)
         return sanitized
 
@@ -921,11 +912,6 @@ class GenericStructuredWrapper:
             if edge_scores[edge] > 1e-9:
                 color = int(self.index_map.edge_to_ijk[edge, 2])
                 color_mismatch[color] = color_mismatch.get(color, 0) + 1
-        # print(
-        #     "[structured-debug] mismatch_by_kolor="
-        #     f"{color_mismatch}"
-        # )
-
         top_edges = np.argsort(edge_scores)[-5:][::-1]
         for edge in top_edges:
             if edge_scores[edge] <= 1e-9:
@@ -1060,7 +1046,6 @@ class GenericStructuredWrapper:
         return field
 
     def _unpack_to_buffer(self, structured_field, original_unstructured_field):
-        # print(f"unpacking field:", structured_field, "to", original_unstructured_field)
         if not getattr(original_unstructured_field, "domain", None):
             return
 
@@ -1126,7 +1111,6 @@ class GenericStructuredWrapper:
                     if getattr(original_field, "domain", None) is not None:
                         packed_fields.append((original_field, packed_field))
             else:
-                # print(f"Packing argument '{arg_name}' for operator '{self.operator_name}'")
                 packed_arg = self._pack_argument(arg_val)
                 structured_kwargs[arg_name] = packed_arg
                 if getattr(arg_val, "domain", None) is not None:

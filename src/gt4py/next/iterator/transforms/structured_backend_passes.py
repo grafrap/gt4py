@@ -320,10 +320,48 @@ def _build_field_concat_where_from_branches(
                 return int(off_lit.value)
         return 0
 
+    def _idim_shift(shift_spec: tuple[ir.OffsetLiteral, ...]) -> int:
+        idim_axis_tags = {common.dimension_to_implicit_offset("IDim"), "IDim"}
+        for idx in range(0, len(shift_spec), 2):
+            if idx + 1 >= len(shift_spec):
+                break
+            axis_lit = shift_spec[idx]
+            off_lit = shift_spec[idx + 1]
+            if (
+                isinstance(axis_lit, ir.OffsetLiteral) and axis_lit.value in idim_axis_tags
+                and isinstance(off_lit, ir.OffsetLiteral) and isinstance(off_lit.value, int)
+            ):
+                return int(off_lit.value)
+        return 0
+
+    def _jdim_shift(shift_spec: tuple[ir.OffsetLiteral, ...]) -> int:
+        jdim_axis_tags = {common.dimension_to_implicit_offset("JDim"), "JDim"}
+        for idx in range(0, len(shift_spec), 2):
+            if idx + 1 >= len(shift_spec):
+                break
+            axis_lit = shift_spec[idx]
+            off_lit = shift_spec[idx + 1]
+            if (
+                isinstance(axis_lit, ir.OffsetLiteral) and axis_lit.value in jdim_axis_tags
+                and isinstance(off_lit, ir.OffsetLiteral) and isinstance(off_lit.value, int)
+            ):
+                return int(off_lit.value)
+        return 0
+
     def _minus_one_offset(expr: ir.Expr) -> ir.Expr:
         if isinstance(expr, ir.OffsetLiteral) and isinstance(expr.value, int):
             return ir.OffsetLiteral(value=expr.value - 1)
         return im.minus(copy.deepcopy(expr), ir.OffsetLiteral(value=1))
+
+    def _apply_offset(expr: ir.Expr, n: int) -> ir.Expr:
+        """Apply integer offset n to expr; n=0 returns a deepcopy unchanged."""
+        if isinstance(expr, ir.OffsetLiteral) and isinstance(expr.value, int):
+            return ir.OffsetLiteral(value=expr.value + n)
+        if n == 0:
+            return copy.deepcopy(expr)
+        if n < 0:
+            return im.minus(copy.deepcopy(expr), ir.OffsetLiteral(value=-n))
+        return im.plus(copy.deepcopy(expr), ir.OffsetLiteral(value=n))
 
     def _edge_shape_domain(
         source_kolor: int,
@@ -352,10 +390,17 @@ def _build_field_concat_where_from_branches(
         i_hi = copy.deepcopy(id_range.args[2])
         j_lo = copy.deepcopy(jd_range.args[1])
         j_hi = copy.deepcopy(jd_range.args[2])
+        # Clip upper bounds to prevent OOB reads in the source field.
+        # For output IDim=D with shift di, the read is at IDim=D+di. Valid iff D+di < ihi_target.
+        # For target_kolor in {1,2}: ihi_target = i_hi - 1 (one fewer IDim position than Kolor=1).
+        # So max valid D (exclusive) = i_hi - 1 - di.  Use _apply_offset(i_hi, -1 - di).
+        # For di=0: same as old _minus_one_offset. For di=-1: no clip. For di=+1: two fewer.
+        di = _idim_shift(shift_spec)
+        dj = _jdim_shift(shift_spec)
         if target_kolor in {1, 2}:
-            i_hi = _minus_one_offset(i_hi)
+            i_hi = _apply_offset(i_hi, -1 - di)
         if target_kolor in {0, 2}:
-            j_hi = _minus_one_offset(j_hi)
+            j_hi = _apply_offset(j_hi, -1 - dj)
         new_ranges: list[ir.Expr] = []
         for range_expr in domain.args:
             if not (cpm.is_call_to(range_expr, "named_range") and len(range_expr.args) == 3):
