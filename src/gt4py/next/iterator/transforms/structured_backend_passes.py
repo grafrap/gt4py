@@ -455,22 +455,17 @@ def _build_field_concat_where_from_branches(
         # of the source field's Kolor extent (a previous identity-based fallback
         # read `arg` at output position K=0..source_kolor-1, which OOB'd on vertex
         # fields with Kolor=1 — observed in stencils 01/10 E2C2V).
-        if cond is None and source_kolor is not None and source_kolor > 0 and isinstance(branch_domain, ir.FunCall):
+        if source_kolor is not None and source_kolor > 0 and isinstance(branch_domain, ir.FunCall):
             narrow_trailing_domain = _narrow_domain_kolor(
                 branch_domain, (source_kolor, source_kolor + 1)
             )
             narrow_trailing_expr = _make_lifted_deref_shift(
                 arg, shift_spec, narrow_trailing_domain
             )
-            # Use the FULL outer domain for the fallback (not narrowed to [0, source_kolor)).
-            # `canonicalize_domain_argument` can permute the concat_where branches so the
-            # fallback ends up selected at kolor=source_kolor (e.g., kolor=2 selects the
-            # [0,2) fallback → OOB for edge fields with 3 kolors). Using the full outer domain
-            # ([0,3) for edge) means the fallback is valid at any kolor the consumer reads it.
-            # The λ body returns a constant so `arg` is NEVER-accessed regardless of domain size.
+            fallback_domain = _narrow_domain_kolor(branch_domain, (0, source_kolor))
             fallback_expr = im.as_fieldop(
                 im.lambda_("__cart_trailing_unused")(im.literal("0.0", "float64")),
-                domain,
+                fallback_domain,
             )(copy.deepcopy(arg))
             kolor_axis = ir.AxisLiteral(
                 value="Kolor", kind=common.DimensionKind.HORIZONTAL
@@ -2364,7 +2359,7 @@ class NeighborReductionUnroller(NodeTranslator):
                 if current_kolor is not None:
                     break
 
-        if current_kolor is None and not _e2c2e_on_local_intermediate(node.expr):
+        if current_kolor is None and not _expr_uses_edge_to_edge_connectivity(node.expr):
             new_expr = self._visit_expr_with_kolor_branches(node.expr, new_domain, **kwargs)
         else:
             new_expr = self.visit(
