@@ -300,7 +300,7 @@ def apply_common_transforms(
     assert common.is_offset_provider(offset_provider)
 
     offset_provider_type = common.offset_provider_to_type(offset_provider)
-    print_ir = True
+    print_ir = bool(os.environ.get("GT4PY_PRINT_IR"))
     _print_ir_block("=== FINAL GTIR HANDED TO GTFN BACKEND ===", ir, enabled=print_ir)
 
     symbolic_domain_sizes = _process_symbolic_domains_option(
@@ -534,11 +534,12 @@ def apply_fieldview_transforms(
     # body never references its argument — `infer_program` marks that arg as NEVER, and without
     # `allow_uninferred=True` it would raise ValueError.
     #
-    # `keep_existing_domains=True`: preserves explicit per-kolor as_fieldop domains set by the
-    # structured backend so `infer_program` does not re-widen source ranges past valid field
-    # extents (e.g. Kolor:[2,5) on a 2-kolor cell field). The structural concat_where wrap in
-    # `_build_field_concat_where_from_branches` prevents the compensating transient-narrowing
-    # side-effect that otherwise caused InvalidSDFGEdgeError for stencils 5/6.
+    # `allow_uninferred=True` is required for the literal-0 fallback NEVER-arg.
+    # `keep_existing_domains=True` preserves per-kolor as_fieldop domains to prevent
+    # infer_program from widening Kolor source ranges past valid field extents (e.g.
+    # Kolor:[2,5) on a 2-kolor cell field). Removing it causes Kolor widening for
+    # stencils 04/05/06. The InlineSDFG crash for stencil 10 (Kolor:0:0 transient)
+    # is a separate issue fixed by a different mechanism — see CLAUDE.md EDGE-SHAPE-FIX.
     ir = infer_domain.infer_program(
         ir,
         symbolic_domain_sizes=symbolic_domain_sizes,
