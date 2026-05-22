@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import typing
 
@@ -27,6 +28,34 @@ from gt4py.next.iterator.transforms import constant_folding, trace_shifts
 from gt4py.next.iterator.type_system import inference as itir_type_inference
 from gt4py.next.type_system import type_info, type_specifications as ts
 from gt4py.next.utils import flatten_nested_tuple, tree_map
+
+
+_TRACE_INFER_DOMAIN = os.environ.get("GT4PY_TRACE_INFER_DOMAIN", "0") == "1"
+_TRACE_INFER_DOMAIN_SHRINK = (
+    os.environ.get("GT4PY_TRACE_INFER_DOMAIN_SHRINK", "0") == "1"
+)
+_TRACE_INFER_DOMAIN_KOLOR = os.environ.get("GT4PY_TRACE_INFER_DOMAIN_KOLOR", "0") == "1"
+_INFER_LET_DEPTH = 0
+
+
+def _kolor_range_info(domain) -> str:
+    """Return a short string describing the Kolor range in domain (for debug prints)."""
+    if isinstance(domain, DomainAccessDescriptor):
+        return str(domain)
+    if not isinstance(domain, domain_utils.SymbolicDomain):
+        return f"?({type(domain).__name__})"
+    kolor_dim = next(
+        (d for d in domain.ranges if getattr(d, "value", None) == "Kolor"), None
+    )
+    if kolor_dim is None:
+        return "no_kolor"
+    r = domain.ranges[kolor_dim]
+    lo = getattr(r.start, "value", "?")
+    hi = getattr(r.stop, "value", "?")
+    empty_flag = (
+        " EMPTY" if (isinstance(lo, int) and isinstance(hi, int) and lo >= hi) else ""
+    )
+    return f"Kolor:[{lo},{hi}){empty_flag}"
 
 
 class DomainAccessDescriptor(eve.StrEnum):
@@ -229,8 +258,78 @@ def _infer_as_fieldop(
     if not allow_uninferred and target_domain is DomainAccessDescriptor.NEVER:
         raise ValueError("'target_domain' cannot be 'NEVER' unless `allow_uninferred=True`.")
 
+    before_domain: domain_utils.SymbolicDomain | None = None
+    if _TRACE_INFER_DOMAIN_SHRINK and isinstance(target_domain, domain_utils.SymbolicDomain):
+        before_domain = target_domain
+
+    if _TRACE_INFER_DOMAIN and len(applied_fieldop.fun.args) == 2:
+        domain_arg = applied_fieldop.fun.args[1]
+        domain_arg_kind = "tuple" if cpm.is_call_to(domain_arg, "make_tuple") else "single"
+        print(
+            "[INFER_AS_FIELDOP]"
+            f" keep_existing_domains={keep_existing_domains}"
+            f" domain_arg_kind={domain_arg_kind}"
+            f" target_domain_before={target_domain}"
+        )
+
+    if _TRACE_INFER_DOMAIN_KOLOR:
+        kolor_before = _kolor_range_info(target_domain)
+        if "EMPTY" in kolor_before or "Kolor" in kolor_before:
+            has_explicit = len(applied_fieldop.fun.args) == 2
+            print(
+                f"[INFER_AS_FIELDOP_KOLOR]"
+                f" target_kolor_before={kolor_before}"
+                f" has_explicit_domain={has_explicit}"
+                f" keep_existing={keep_existing_domains}"
+            )
+
     if len(applied_fieldop.fun.args) == 2 and keep_existing_domains:
-        target_domain = SymbolicDomain.from_expr(applied_fieldop.fun.args[1])
+        target_domain = _make_symbolic_domain_tuple(applied_fieldop.fun.args[1])
+
+    if _TRACE_INFER_DOMAIN_KOLOR and "EMPTY" in _kolor_range_info(target_domain):
+        print(
+            f"[INFER_AS_FIELDOP_KOLOR_EMPTY]"
+            f" target_kolor_after={_kolor_range_info(target_domain)}"
+            f" keep_existing={keep_existing_domains}"
+            f" had_explicit_domain={len(applied_fieldop.fun.args) == 2}"
+        )
+
+    if _TRACE_INFER_DOMAIN and len(applied_fieldop.fun.args) == 2:
+        print(f"[INFER_AS_FIELDOP] target_domain_after={target_domain}")
+
+    if (
+        _TRACE_INFER_DOMAIN_SHRINK
+        and before_domain is not None
+        and isinstance(target_domain, domain_utils.SymbolicDomain)
+    ):
+        def _range_key(range_: domain_utils.SymbolicRange) -> tuple[str, str]:
+            return (repr(range_.start), repr(range_.stop))
+
+        dim_diffs: list[str] = []
+        for dim_name in ("IDim", "JDim"):
+            dim = common.Dimension(value=dim_name, kind=common.DimensionKind.HORIZONTAL)
+            before_range = before_domain.ranges.get(dim)
+            after_range = target_domain.ranges.get(dim)
+            if before_range is None or after_range is None:
+                continue
+            before_key = _range_key(before_range)
+            after_key = _range_key(after_range)
+            if before_key != after_key:
+                dim_diffs.append(
+                    f"{dim_name}: {before_key[0]}..{before_key[1]} -> {after_key[0]}..{after_key[1]}"
+                )
+
+        if dim_diffs:
+            domain_arg = (
+                applied_fieldop.fun.args[1]
+                if len(applied_fieldop.fun.args) == 2
+                else None
+            )
+            print(
+                "[INFER_AS_FIELDOP_SHRINK] "
+                + "; ".join(dim_diffs)
+                + f" domain_arg={domain_arg!r}"
+            )
 
     # FIXME[#1582](tehrengruber): Temporary solution for `tuple_get` on scan result. See `test_solve_triag`.
     if isinstance(target_domain, tuple):
@@ -260,7 +359,6 @@ def _infer_as_fieldop(
     inputs_accessed_domains: dict[str, NonTupleDomainAccess] = _extract_accessed_domains(
         stencil, input_ids, target_domain, offset_provider, symbolic_domain_sizes
     )
-
     # Recursively infer domain of inputs and update domain arg of nested `as_fieldop`s
     accessed_domains: AccessedDomains = {}
     transformed_inputs: list[itir.Expr] = []
@@ -283,6 +381,16 @@ def _infer_as_fieldop(
         target_domain_expr = None
     transformed_call = im.as_fieldop(stencil, target_domain_expr)(*transformed_inputs)
 
+    # When keep_existing_domains kept an explicit domain, pre-populate annex.domain
+    # on the new node with that kept domain.  Without this, infer_expr (the outer
+    # wrapper, line ~712) would overwrite annex.domain with the caller's target_domain
+    # (which may be empty, e.g. Kolor:[1,1)) because the freshly-created node has no
+    # pre-existing annex.domain.  DaCe reads annex.domain to size the copy-destination
+    # transient, so a Kolor:[1,1) here produces a zero-sized Kolor transient → crash.
+    if keep_existing_domains and len(applied_fieldop.fun.args) == 2:
+        if isinstance(target_domain, domain_utils.SymbolicDomain):
+            transformed_call.annex.domain = target_domain
+
     accessed_domains_without_tmp = {
         k: v for k, v in accessed_domains.items() if not k.startswith(tmp_uid_gen.prefix)
     }
@@ -295,37 +403,60 @@ def _infer_let(
     input_domain: DomainAccess,
     **kwargs: Unpack[InferenceOptions],
 ) -> tuple[itir.FunCall, AccessedDomains]:
+    global _INFER_LET_DEPTH
     assert cpm.is_let(let_expr)
     assert isinstance(let_expr.fun, itir.Lambda)  # just to make mypy happy
     let_params = {param_sym.id for param_sym in let_expr.fun.params}
 
-    transformed_calls_expr, accessed_domains = infer_expr(let_expr.fun.expr, input_domain, **kwargs)
-
-    accessed_domains_let_args, accessed_domains_outer = _split_dict_by_key(
-        lambda k: k in let_params, accessed_domains
-    )
-
-    transformed_calls_args: list[itir.Expr] = []
-    for param, arg in zip(let_expr.fun.params, let_expr.args, strict=True):
-        transformed_calls_arg, accessed_domains_arg = infer_expr(
-            arg,
-            accessed_domains_let_args.get(
-                param.id,
-                DomainAccessDescriptor.NEVER,
-            ),
-            **kwargs,
+    _INFER_LET_DEPTH += 1
+    if _TRACE_INFER_DOMAIN and _INFER_LET_DEPTH <= 40:
+        print(
+            "[INFER_LET]"
+            f" depth={_INFER_LET_DEPTH}"
+            f" expr_id={id(let_expr)}"
+            f" input_domain={input_domain}"
         )
-        accessed_domains_outer = _merge_domains(accessed_domains_outer, accessed_domains_arg)
-        transformed_calls_args.append(transformed_calls_arg)
 
-    transformed_call = im.let(
-        *(
-            (str(param.id), call)
-            for param, call in zip(let_expr.fun.params, transformed_calls_args, strict=True)
+    try:
+        transformed_calls_expr, accessed_domains = infer_expr(let_expr.fun.expr, input_domain, **kwargs)
+
+        accessed_domains_let_args, accessed_domains_outer = _split_dict_by_key(
+            lambda k: k in let_params, accessed_domains
         )
-    )(transformed_calls_expr)
 
-    return transformed_call, accessed_domains_outer
+        if _TRACE_INFER_DOMAIN_KOLOR and _INFER_LET_DEPTH <= 20:
+            for param in let_expr.fun.params:
+                param_dom = accessed_domains_let_args.get(param.id, DomainAccessDescriptor.NEVER)
+                kolor_info = _kolor_range_info(param_dom)
+                if "EMPTY" in kolor_info or "NEVER" in kolor_info or "Kolor" in kolor_info:
+                    print(
+                        f"[INFER_LET_KOLOR]"
+                        f" depth={_INFER_LET_DEPTH}"
+                        f" param={param.id}"
+                        f" kolor={kolor_info}"
+                        f" full_domain={param_dom}"
+                    )
+
+        transformed_calls_args: list[itir.Expr] = []
+        for param, arg in zip(let_expr.fun.params, let_expr.args, strict=True):
+            transformed_calls_arg, accessed_domains_arg = infer_expr(
+                arg,
+                accessed_domains_let_args.get(param.id, DomainAccessDescriptor.NEVER),
+                **kwargs,
+            )
+            accessed_domains_outer = _merge_domains(accessed_domains_outer, accessed_domains_arg)
+            transformed_calls_args.append(transformed_calls_arg)
+
+        transformed_call = im.let(
+            *(
+                (str(param.id), call)
+                for param, call in zip(let_expr.fun.params, transformed_calls_args, strict=True)
+            )
+        )(transformed_calls_expr)
+
+        return transformed_call, accessed_domains_outer
+    finally:
+        _INFER_LET_DEPTH -= 1
 
 
 def _infer_make_tuple(

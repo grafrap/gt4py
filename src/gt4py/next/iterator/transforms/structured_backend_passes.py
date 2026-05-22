@@ -332,10 +332,12 @@ def _build_field_concat_where_from_branches(
         i_hi = copy.deepcopy(id_range.args[2])
         j_lo = copy.deepcopy(jd_range.args[1])
         j_hi = copy.deepcopy(jd_range.args[2])
-        if target_kolor in {1, 2}:
-            i_hi = _minus_one_offset(i_hi)
-        if target_kolor in {0, 2}:
-            j_hi = _minus_one_offset(j_hi)
+        # No IDim/JDim clipping: for our parallelogram grid all three edge
+        # kolors share the same IDim and JDim upper bounds, so clipping by -1
+        # would make the inner-branch transient one element too small.
+        # DaCe materialises branch transients outside concat_where conditionals
+        # and validates memlet ranges against the full outer map range — a
+        # too-small transient triggers "Memlet subset out-of-bounds".
         new_ranges: list[ir.Expr] = []
         for range_expr in domain.args:
             if not (cpm.is_call_to(range_expr, "named_range") and len(range_expr.args) == 3):

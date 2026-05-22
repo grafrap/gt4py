@@ -44,9 +44,25 @@ class SymbolicRange:
         return SymbolicRange(im.plus(self.start, distance), im.plus(self.stop, distance))
 
     def empty(self) -> bool | None:
-        if isinstance(self.start, itir.Literal) and isinstance(self.stop, itir.Literal):
-            start, stop = int(self.start.value), int(self.stop.value)
-            return start >= stop
+        def _to_int(expr: itir.Expr) -> int | None:
+            # Accept both ir.Literal and ir.OffsetLiteral with integer values.
+            # _range_intersection (via im.maximum / im.minimum + ConstantFolding) produces mixed
+            # types: e.g. start=OffsetLiteral(0) and stop=Literal("0") for a dead Kolor branch.
+            # Without this, empty() returns None for numerically equal mixed-type bounds,
+            # preventing prune_empty_concat_where from eliminating dead branches, and causing
+            # DaCe to allocate zero-sized Kolor transients.
+            if isinstance(expr, itir.Literal):
+                try:
+                    return int(expr.value)
+                except (ValueError, TypeError):
+                    return None
+            if isinstance(expr, itir.OffsetLiteral) and isinstance(expr.value, int):
+                return expr.value
+            return None
+
+        lo, hi = _to_int(self.start), _to_int(self.stop)
+        if lo is not None and hi is not None:
+            return lo >= hi
         elif self.start == self.stop:
             return True
         return None
