@@ -87,7 +87,7 @@ def _write_debug_output(text: str, *, stream=None) -> None:
     if stream is not None:
         print(text, file=stream, end="")
 
-    debug_file = "ir_out.txt"  # os.environ.get("GT4PY_PRINT_IR_FILE")
+    debug_file = os.environ.get("GT4PY_PRINT_IR_FILE", "ir_out.txt")
     if debug_file:
         mode = "a" if _DEBUG_FILE_INITIALIZED else "w"
         with open(debug_file, mode, encoding="utf-8") as output:
@@ -291,8 +291,6 @@ def apply_common_transforms(
     #  to work with / translate domains.
     use_max_domain_range_on_unstructured_shift: Optional[bool] = None,
     cartesian_reduce_axis_ranges: Optional[dict[common.Dimension, tuple[int, int]]] = None,
-    transform_concat_where_to_as_fieldop: bool = True,
-    enable_structured_backend_transforms: bool = False,
 ) -> itir.Program:
     assert isinstance(ir, itir.Program)
     # TODO(tehrengruber): Allow `common.OffsetProviderType`, but domain inference currently
@@ -334,7 +332,7 @@ def apply_common_transforms(
     )  # domain inference does not support dynamic offsets yet
 
     # ir = cart_unroll.CartUnroll.apply(ir, symbolic_domain_sizes=symbolic_domain_sizes)
-    if enable_structured_backend_transforms and os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1":
+    if os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1":
         ir = cart_unroll.CartesianDomainAndTypeRemapper.apply(  # type: ignore[assignment]
             ir,
             symbolic_domain_sizes=cast(dict[str, str | int] | None, symbolic_domain_sizes),
@@ -477,7 +475,8 @@ def apply_fieldview_transforms(
     offset_provider_type = common.offset_provider_to_type(offset_provider)
 
     uids = utils.IDGeneratorPool()
-    _print_ir_block("=== FIELDVIEW IR BEFORE TRANSFORMS ===", ir, enabled=bool(os.environ.get("GT4PY_PRINT_IR")))
+    _print_ir = bool(os.environ.get("GT4PY_PRINT_IR")) or True
+    _print_ir_block("=== FIELDVIEW IR BEFORE TRANSFORMS ===", ir, enabled=_print_ir)
     symbolic_domain_sizes = _process_symbolic_domains_option(
         ir,
         offset_provider,
@@ -485,22 +484,18 @@ def apply_fieldview_transforms(
         use_max_domain_range_on_unstructured_shift,
     )
     _print_ir_block(
-        "=== FIELDVIEW IR AFTER PROCESSING DOMAIN OPTIONS ===", ir,
-        enabled=bool(os.environ.get("GT4PY_PRINT_IR")),
+        "=== FIELDVIEW IR AFTER PROCESSING DOMAIN OPTIONS ===", ir, enabled=_print_ir
     )
-
     ir = inline_fundefs.InlineFundefs().visit(ir)
     ir = inline_fundefs.prune_unreferenced_fundefs(ir)
-    _print_ir_block("=== FIELDVIEW IR AFTER INLINING FUNDEFS ===", ir, enabled=bool(os.environ.get("GT4PY_PRINT_IR")))
-
+    _print_ir_block("=== FIELDVIEW IR AFTER INLINING FUNDEFS ===", ir, enabled=_print_ir)
     # required for dead-code-elimination and `prune_empty_concat_where` pass
     ir = concat_where.expand_tuple_args(ir, offset_provider_type=offset_provider_type)  # type: ignore[assignment]  # always an itir.Program
 
     ir = dead_code_elimination.dead_code_elimination(
         ir, offset_provider_type=offset_provider_type, uids=uids
     )
-    _print_ir_block("=== FIELDVIEW IR AFTER DEAD CODE ELIMINATION ===", ir, enabled=bool(os.environ.get("GT4PY_PRINT_IR")))
-
+    _print_ir_block("=== FIELDVIEW IR AFTER DEAD CODE ELIMINATION ===", ir, enabled=_print_ir)
     ir = inline_dynamic_shifts.InlineDynamicShifts.apply(
         ir, offset_provider_type=offset_provider_type, uids=uids
     )  # domain inference does not support dynamic offsets yet
@@ -514,18 +509,43 @@ def apply_fieldview_transforms(
             symbolic_domain_sizes=cast(dict[str, str | int] | None, symbolic_domain_sizes),
             offset_provider=offset_provider,
         )
+        # ir = infer_domain.infer_program(
+        #     ir,
+        #     symbolic_domain_sizes=symbolic_domain_sizes,
+        #     offset_provider=offset_provider,
+        #     allow_uninferred=True,
+        # )
         ir = cart_unroll.CartesianReductionUnroller.apply(ir)  # type: ignore[assignment]
         ir = NormalizeShifts().visit(ir)
         ir = concat_where.expand_tuple_args(ir, offset_provider_type=offset_provider_type)  # type: ignore[assignment]  # always an itir.Program
         ir = dead_code_elimination.dead_code_elimination(
             ir, offset_provider_type=offset_provider_type, uids=uids
         )
-    _print_ir_block("=== FIELDVIEW IR AFTER CARTESIAN UNROLLING ===", ir, enabled=bool(os.environ.get("GT4PY_PRINT_IR")))
-
+    _print_ir_block("=== FIELDVIEW IR AFTER CARTESIAN UNROLLING ===", ir, enabled=_print_ir)
     ir = infer_domain_ops.InferDomainOps.apply(ir)
-    _print_ir_block("=== FIELDVIEW IR AFTER INFERRING DOMAIN OPS ===", ir, enabled=bool(os.environ.get("GT4PY_PRINT_IR")))
+    _print_ir_block("=== FIELDVIEW IR AFTER INFERRING DOMAIN OPS ===", ir, enabled=_print_ir)
+
+    # Structured-backend narrow pass: propagate per-branch Kolor context into inner
+    # as_fieldop domains BEFORE canonicalize_domain_argument let-lifts them.
+    # Without this, every inner as_fieldop carries wide Kolor:[0,3), and the let-lifted
+    # binding is materialized over [0,3) by DaCe → shift+2 from kolor 1 → kolor 3 OOB.
+    # With keep_existing_domains=False, _infer_as_fieldop replaces the explicit [0,3)
+    # with the narrower per-branch target ([0,1), [1,2), [2,3)) so the let-lifted
+    # expression's transient is sized correctly.
+    if os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1":
+        ir = infer_domain.infer_program(
+            ir,
+            symbolic_domain_sizes=symbolic_domain_sizes,
+            offset_provider=offset_provider,
+            allow_uninferred=True,
+            keep_existing_domains=False,
+        )
+        _print_ir_block(
+            "=== FIELDVIEW IR AFTER PRE-CANONICALIZE INFER DOMAIN ===", ir, enabled=_print_ir
+        )
 
     ir = concat_where.canonicalize_domain_argument(ir)
+    _print_ir_block("=== FIELDVIEW IR AFTER CANONICALIZE DOMAIN ARG ===", ir, enabled=_print_ir)
 
     ir = ConstantFolding.apply(ir)  # type: ignore[assignment]  # always an itir.Program
 
@@ -534,24 +554,26 @@ def apply_fieldview_transforms(
     # body never references its argument — `infer_program` marks that arg as NEVER, and without
     # `allow_uninferred=True` it would raise ValueError.
     #
-    # `allow_uninferred=True` is required for the literal-0 fallback NEVER-arg.
-    # `keep_existing_domains=True` preserves per-kolor as_fieldop domains to prevent
-    # infer_program from widening Kolor source ranges past valid field extents (e.g.
-    # Kolor:[2,5) on a 2-kolor cell field). Removing it causes Kolor widening for
-    # stencils 04/05/06. The InlineSDFG crash for stencil 10 (Kolor:0:0 transient)
-    # is a separate issue fixed by a different mechanism — see CLAUDE.md EDGE-SHAPE-FIX.
+    # `keep_existing_domains=True`: preserves explicit per-kolor as_fieldop domains set by the
+    # structured backend so `infer_program` does not re-widen source ranges past valid field
+    # extents (e.g. Kolor:[2,5) on a 2-kolor cell field). The structural concat_where wrap in
+    # `_build_field_concat_where_from_branches` prevents the compensating transient-narrowing
+    # side-effect that otherwise caused InvalidSDFGEdgeError for stencils 5/6.
+    keep_existing_domains = os.environ.get("GT4PY_KEEP_EXISTING_DOMAINS", "1") == "1"
     ir = infer_domain.infer_program(
         ir,
         symbolic_domain_sizes=symbolic_domain_sizes,
         offset_provider=offset_provider,
         allow_uninferred=True,
-        keep_existing_domains=True,
+        keep_existing_domains=keep_existing_domains,
     )
-    ir = ConstantFolding.apply(ir)  # type: ignore[assignment]  # always an itir.Program
+    _print_ir_block("=== FIELDVIEW IR AFTER INFER DOMAIN ===", ir, enabled=_print_ir)
 
     ir = prune_empty_concat_where.prune_empty_concat_where(ir)
-    _print_ir_block("=== FIELDVIEW IR AFTER PRUNING EMPTY CONCAT WHERE ===", ir, enabled=bool(os.environ.get("GT4PY_PRINT_IR")))
+    _print_ir_block("=== FIELDVIEW IR AFTER PRUNING EMPTY CONCAT WHERE ===", ir, enabled=_print_ir)
 
     ir = remove_broadcast.RemoveBroadcast.apply(ir)
-    _print_ir_block("=== FINAL FIELDVIEW IR ===", ir, enabled=bool(os.environ.get("GT4PY_PRINT_IR")))
+    ir = ConstantFolding.apply(ir)  # type: ignore[assignment]  # always an itir.Program
+
+    _print_ir_block("=== FINAL FIELDVIEW IR ===", ir, enabled=_print_ir)
     return ir
