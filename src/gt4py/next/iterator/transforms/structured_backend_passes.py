@@ -370,6 +370,25 @@ def _build_field_concat_where_from_branches(
             return None, None
         return fallback, fallback + 1
 
+    def _narrow_kolor(d: ir.Expr, kolor: int) -> ir.Expr | None:
+        if d is None or not cpm.is_call_to(d, "cartesian_domain"):
+            return None
+        new_ranges = []
+        for rng in d.args:
+            if (
+                cpm.is_call_to(rng, "named_range")
+                and len(rng.args) == 3
+                and _get_axis_name(rng.args[0]) == "Kolor"
+            ):
+                new_ranges.append(im.named_range(
+                    cast(ir.AxisLiteral | common.Dimension, copy.deepcopy(rng.args[0])),
+                    ir.OffsetLiteral(value=kolor),
+                    ir.OffsetLiteral(value=kolor + 1),
+                ))
+            else:
+                new_ranges.append(copy.deepcopy(rng))
+        return im.call("cartesian_domain")(*new_ranges)
+
     if current_kolor is not None:
         inferred = inferred_kolor_start
         fallback_spec = branches[-1][1] if branches else None
@@ -399,6 +418,10 @@ def _build_field_concat_where_from_branches(
         edge_domain = _edge_shape_domain(source_kolor, shift_spec)
         if edge_domain is not None:
             branch_domain = edge_domain
+    if source_kolor is not None:
+        narrowed = _narrow_kolor(branch_domain, source_kolor)
+        if narrowed is not None:
+            branch_domain = narrowed
     expr = _make_lifted_deref_shift(arg, shift_spec, branch_domain)
     if len(branches) == 1:
         return expr
@@ -1095,14 +1118,14 @@ class SetAtRemapper(NodeTranslator):
             if (
                 isinstance(stmt, ir.SetAt)
                 and _detect_setat_entity(stmt.domain) == "Edge"
-                and not _expr_uses_edge_to_edge_connectivity(stmt.expr)
+                and not _e2c2e_on_local_intermediate(stmt.expr)
                 and self._mapping_enables_kolor_split(symbolic_domain_sizes)
             ):
                 for k in range(3):
                     new_body.append(self.visit(stmt, current_kolor=k, **child_kwargs))
             else:
                 new_body.append(self.visit(stmt, **child_kwargs))
-
+            print(f"[structured_backend] visited statement: {new_body[-1]} and wrote Kolor: {child_kwargs.get('current_kolor')}")
         return ir.Program(
             id=node.id,
             function_definitions=node.function_definitions,
@@ -2064,12 +2087,13 @@ class NeighborReductionUnroller(NodeTranslator):
                             _, is_ene = _conn_name_and_is_edge_to_non_edge(
                                 (ir.OffsetLiteral(value=conn), ir.OffsetLiteral(value=0))
                             )
+                            print(f"Peeling kolor branches for conn '{conn}' at idx {idx} (is_ene={is_ene}, current_kolor={current_kolor})")
                             return _build_field_concat_where_from_branches(
                                 field_expr,
                                 cast(tuple, entry["branches"]),
                                 domain,
                                 apply_edge_shape_bounds=_needs_edge_shape_bounds(conn),
-                                current_kolor=current_kolor if is_ene else None,
+                                current_kolor=current_kolor if (is_ene or current_kolor is not None) else None,
                             )
 
                 if isinstance(stencil.expr, ir.FunCall) and cpm.is_call_to(stencil.expr.fun, "map_"):
@@ -2360,7 +2384,7 @@ class NeighborReductionUnroller(NodeTranslator):
                             cast(tuple, entry["branches"]),
                             current_domain,
                             apply_edge_shape_bounds=_needs_edge_shape_bounds(conn_name or None),
-                            current_kolor=current_kolor if is_ene else None,
+                            current_kolor=current_kolor if (is_ene or current_kolor is not None) else None,
                         )
                     elif entry["kind"] == "shift":
                         return _make_lifted_deref_shift(
@@ -2401,7 +2425,7 @@ class NeighborReductionUnroller(NodeTranslator):
                         return _build_field_concat_where_from_branches(
                             arg, entry["branches"], current_domain,
                             apply_edge_shape_bounds=_needs_edge_shape_bounds(conn_name or None),
-                            current_kolor=current_kolor if is_ene else None,
+                            current_kolor=current_kolor if (is_ene or current_kolor is not None) else None,
                         )
                     return _build_concat_where_from_branches(arg, entry["branches"])
 

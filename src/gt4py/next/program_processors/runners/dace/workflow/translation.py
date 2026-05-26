@@ -560,6 +560,10 @@ class DaCeTranslator(
                         unit_strides_kind=common.DimensionKind.VERTICAL,
                         validate=False,
                     )
+                    if on_gpu:
+                        gtx_transformations.gt_gpu_transformation(
+                            sdfg, try_removing_trivial_maps=True
+                        )
             else:
                 gtx_transformations.gt_auto_optimize(
                     sdfg,
