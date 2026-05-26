@@ -61,6 +61,12 @@ class SymbolicRange:
             return None
 
         lo, hi = _to_int(self.start), _to_int(self.stop)
+        if lo is not None and lo < 0:
+            # Negative-start is structurally invalid in the 0-indexed structured mesh
+            # (Kolor, IDim, JDim, K are all ≥ 0). A concrete negative start means this
+            # range has no valid elements → treat as empty so prune_empty_concat_where
+            # can remove the dead branch and prevent DaCe OOB transient allocations.
+            return True
         if lo is not None and hi is not None:
             return lo >= hi
         elif self.start == self.stop:

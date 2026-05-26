@@ -286,6 +286,26 @@ def _build_field_concat_where_from_branches(
                 return lo.value, hi.value
         return None
 
+    def _narrow_domain_kolor(domain_expr: ir.Expr, kolor_interval: tuple[int, int]) -> ir.Expr:
+        if not cpm.is_call_to(domain_expr, "cartesian_domain"):
+            return domain_expr
+        lo, hi = kolor_interval
+        new_args: list[ir.Expr] = []
+        for range_expr in domain_expr.args:
+            if not (cpm.is_call_to(range_expr, "named_range") and len(range_expr.args) == 3):
+                new_args.append(copy.deepcopy(range_expr))
+                continue
+            axis = range_expr.args[0]
+            if _get_axis_name(axis) == "Kolor":
+                new_args.append(im.named_range(
+                    cast(ir.AxisLiteral | common.Dimension, copy.deepcopy(axis)),
+                    ir.OffsetLiteral(value=lo),
+                    ir.OffsetLiteral(value=hi),
+                ))
+            else:
+                new_args.append(copy.deepcopy(range_expr))
+        return im.call("cartesian_domain")(*new_args)
+
     def _kolor_shift(shift_spec: tuple[ir.OffsetLiteral, ...]) -> int:
         kolor_axis_tags = {common.dimension_to_implicit_offset("Kolor"), "Kolor"}
         for idx in range(0, len(shift_spec), 2):
@@ -300,10 +320,48 @@ def _build_field_concat_where_from_branches(
                 return int(off_lit.value)
         return 0
 
+    def _idim_shift(shift_spec: tuple[ir.OffsetLiteral, ...]) -> int:
+        idim_axis_tags = {common.dimension_to_implicit_offset("IDim"), "IDim"}
+        for idx in range(0, len(shift_spec), 2):
+            if idx + 1 >= len(shift_spec):
+                break
+            axis_lit = shift_spec[idx]
+            off_lit = shift_spec[idx + 1]
+            if (
+                isinstance(axis_lit, ir.OffsetLiteral) and axis_lit.value in idim_axis_tags
+                and isinstance(off_lit, ir.OffsetLiteral) and isinstance(off_lit.value, int)
+            ):
+                return int(off_lit.value)
+        return 0
+
+    def _jdim_shift(shift_spec: tuple[ir.OffsetLiteral, ...]) -> int:
+        jdim_axis_tags = {common.dimension_to_implicit_offset("JDim"), "JDim"}
+        for idx in range(0, len(shift_spec), 2):
+            if idx + 1 >= len(shift_spec):
+                break
+            axis_lit = shift_spec[idx]
+            off_lit = shift_spec[idx + 1]
+            if (
+                isinstance(axis_lit, ir.OffsetLiteral) and axis_lit.value in jdim_axis_tags
+                and isinstance(off_lit, ir.OffsetLiteral) and isinstance(off_lit.value, int)
+            ):
+                return int(off_lit.value)
+        return 0
+
     def _minus_one_offset(expr: ir.Expr) -> ir.Expr:
         if isinstance(expr, ir.OffsetLiteral) and isinstance(expr.value, int):
             return ir.OffsetLiteral(value=expr.value - 1)
         return im.minus(copy.deepcopy(expr), ir.OffsetLiteral(value=1))
+
+    def _apply_offset(expr: ir.Expr, n: int) -> ir.Expr:
+        """Apply integer offset n to expr; n=0 returns a deepcopy unchanged."""
+        if isinstance(expr, ir.OffsetLiteral) and isinstance(expr.value, int):
+            return ir.OffsetLiteral(value=expr.value + n)
+        if n == 0:
+            return copy.deepcopy(expr)
+        if n < 0:
+            return im.minus(copy.deepcopy(expr), ir.OffsetLiteral(value=-n))
+        return im.plus(copy.deepcopy(expr), ir.OffsetLiteral(value=n))
 
     def _edge_shape_domain(
         source_kolor: int,
@@ -332,12 +390,10 @@ def _build_field_concat_where_from_branches(
         i_hi = copy.deepcopy(id_range.args[2])
         j_lo = copy.deepcopy(jd_range.args[1])
         j_hi = copy.deepcopy(jd_range.args[2])
-        # No IDim/JDim clipping: for our parallelogram grid all three edge
-        # kolors share the same IDim and JDim upper bounds, so clipping by -1
-        # would make the inner-branch transient one element too small.
-        # DaCe materialises branch transients outside concat_where conditionals
-        # and validates memlet ranges against the full outer map range — a
-        # too-small transient triggers "Memlet subset out-of-bounds".
+        # No IDim/JDim clipping needed: the structured backend packs the FULL edge/vertex
+        # field (not just the inner domain), so reads at any position within the allocated
+        # array are valid. Previous clip attempts made branch transients too small while the
+        # outer consumer still iterated over the full outer domain, causing SDFG OOB errors.
         new_ranges: list[ir.Expr] = []
         for range_expr in domain.args:
             if not (cpm.is_call_to(range_expr, "named_range") and len(range_expr.args) == 3):
@@ -401,9 +457,70 @@ def _build_field_concat_where_from_branches(
         edge_domain = _edge_shape_domain(source_kolor, shift_spec)
         if edge_domain is not None:
             branch_domain = edge_domain
+    # Narrow the Kolor range of `branch_domain` to match the concat_where `cond`.
+    # Otherwise the as_fieldop stores the full outer Kolor:[0,3) and `infer_program`
+    # back-propagates `[0,3)+shift` to the source — widening past valid field extents
+    # and producing OOB reads in DaCe (SIGSEGV on CPU, ILLEGAL_ADDRESS on GPU).
+    kolor_interval = _extract_kolor_interval(cond)
+    if kolor_interval is not None:
+        branch_domain = _narrow_domain_kolor(branch_domain, kolor_interval)
     expr = _make_lifted_deref_shift(arg, shift_spec, branch_domain)
+
     if len(branches) == 1:
+        # Trailing-else branch (cond=None in `map_dict.py`). A bare wide-domain
+        # `as_fieldop` here causes GPU OOB at 512×512 — e.g. E2C[1] trailing with
+        # shift `_OffKolor:-2` reading cell field at Kolor=output-2 OOBs at output
+        # K=0,1 (source K=-2,-1) on cell (Kolor=2). At 26×26 the OOB reads land in
+        # adjacent valid memory; at 512×512 they land outside any allocation and
+        # CUDA traps it.
+        #
+        # Naïvely narrowing this branch's as_fieldop domain to Kolor:[k,k+1) breaks
+        # CPU numerical verification (`+inf location mismatch`): the let-lifted
+        # `concat_where` structure created by `canonicalize_domain_argument` reads
+        # the resulting 1-slot temp at *other* kolors that are downstream-masked
+        # but still materialized by DaCe — those reads are OOB on the 1-slot temp.
+        #
+        # Right fix: produce a wider field with valid values at ALL kolors so the
+        # consumer's reads are always in-bounds. Wrap as:
+        #
+        #   concat_where(Kolor:[source_kolor, source_kolor+1),
+        #                narrow_trailing_shift,         # the actual trailing computation
+        #                literal_zero_fallback)         # NEVER-arg → no field reads
+        #
+        # The fallback is a constant `0.0` field-op whose lambda doesn't reference its
+        # input, so `infer_domain` marks `arg` as NEVER and DaCe's
+        # `_parse_fieldop_arg` strips the unused arg. This avoids OOB reads regardless
+        # of the source field's Kolor extent (a previous identity-based fallback
+        # read `arg` at output position K=0..source_kolor-1, which OOB'd on vertex
+        # fields with Kolor=1 — observed in stencils 01/10 E2C2V).
+        if source_kolor is not None and source_kolor > 0 and isinstance(branch_domain, ir.FunCall):
+            narrow_trailing_domain = _narrow_domain_kolor(
+                branch_domain, (source_kolor, source_kolor + 1)
+            )
+            narrow_trailing_expr = _make_lifted_deref_shift(
+                arg, shift_spec, narrow_trailing_domain
+            )
+            # Use the FULL outer domain (not narrowed to [0, source_kolor)) so that
+            # `canonicalize_domain_argument` can access the fallback at any Kolor position.
+            # The lambda body is a constant 0.0 (NEVER-arg), so `arg` is never read regardless
+            # of domain size — the full domain just ensures no OOB on the transient itself.
+            fallback_expr = im.as_fieldop(
+                im.lambda_("__cart_trailing_unused")(im.literal("0.0", "float64")),
+                domain,
+            )(copy.deepcopy(arg))
+            kolor_axis = ir.AxisLiteral(
+                value="Kolor", kind=common.DimensionKind.HORIZONTAL
+            )
+            narrow_cond = im.call("cartesian_domain")(
+                im.named_range(
+                    kolor_axis,
+                    ir.OffsetLiteral(value=source_kolor),
+                    ir.OffsetLiteral(value=source_kolor + 1),
+                )
+            )
+            return im.concat_where(narrow_cond, narrow_trailing_expr, fallback_expr)
         return expr
+
     return im.concat_where(
         cond,
         expr,
@@ -464,15 +581,25 @@ def _named_range_args(nr: ir.Expr) -> tuple[ir.Expr, ir.Expr, ir.Expr] | None:
 
 
 def _conn_name_and_is_edge_to_non_edge(key: tuple) -> tuple[str, bool]:
-    """Extract connectivity name and determine if it is edge→non-edge.
+    """Extract connectivity name and determine if it is edge-source.
 
-    Edge→non-edge connectivities (E2C, E2V, …) can have their per-kolor branch
-    resolved directly when current_kolor is known.  Edge→edge (E2C2EO, E2C2E)
-    always crosses kolors so current_kolor must be suppressed.
+    All edge-source connectivities (E2C, E2V, E2C2EO, E2C2E, …) have their
+    map_dict branches keyed by the OUTPUT EDGE kolor.  Passing current_kolor
+    directly selects the correct single shift, avoiding a full 3-branch
+    concat_where inside per-kolor SetAts.
+
+    Non-edge-source connectivities (C2E, V2E, …) have branches keyed by the
+    source entity's kolor (cell or vertex), which differs from the edge
+    current_kolor — so current_kolor must be suppressed for those.
+
+    Note: E2C2EO/E2C2E branches are keyed by OUTPUT edge kolor (verified from
+    map_dict.py: Kolor:[0,1)→shift Kolor:+2, Kolor:[1,2)→shift Kolor:-1, etc.),
+    so passing current_kolor is correct despite the fact that the READ position
+    is at a different kolor than the output.
     """
     conn_name = key[0].value if isinstance(key[0], ir.OffsetLiteral) and isinstance(key[0].value, str) else ""
     normalized = conn_name.rstrip("ₒ")
-    is_edge_to_non_edge = normalized.startswith("E") and normalized not in _EDGE_TO_EDGE_CONNECTIVITIES
+    is_edge_to_non_edge = normalized.startswith("E")
     return conn_name, is_edge_to_non_edge
 
 
@@ -1209,7 +1336,7 @@ class SetAtRemapper(NodeTranslator):
             _horizontal_start_mapping_enabled(symbolic_domain_sizes)
             and mapping_rows is not None
             and horizontal_start is not None
-            and horizontal_start > 0
+            and horizontal_start >= 0
             and max_i_int is not None and max_j_int is not None
         ):
             by_kolor = _derive_entity_start_bounds_from_mapping(
@@ -1253,10 +1380,8 @@ class SetAtRemapper(NodeTranslator):
 
         Returns a concat_where expression that restricts each kolor to its valid
         per-kolor (I, J) extent derived from the edge_to_ijk mapping.  Returns
-        None when mapping data is absent (horizontal_start == 0 or no edge_to_ijk)
-        or when the domain is not a 3-kolor edge domain — in both cases the caller
-        leaves expr unchanged.  In the main pipeline mapping is always present, so
-        this function always produces a concat_where for genuine edge stencils.
+        None when mapping data is absent or when the domain is not a 3-kolor edge
+        domain — in both cases the caller leaves expr unchanged.
         """
         cart_domain = None
         for dom in _iter_domain_nodes(domain_expr):
@@ -1312,7 +1437,7 @@ class SetAtRemapper(NodeTranslator):
             _horizontal_start_mapping_enabled(symbolic_domain_sizes)
             and mapping_rows is not None
             and horizontal_start is not None
-            and horizontal_start > 0
+            and horizontal_start >= 0
             and max_i_int is not None and max_j_int is not None
         ):
             by_kolor = _derive_entity_start_bounds_from_mapping(
@@ -2283,7 +2408,7 @@ class NeighborReductionUnroller(NodeTranslator):
                 if current_kolor is not None:
                     break
 
-        if current_kolor is None and not _e2c2e_on_local_intermediate(node.expr):
+        if current_kolor is None and not _expr_uses_edge_to_edge_connectivity(node.expr):
             new_expr = self._visit_expr_with_kolor_branches(node.expr, new_domain, **kwargs)
         else:
             new_expr = self.visit(

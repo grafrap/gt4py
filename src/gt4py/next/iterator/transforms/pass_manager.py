@@ -509,6 +509,12 @@ def apply_fieldview_transforms(
             symbolic_domain_sizes=cast(dict[str, str | int] | None, symbolic_domain_sizes),
             offset_provider=offset_provider,
         )
+        # ir = infer_domain.infer_program(
+        #     ir,
+        #     symbolic_domain_sizes=symbolic_domain_sizes,
+        #     offset_provider=offset_provider,
+        #     allow_uninferred=True,
+        # )
         ir = cart_unroll.CartesianReductionUnroller.apply(ir)  # type: ignore[assignment]
         ir = NormalizeShifts().visit(ir)
         ir = concat_where.expand_tuple_args(ir, offset_provider_type=offset_provider_type)  # type: ignore[assignment]  # always an itir.Program
@@ -518,6 +524,27 @@ def apply_fieldview_transforms(
     _print_ir_block("=== FIELDVIEW IR AFTER CARTESIAN UNROLLING ===", ir, enabled=_print_ir)
     ir = infer_domain_ops.InferDomainOps.apply(ir)
     _print_ir_block("=== FIELDVIEW IR AFTER INFERRING DOMAIN OPS ===", ir, enabled=_print_ir)
+
+    # Pre-canonicalize narrowing pass: propagate per-branch Kolor context into inner
+    # as_fieldop domains BEFORE canonicalize_domain_argument let-lifts them.
+    # Without this, every inner as_fieldop carries wide Kolor:[0,3), and the let-lifted
+    # binding is materialized over [0,3) by DaCe → shift+2 from kolor 1 → kolor 3 OOB.
+    # With keep_existing_domains=False, _infer_as_fieldop replaces the explicit [0,3)
+    # with the narrower per-branch target ([0,1), [1,2), [2,3)) so the let-lifted
+    # expression's transient is sized correctly.
+    # allow_uninferred=True: the literal-0 fallback as_fieldop has a NEVER-arg.
+    if os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1":
+        ir = infer_domain.infer_program(
+            ir,
+            symbolic_domain_sizes=symbolic_domain_sizes,
+            offset_provider=offset_provider,
+            allow_uninferred=True,
+            keep_existing_domains=False,
+        )
+        _print_ir_block(
+            "=== FIELDVIEW IR AFTER PRE-CANONICALIZE INFER DOMAIN ===", ir, enabled=_print_ir
+        )
+
     ir = concat_where.canonicalize_domain_argument(ir)
     _print_ir_block("=== FIELDVIEW IR AFTER CANONICALIZE DOMAIN ARG ===", ir, enabled=_print_ir)
 

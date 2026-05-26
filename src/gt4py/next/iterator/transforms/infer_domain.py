@@ -284,6 +284,10 @@ def _infer_as_fieldop(
             )
 
     if len(applied_fieldop.fun.args) == 2 and keep_existing_domains:
+        # Use the explicit domain from fun.args[1] for back-propagation. After Fix 2
+        # (_build_field_concat_where_from_branches narrows ALL branches to Kolor:[k,k+1)),
+        # the explicit domain is already the correct narrow per-kolor domain. Back-propagating
+        # from Kolor:[k,k+1) through any shift gives a valid 1-kolor source domain.
         target_domain = _make_symbolic_domain_tuple(applied_fieldop.fun.args[1])
 
     if _TRACE_INFER_DOMAIN_KOLOR and "EMPTY" in _kolor_range_info(target_domain):
@@ -381,15 +385,36 @@ def _infer_as_fieldop(
         target_domain_expr = None
     transformed_call = im.as_fieldop(stencil, target_domain_expr)(*transformed_inputs)
 
-    # When keep_existing_domains kept an explicit domain, pre-populate annex.domain
-    # on the new node with that kept domain.  Without this, infer_expr (the outer
-    # wrapper, line ~712) would overwrite annex.domain with the caller's target_domain
-    # (which may be empty, e.g. Kolor:[1,1)) because the freshly-created node has no
-    # pre-existing annex.domain.  DaCe reads annex.domain to size the copy-destination
-    # transient, so a Kolor:[1,1) here produces a zero-sized Kolor transient → crash.
+    # Pre-populate annex.domain on the fresh node with the kept explicit domain.
+    # Without this, infer_expr (outer wrapper, line ~712) would overwrite annex.domain with
+    # the caller's target_domain (which may be empty, e.g. Kolor:[1,1)) because the freshly-
+    # created transformed_call node has no pre-existing annex.domain.
+    # DaCe reads annex.domain to size the copy-destination transient.
     if keep_existing_domains and len(applied_fieldop.fun.args) == 2:
         if isinstance(target_domain, domain_utils.SymbolicDomain):
             transformed_call.annex.domain = target_domain
+
+    # Debug: print when as_fieldop gets a negative IDim start assigned.
+    # This reveals which node produces gtir_tmp_N[-1:..., ...] in DaCe.
+    if _TRACE_INFER_DOMAIN_KOLOR and isinstance(target_domain, domain_utils.SymbolicDomain):
+        idim_dim = next(
+            (d for d in target_domain.ranges
+             if getattr(d, "value", None) == "IDim"), None
+        )
+        if idim_dim is not None:
+            r = target_domain.ranges[idim_dim]
+            lo = getattr(r.start, "value", None)
+            if isinstance(lo, int) and lo < 0:
+                import traceback as _tb
+                print(
+                    f"[INFER_AS_FIELDOP_NEG_IDIM]"
+                    f" IDim_start={lo}"
+                    f" IDim_stop={getattr(r.stop,'value','?')}"
+                    f" keep_existing={keep_existing_domains}"
+                    f" has_explicit_domain={len(applied_fieldop.fun.args)==2}"
+                    f" stencil={stencil}"
+                )
+                _tb.print_stack(limit=8)
 
     accessed_domains_without_tmp = {
         k: v for k, v in accessed_domains.items() if not k.startswith(tmp_uid_gen.prefix)
@@ -532,8 +557,57 @@ def _infer_concat_where(
     infered_args_expr = []
     actual_domains: AccessedDomains = {}
     cond, true_field, false_field = expr.args
-    symbolic_cond = domain_utils.SymbolicDomain.from_expr(cond)
-    cond_complement = domain_utils.domain_complement(symbolic_cond)
+    # _build_edge_validity_masked_expr produces and_(cartesian_domain(Kolor), cartesian_domain(IDim), cartesian_domain(JDim)).
+    # SymbolicDomain.from_expr only handles a single cartesian_domain, so merge the sub-domains.
+    if cpm.is_call_to(cond, "and_"):
+        merged_ranges: dict[common.Dimension, domain_utils.SymbolicRange] = {}
+        grid_type = None
+        # Flatten nested and_: structured backend generates and_(A, and_(B, C)).
+        stack = list(cond.args)
+        while stack:
+            sub_cond = stack.pop()
+            if cpm.is_call_to(sub_cond, "and_"):
+                stack.extend(sub_cond.args)
+            else:
+                sub_domain = domain_utils.SymbolicDomain.from_expr(sub_cond)
+                merged_ranges.update(sub_domain.ranges)
+                grid_type = sub_domain.grid_type
+        symbolic_cond = domain_utils.SymbolicDomain(grid_type, merged_ranges)
+    else:
+        symbolic_cond = domain_utils.SymbolicDomain.from_expr(cond)
+    # domain_complement requires half-infinite ranges and has an assert that fires
+    # (with PYTHONOPTIMIZE=0) for finite ranges from the structured backend's inner
+    # concat_where. For finite conditions, use the upper complement [cond.stop, +∞)
+    # instead: for cond=Kolor:[k,k+1), the FALSE branch region is Kolor:[k+1,+∞),
+    # and intersection with any outer [lo,hi) gives the correct [k+1,hi).
+    if domain_utils.is_finite(symbolic_cond):
+        kolor_dim = next(
+            (d for d in symbolic_cond.ranges if getattr(d, "value", None) == "Kolor"), None
+        )
+        if kolor_dim is not None and len(symbolic_cond.ranges) > 1:
+            # Multi-dim AND condition (e.g. from _build_edge_validity_masked_expr:
+            # and_(Kolor:[k,k+1), and_(IDim:[ilo,ihi), JDim:[jlo,jhi)))).
+            # IDim/JDim sub-conditions restrict the TRUE branch within this kolor only —
+            # they do NOT split the outer domain along those dimensions.  The false branch
+            # must advance ONLY the Kolor dimension; IDim/JDim are inherited from the
+            # outer target domain unchanged.  If we took the upper complement of IDim
+            # (IDim:[ihi,+inf)) it would intersect with outer IDim:[ilo,ihi) to produce
+            # IDim:[ihi,ihi) = EMPTY, cascading empty ranges through every nested branch.
+            kolor_range = symbolic_cond.ranges[kolor_dim]
+            cond_complement = domain_utils.SymbolicDomain(
+                symbolic_cond.grid_type,
+                {kolor_dim: domain_utils.SymbolicRange(kolor_range.stop, itir.InfinityLiteral.POSITIVE)},
+            )
+        else:
+            cond_complement = domain_utils.SymbolicDomain(
+                symbolic_cond.grid_type,
+                {
+                    dim: domain_utils.SymbolicRange(r.stop, itir.InfinityLiteral.POSITIVE)
+                    for dim, r in symbolic_cond.ranges.items()
+                },
+            )
+    else:
+        cond_complement = domain_utils.domain_complement(symbolic_cond)
 
     def _remap_legacy_horizontal_domain(
         symbolic_domain: domain_utils.SymbolicDomain,
@@ -721,6 +795,25 @@ def infer_expr(
     )
     if not keep_existing_domains or not hasattr(expr.annex, "domain"):
         expr.annex.domain = domain
+
+    # Debug: trace when annex.domain is set to a domain with negative IDim start.
+    if _TRACE_INFER_DOMAIN_KOLOR and isinstance(domain, domain_utils.SymbolicDomain):
+        idim_dim = next(
+            (d for d in domain.ranges if getattr(d, "value", None) == "IDim"), None
+        )
+        if idim_dim is not None:
+            r = domain.ranges[idim_dim]
+            lo = getattr(r.start, "value", None)
+            if isinstance(lo, int) and lo < 0:
+                import traceback as _tb
+                print(
+                    f"[INFER_EXPR_ANNEX_NEG_IDIM]"
+                    f" IDim_start={lo}"
+                    f" IDim_stop={getattr(r.stop,'value','?')}"
+                    f" expr_type={type(expr).__name__}"
+                    f" annex_domain_was_set={not keep_existing_domains or not hasattr(expr.annex,'domain')}"
+                )
+                _tb.print_stack(limit=8)
 
     return expr, accessed_domains
 
