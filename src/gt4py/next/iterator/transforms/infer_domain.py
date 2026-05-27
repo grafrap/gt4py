@@ -401,7 +401,28 @@ def _infer_concat_where(
     infered_args_expr = []
     actual_domains: AccessedDomains = {}
     cond, true_field, false_field = expr.args
-    symbolic_cond = domain_utils.SymbolicDomain.from_expr(cond)
+    if cpm.is_call_to(cond, "and_"):
+        # _build_edge_validity_masked_expr generates and_(Kolor_domain, IDim_domain, JDim_domain).
+        # Only extract the Kolor sub-condition: using IDim/JDim upper bounds for the complement
+        # produces IDim:[ihi,+inf) ∩ IDim:[ilo,ihi) = empty, pruning the FALSE branch → CUDA OOB.
+        kolor_sub = None
+        for sub_cond in cond.args:
+            if not cpm.is_call_to(sub_cond, "cartesian_domain"):
+                continue
+            for rng in sub_cond.args:
+                if (cpm.is_call_to(rng, "named_range") and len(rng.args) == 3
+                        and _get_axis_name(rng.args[0]) == "Kolor"):
+                    kolor_sub = sub_cond
+                    break
+            if kolor_sub is not None:
+                break
+        symbolic_cond = (
+            domain_utils.SymbolicDomain.from_expr(kolor_sub)
+            if kolor_sub is not None
+            else domain_utils.SymbolicDomain.from_expr(cond.args[0])
+        )
+    else:
+        symbolic_cond = domain_utils.SymbolicDomain.from_expr(cond)
     cond_complement = domain_utils.domain_complement(symbolic_cond)
 
     def _remap_legacy_horizontal_domain(

@@ -1118,7 +1118,7 @@ class SetAtRemapper(NodeTranslator):
             if (
                 isinstance(stmt, ir.SetAt)
                 and _detect_setat_entity(stmt.domain) == "Edge"
-                and not _e2c2e_on_local_intermediate(stmt.expr)
+                and not _expr_uses_edge_to_edge_connectivity(stmt.expr)
                 and self._mapping_enables_kolor_split(symbolic_domain_sizes)
             ):
                 for k in range(3):
