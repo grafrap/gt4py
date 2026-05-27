@@ -966,8 +966,6 @@ class StructuredTypeRemapper(NodeTranslator):
             return False
         if not StructuredTypeRemapper._program_uses_horizontal_unstructured_axis(node):
             return False
-        if os.environ.get("GT4PY_CART_DEBUG", "0") == "1":
-            print(f"[structured_backend] {node.id}: proceeding with structured remap")
 
         program_param_ids = {str(param.id) for param in node.params}
 
@@ -1125,7 +1123,6 @@ class SetAtRemapper(NodeTranslator):
                     new_body.append(self.visit(stmt, current_kolor=k, **child_kwargs))
             else:
                 new_body.append(self.visit(stmt, **child_kwargs))
-            print(f"[structured_backend] visited statement: {new_body[-1]} and wrote Kolor: {child_kwargs.get('current_kolor')}")
         return ir.Program(
             id=node.id,
             function_definitions=node.function_definitions,
@@ -2087,7 +2084,6 @@ class NeighborReductionUnroller(NodeTranslator):
                             _, is_ene = _conn_name_and_is_edge_to_non_edge(
                                 (ir.OffsetLiteral(value=conn), ir.OffsetLiteral(value=0))
                             )
-                            print(f"Peeling kolor branches for conn '{conn}' at idx {idx} (is_ene={is_ene}, current_kolor={current_kolor})")
                             return _build_field_concat_where_from_branches(
                                 field_expr,
                                 cast(tuple, entry["branches"]),
