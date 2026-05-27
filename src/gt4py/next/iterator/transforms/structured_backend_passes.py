@@ -2301,7 +2301,7 @@ class NeighborReductionUnroller(NodeTranslator):
                 if current_kolor is not None:
                     break
 
-        if current_kolor is None and not _e2c2e_on_local_intermediate(node.expr):
+        if current_kolor is None and not _expr_uses_edge_to_edge_connectivity(node.expr):
             new_expr = self._visit_expr_with_kolor_branches(node.expr, new_domain, **kwargs)
         else:
             new_expr = self.visit(
