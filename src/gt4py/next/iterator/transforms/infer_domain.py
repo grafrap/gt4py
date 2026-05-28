@@ -403,27 +403,40 @@ def _infer_concat_where(
     cond, true_field, false_field = expr.args
     if cpm.is_call_to(cond, "and_"):
         # _build_edge_validity_masked_expr generates and_(Kolor_domain, IDim_domain, JDim_domain).
-        # Only extract the Kolor sub-condition: using IDim/JDim upper bounds for the complement
-        # produces IDim:[ihi,+inf) ∩ IDim:[ilo,ihi) = empty, pruning the FALSE branch → CUDA OOB.
-        kolor_sub = None
-        for sub_cond in cond.args:
-            if not cpm.is_call_to(sub_cond, "cartesian_domain"):
-                continue
-            for rng in sub_cond.args:
-                if (cpm.is_call_to(rng, "named_range") and len(rng.args) == 3
-                        and _get_axis_name(rng.args[0]) == "Kolor"):
-                    kolor_sub = sub_cond
-                    break
-            if kolor_sub is not None:
-                break
-        symbolic_cond = (
-            domain_utils.SymbolicDomain.from_expr(kolor_sub)
-            if kolor_sub is not None
-            else domain_utils.SymbolicDomain.from_expr(cond.args[0])
-        )
+        # TRUE branch uses the FULL merged domain so IDim/JDim are restricted to per-kolor valid extent
+        # (prevents E2C OOB on large grids and incorrect cell-field kolor count inference).
+        # FALSE branch complement uses Kolor-only: full complement's IDim:[ihi,+∞) intersects empty
+        # with outer IDim:[ilo,ihi), pruning the FALSE branch → wrong results.
+        flat_cart_doms: list[domain_utils.SymbolicDomain] = []
+        stack = list(cond.args)
+        while stack:
+            sub = stack.pop()
+            if cpm.is_call_to(sub, "and_"):
+                stack.extend(sub.args)
+            elif cpm.is_call_to(sub, "cartesian_domain"):
+                flat_cart_doms.append(domain_utils.SymbolicDomain.from_expr(sub))
+        if flat_cart_doms:
+            grid_type = flat_cart_doms[0].grid_type
+            merged_ranges: dict = {}
+            for sub_dom in flat_cart_doms:
+                merged_ranges.update(sub_dom.ranges)
+            symbolic_cond = domain_utils.SymbolicDomain(grid_type=grid_type, ranges=merged_ranges)
+            kolor_dim = next(
+                (dim for dom in flat_cart_doms for dim in dom.ranges if dim.value == "Kolor"),
+                None,
+            )
+            if kolor_dim is not None:
+                cond_complement = domain_utils.domain_complement(
+                    domain_utils.SymbolicDomain(grid_type=grid_type, ranges={kolor_dim: merged_ranges[kolor_dim]})
+                )
+            else:
+                cond_complement = domain_utils.domain_complement(symbolic_cond)
+        else:
+            symbolic_cond = domain_utils.SymbolicDomain.from_expr(cond.args[0])
+            cond_complement = domain_utils.domain_complement(symbolic_cond)
     else:
         symbolic_cond = domain_utils.SymbolicDomain.from_expr(cond)
-    cond_complement = domain_utils.domain_complement(symbolic_cond)
+        cond_complement = domain_utils.domain_complement(symbolic_cond)
 
     def _remap_legacy_horizontal_domain(
         symbolic_domain: domain_utils.SymbolicDomain,

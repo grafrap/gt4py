@@ -516,17 +516,24 @@ def apply_fieldview_transforms(
     #     cartesian_reduce_axis_ranges = {common.Dimension("Kolor"): (0, 3)}
     # ir = UnrollCartesianReduce.apply(ir, axis_ranges=cartesian_reduce_axis_ranges)
 
-    ir = infer_domain.infer_program(
-        ir,
-        symbolic_domain_sizes=symbolic_domain_sizes,
-        offset_provider=offset_provider,
-    )
-    ir = ConstantFolding.apply(ir)  # type: ignore[assignment]  # always an itir.Program
+    # For the structured backend the first infer_program runs AFTER the fusion loop (below).
+    # Running it here sets annex.domain annotations that cause FuseAsFieldOp to merge
+    # as_fieldop nodes across kolor boundaries → CUDA_ERROR_ILLEGAL_ADDRESS on big grids.
+    if os.environ.get("USE_STRUCTURED_BACKEND", "0") != "1":
+        ir = infer_domain.infer_program(
+            ir,
+            symbolic_domain_sizes=symbolic_domain_sizes,
+            offset_provider=offset_provider,
+        )
+        ir = ConstantFolding.apply(ir)  # type: ignore[assignment]  # always an itir.Program
 
-    ir = prune_empty_concat_where.prune_empty_concat_where(ir)
-    _print_ir_block("=== FIELDVIEW IR AFTER PRUNING EMPTY CONCAT WHERE ===", ir, enabled=True)
+        ir = prune_empty_concat_where.prune_empty_concat_where(ir)
+        _print_ir_block("=== FIELDVIEW IR AFTER PRUNING EMPTY CONCAT WHERE ===", ir, enabled=True)
 
-    ir = remove_broadcast.RemoveBroadcast.apply(ir)
+    # RemoveBroadcast reads node.annex.domain (set by infer_program). For the structured
+    # backend, infer_program runs after the fusion loop, so RemoveBroadcast must also be deferred.
+    if os.environ.get("USE_STRUCTURED_BACKEND", "0") != "1":
+        ir = remove_broadcast.RemoveBroadcast.apply(ir)
 
     # Fuse the per-op as_fieldop nodes produced by the structured backend passes. Without this,
     # the IR keeps every `+`, `×`, `cast_`, `if`, `list_get` as a separate as_fieldop over the
@@ -543,6 +550,16 @@ def apply_fieldview_transforms(
     # by gtir_to_sdfg_concat_where.py — this matches what grafrap_dace did with
     # `transform_concat_where_to_as_fieldop=False` in `apply_common_transforms`.
     if os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1":
+        # Pre-fusion: annotate per-kolor domains so CSE in the fusion loop cannot merge
+        # kolor-distinct outer branches into one shared node. Without this, CSE collapses
+        # 3 identical stencil_as_fieldop branches (generated for non-split E2C2EO SetAts)
+        # into one shared node → post-fusion infer_program uses the union context
+        # Kolor:[0,3) → E2C back-propagation produces Kolor:[-2,3) for cell fields → GPU OOB.
+        ir = infer_domain.infer_program(
+            ir,
+            symbolic_domain_sizes=symbolic_domain_sizes,
+            offset_provider=offset_provider,
+        )
         for _ in range(10):
             inlined = ir
             inlined = InlineLambdas.apply(inlined, opcount_preserving=True)
@@ -595,5 +612,7 @@ def apply_fieldview_transforms(
             symbolic_domain_sizes=symbolic_domain_sizes,
             offset_provider=offset_provider,
         )
+        ir = prune_empty_concat_where.prune_empty_concat_where(ir)
+        ir = remove_broadcast.RemoveBroadcast.apply(ir)
     _print_ir_block("=== FINAL FIELDVIEW IR ===", ir, enabled=True)
     return ir

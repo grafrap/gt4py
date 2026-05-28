@@ -305,8 +305,56 @@ def _reduce_domains(
     return SymbolicDomain(domains[0].grid_type, new_domain_ranges)
 
 
-domain_union = functools.partial(_reduce_domains, range_reduce_op=_range_union)
-"""Return the (set) union of a list of domains."""
+def _range_is_empty(range_: SymbolicRange) -> bool:
+    """Return True if the range [start, stop) is empty or inverted after constant folding.
+
+    Handles:
+    - Empty ranges [k, k) where start == stop → zero width.
+    - Inverted ranges [k', k) where start > stop → arise from intersections of disjoint
+      domains (e.g. Kolor:[2,3) ∩ Kolor:[-inf,1) = Kolor:[2,1)) and are semantically empty.
+
+    Handles both OffsetLiteral (int .value) and Literal (str .value) node types.
+    InfinityLiteral.NEGATIVE/POSITIVE lack a numeric .value and are treated as non-empty.
+    """
+    start = ConstantFolding.apply(range_.start)
+    stop = ConstantFolding.apply(range_.stop)
+    try:
+        return int(start.value) >= int(stop.value)  # empty (==) or inverted (>)
+    except (AttributeError, ValueError, TypeError):
+        return False  # InfinityLiteral or non-constant → assume non-empty
+
+
+def domain_union(*domains: SymbolicDomain) -> SymbolicDomain:
+    """Return the (set) union of a list of domains.
+
+    Empty ranges [a, a) that arise from intersections with disjoint conditions (e.g.
+    Kolor:[-inf,0) ∩ Kolor:[0,3) = Kolor:[0,0)) are excluded from the union. Without
+    this, _domain_union([0,0), [1,3)) = [0,3) (wrong) instead of [1,3) (correct).
+    The structured backend generates canonical concat_where conditions via
+    canonicalize_domain_argument that produce such empty intersections for kolor branches
+    that are out of range; including them widens E2C cell-field kolor domains to negative
+    indices → CUDA_ERROR_ILLEGAL_ADDRESS on big grids.
+    """
+    assert all(domain.grid_type == domains[0].grid_type for domain in domains)
+
+    dims: list[common.Dimension] = [*domains[0].ranges.keys()]
+    for domain in domains[1:]:
+        for dim in domain.ranges.keys():
+            if dim not in dims:
+                dims.append(dim)
+
+    promoted_domains = [promote_domain(domain, dims) for domain in domains]
+    new_domain_ranges: dict[common.Dimension, SymbolicRange] = {}
+    for dim in dims:
+        all_ranges = [domain.ranges[dim] for domain in promoted_domains]
+        non_empty = [r for r in all_ranges if not _range_is_empty(r)]
+        if non_empty:
+            new_domain_ranges[dim] = _range_union(*non_empty)
+        else:
+            # All ranges are empty; keep first (caller should handle NEVER propagation)
+            new_domain_ranges[dim] = all_ranges[0]
+
+    return SymbolicDomain(domains[0].grid_type, new_domain_ranges)
 
 domain_intersection = functools.partial(_reduce_domains, range_reduce_op=_range_intersection)
 """Return the intersection of a list of domains."""
