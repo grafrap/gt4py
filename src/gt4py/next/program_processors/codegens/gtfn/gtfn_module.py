@@ -180,6 +180,7 @@ class GTFNTranslationStep(
         effective_symbolic_domain_sizes = (
             self.symbolic_domain_sizes if symbolic_domain_sizes is None else symbolic_domain_sizes
         )
+        program = pass_manager.pre_inline_scalar_params(program, effective_symbolic_domain_sizes)
         apply_common_transforms = functools.partial(
             pass_manager.apply_common_transforms,
             extract_temporaries=True,

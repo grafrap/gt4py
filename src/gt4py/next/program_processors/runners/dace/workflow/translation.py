@@ -447,6 +447,7 @@ class DaCeTranslator(
                     pass
 
         if not self.disable_itir_transforms:
+            ir = itir_transforms.pre_inline_scalar_params(ir, symbolic_domain_sizes)
             ir = itir_transforms.apply_fieldview_transforms(
                 ir,
                 use_max_domain_range_on_unstructured_shift=self.use_max_domain_range_on_unstructured_shift,

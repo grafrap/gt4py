@@ -1883,6 +1883,24 @@ class SymbolicSizeInliner(NodeTranslator):
                     if bounds is not None:
                         return copy.deepcopy(bounds[idx_val])
 
+        # named_range(axis, lo, hi) — inline SymRef bounds with known integer values.
+        # Handles vertical bounds (e.g. vertical_start, vertical_end) that SetAtRemapper
+        # copies verbatim from the original unstructured domain, as well as any other
+        # symbolic SymRef bounds that have a concrete integer in symbolic_domain_sizes.
+        if cpm.is_call_to(new_node, "named_range") and len(new_node.args) == 3:
+            axis_arg, lo_arg, hi_arg = new_node.args
+            new_lo, new_hi = lo_arg, hi_arg
+            if isinstance(lo_arg, ir.SymRef):
+                val = symbolic_domain_sizes.get(lo_arg.id)
+                if isinstance(val, numbers.Integral):
+                    new_lo = ir.OffsetLiteral(value=int(val))
+            if isinstance(hi_arg, ir.SymRef):
+                val = symbolic_domain_sizes.get(hi_arg.id)
+                if isinstance(val, numbers.Integral):
+                    new_hi = ir.OffsetLiteral(value=int(val))
+            if new_lo is not lo_arg or new_hi is not hi_arg:
+                return ir.FunCall(fun=new_node.fun, args=[axis_arg, new_lo, new_hi])
+
         return new_node
 
     @classmethod

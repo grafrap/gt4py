@@ -493,7 +493,16 @@ def get_global_grid_mapping(e2v_override=None):
     return _CACHED_INDEX_MAP, _CACHED_REMAP_SIZES
 
 class GenericStructuredWrapper:
-    def __init__(self, operator, backend_factory, index_map, remap_sizes, allocator, offset_provider):
+    def __init__(
+        self,
+        operator,
+        backend_factory,
+        index_map,
+        remap_sizes,
+        allocator,
+        offset_provider,
+        symbolic_domain_sizes: dict | None = None,
+    ):
         self.index_map = index_map
         self.allocator = allocator
         self.operator_name = getattr(operator, "id", None) or getattr(operator, "__name__", "")
@@ -547,35 +556,40 @@ class GenericStructuredWrapper:
         self.e2c2e_conn = self._sanitized_conn.get("E2C2E")
         self.structured_offset_provider = self._build_structured_offset_provider(offset_provider)
 
-        # Build base symbolic_domain_sizes (without horizontal_start — injected lazily at call time).
-        symbolic_domain_sizes = {
+        # Build base symbolic_domain_sizes (without call-time overrides such as horizontal_start).
+        base_symbolic_domain_sizes = dict(symbolic_domain_sizes or {})
+        # print(f"Initializing {self.operator_name} wrapper with remap_sizes={remap_sizes} and symbolic_domain_sizes={base_symbolic_domain_sizes}")
+        base_symbolic_domain_sizes.update({
             "max_i": int(remap_sizes.max_i),
             "max_j": int(remap_sizes.max_j),
             # Always enable mapping-based bounds when index_map is available.
             "use_horizontal_start_mapping": index_map is not None,
-        }
+        })
+        # print(f"Base symbolic_domain_sizes after adding remap_sizes: {base_symbolic_domain_sizes}")
         if self.index_map is not None:
             edge_to_ijk = getattr(self.index_map, "edge_to_ijk", None)
             if edge_to_ijk is not None:
-                symbolic_domain_sizes["edge_to_ijk"] = [
+                base_symbolic_domain_sizes["edge_to_ijk"] = [
                     (int(i), int(j), int(k)) for i, j, k in np.asarray(edge_to_ijk)
                 ]
 
             vertex_to_ij = getattr(self.index_map, "vertex_to_ij", None)
             if vertex_to_ij is not None:
-                symbolic_domain_sizes["vertex_to_ij"] = [
+                base_symbolic_domain_sizes["vertex_to_ij"] = [
                     (int(i), int(j)) for i, j in np.asarray(vertex_to_ij)
                 ]
-
+        # print(f"Base symbolic_domain_sizes after adding index_map: {base_symbolic_domain_sizes}")
         if self.cell_to_ijk is not None:
-            symbolic_domain_sizes["cell_to_ijk"] = [
+            base_symbolic_domain_sizes["cell_to_ijk"] = [
                 (int(i), int(j), int(k)) for i, j, k in np.asarray(self.cell_to_ijk)
             ]
 
         # Store for lazy per-horizontal_start compilation.
         self._operator = operator
         self._backend_factory = backend_factory
-        self._symbolic_domain_sizes_base = symbolic_domain_sizes
+        # print(f"Initialized {self.operator_name} wrapper with index_map={index_map}, remap_sizes={remap_sizes}, and symbolic_domain_sizes={base_symbolic_domain_sizes}")
+        self._symbolic_domain_sizes_base = base_symbolic_domain_sizes
+        # print(f"Initialized {self.operator_name} wrapper with remap_sizes={remap_sizes}, symbolic_domain_sizes_base={self._symbolic_domain_sizes_base}")
         # Caches keyed by (horizontal_start, extra_thresholds) tuple.
         self._compiled_cache: dict[tuple, object] = {}
         # Stores the full symbolic_domain_sizes for each cache_key so that the
@@ -601,6 +615,7 @@ class GenericStructuredWrapper:
         if cache_key in self._compiled_cache:
             return self._compiled_cache[cache_key]
         sds = dict(self._symbolic_domain_sizes_base)
+        # print(f"sds in _get_or_compile for horizontal_start={horizontal_start}, extra_thresholds={extra_thresholds}: {sds}")
         sds["horizontal_start"] = horizontal_start
         sds["horizontal_start_edge"] = horizontal_start
         sds["horizontal_start_cell"] = horizontal_start
@@ -715,6 +730,7 @@ class GenericStructuredWrapper:
         from gt4py.next.program_processors.program_setup_utils import setup_program as _setup
         global _CURRENT_COMPILE_SDS
         _CURRENT_COMPILE_SDS = sds
+        print(f"Current_compile_sds: {_CURRENT_COMPILE_SDS}")
         try:
             compiled = _setup(
                 self._operator,
@@ -723,6 +739,7 @@ class GenericStructuredWrapper:
             )
         finally:
             _CURRENT_COMPILE_SDS = None
+        print(f"Current_compile_sds: {_CURRENT_COMPILE_SDS}")
         _compile_end = time.perf_counter()
         _compile_elapsed = _compile_end - _compile_start
         print(f"[timing] {self.operator_name} compilation: {_compile_elapsed:.8f}s")

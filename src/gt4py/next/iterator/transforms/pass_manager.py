@@ -6,6 +6,8 @@
 # Please, refer to the LICENSE file in the root directory.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import copy
+import numbers
 import os
 import sys
 from typing import Optional, Protocol, cast
@@ -272,6 +274,66 @@ def _process_symbolic_domains_option(
         assert not symbolic_domain_sizes, "Options are mutually exclusive."
         symbolic_domain_sizes = _max_domain_range_sizes(offset_provider)  # type: ignore[assignment]
     return symbolic_domain_sizes
+
+
+def pre_inline_scalar_params(
+    program: itir.Program, sds: dict | None
+) -> itir.Program:
+    """Substitute known scalar program param values from sds into the ITIR body.
+
+    Run this once, before any pass pipeline, when USE_STRUCTURED_BACKEND=1.  The result:
+    - Boolean params (e.g. limited_area=True) become ir.Literal so dead_code_elimination
+      can fold if_(True/False, ...) branches in the standard pipeline.
+    - Integer params (e.g. vertical_start=0, vertical_end=5) become OffsetLiteral values,
+      making domain bounds concrete before the structural passes run.
+
+    Threshold params are intentionally skipped because ThresholdConditionRewriter matches
+    them by SymRef name; substituting them first would suppress that rewriting.
+    """
+    if not sds or os.environ.get("USE_STRUCTURED_BACKEND", "0") != "1":
+        return program
+
+    # ThresholdConditionRewriter pattern-matches these by SymRef id — do not substitute.
+    _unsafe: frozenset[str] = frozenset({
+        "start_2nd_nudge_line_idx_e", "start_nudging_line_idx_e",
+        "start_halo_level_2_idx_e", "start_edge_lateral_boundary",
+        "start_edge_lateral_boundary_level_7", "start_edge_nudging_level_2",
+        "end_edge_nudging", "end_edge_halo", "horizontal_start_distance",
+        "horizontal_end_distance", "lateral_boundary_level_2",
+    })
+
+    from gt4py.next.type_system import type_specifications as _ts
+
+    subst: dict[str, itir.Expr] = {}
+    for param in program.params:
+        pid = str(param.id)
+        if pid in _unsafe:
+            continue
+        val = sds.get(pid)
+        # bool must be checked before Integral because bool subclasses int in Python.
+        if isinstance(val, bool):
+            subst[pid] = itir.Literal(
+                value=str(val), type=_ts.ScalarType(kind=_ts.ScalarKind.BOOL)
+            )
+        elif isinstance(val, numbers.Integral):
+            subst[pid] = itir.OffsetLiteral(value=int(val))
+
+    if not subst:
+        return program
+
+    class _Substitutor(eve.NodeTranslator):
+        def visit_SymRef(self, node: itir.SymRef, **kw) -> itir.Expr:
+            r = subst.get(node.id)
+            return copy.deepcopy(r) if r is not None else node
+
+    new_body = [_Substitutor().visit(stmt) for stmt in program.body]
+    return itir.Program(
+        id=program.id,
+        function_definitions=program.function_definitions,
+        params=program.params,
+        declarations=program.declarations,
+        body=new_body,
+    )
 
 
 # TODO(tehrengruber): Revisit interface to configure temporary extraction. We currently forward

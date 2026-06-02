@@ -10,7 +10,8 @@ from gt4py.next.iterator.transforms.pass_manager import (
     GTIRTransform,
     apply_common_transforms,
     apply_fieldview_transforms,
+    pre_inline_scalar_params,
 )
 
 
-__all__ = ["GTIRTransform", "apply_common_transforms", "apply_fieldview_transforms"]
+__all__ = ["GTIRTransform", "apply_common_transforms", "apply_fieldview_transforms", "pre_inline_scalar_params"]
