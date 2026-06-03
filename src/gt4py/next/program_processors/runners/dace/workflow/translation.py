@@ -532,7 +532,11 @@ class DaCeTranslator(
                         _kolor_aware_fusion_callback,
                 }
                 structured_opt_args: dict = {
-                    "unit_strides_kind": common.DimensionKind.VERTICAL,
+                    # IDim is alphabetically first among [IDim, JDim, Kolor] → stride-1
+                    # in DaCe transients (Fortran-order). unit_strides_dim makes IDim the
+                    # innermost map param → x-thread (warp) on GPU. IDim has ~510 values
+                    # → blockDim.x=32 → 256 threads/block (vs 8 with Kolor as warp).
+                    "unit_strides_dim": [common.Dimension("IDim")],
                     "disable_splitting": True,
                     "validate": False,
                     "optimization_hooks": _hooks,
@@ -558,7 +562,7 @@ class DaCeTranslator(
                     )
                     gtx_transformations.gt_set_iteration_order(
                         sdfg,
-                        unit_strides_kind=common.DimensionKind.VERTICAL,
+                        unit_strides_dim=[common.Dimension("IDim")],
                         validate=False,
                     )
                     if on_gpu:

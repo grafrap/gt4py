@@ -123,9 +123,9 @@ def pack_sparse_local_field_to_structured(
     tail_shape = coeff.shape[2:]
 
     if np.issubdtype(coeff.dtype, np.integer):
-        out = np.full((ni, nj, n_kolor, n_local, *tail_shape), -1, dtype=coeff.dtype)
+        out = np.full((ni, nj, n_kolor, n_local, *tail_shape), -1, dtype=coeff.dtype, order='F')
     else:
-        out = np.zeros((ni, nj, n_kolor, n_local, *tail_shape), dtype=coeff.dtype)
+        out = np.zeros((ni, nj, n_kolor, n_local, *tail_shape), dtype=coeff.dtype, order='F')
 
     if local_dim_name == "E2C":
         n_elem = min(coeff.shape[0], index_map.edge_to_ijk.shape[0])
@@ -298,7 +298,7 @@ def apply_sparse_pack_mapping(
 ) -> np.ndarray:
     """Apply precomputed sparse pack index arrays to pack coeff into structured layout."""
     ea, la, cia, cja, cka, sa = mapping
-    out = np.zeros(out_shape, dtype=coeff.dtype)
+    out = np.zeros(out_shape, dtype=coeff.dtype, order='F')
     if ea.size > 0:
         out[cia, cja, cka, sa] = coeff[ea, la]
     return out
@@ -598,7 +598,7 @@ def build_index_map_for_ragged_lonlat_e2v(
 def pack_vertex_field_to_structured(vertex_values: np.ndarray, m: IndexMap) -> np.ndarray:
     ni, max_nj = m.ij_to_vertex.shape
     trailing_shape = vertex_values.shape[1:]
-    out = np.zeros((ni, max_nj, 1, *trailing_shape), dtype=vertex_values.dtype)
+    out = np.zeros((ni, max_nj, 1, *trailing_shape), dtype=vertex_values.dtype, order='F')
     i_arr = m.vertex_to_ij[:, 0]
     j_arr = m.vertex_to_ij[:, 1]
     valid = i_arr >= 0
@@ -616,7 +616,7 @@ def pack_edge_field_to_structured(edge_values: np.ndarray, m: IndexMap) -> np.nd
             f"IndexMap edge id {edge_indices.max()} exceeds available edge axis {n_edge}. "
             "Use an index map generated for the current grid."
         )
-    out = np.zeros((ni, max_nj, n_kolor), dtype=edge_values.dtype)
+    out = np.zeros((ni, max_nj, n_kolor), dtype=edge_values.dtype, order='F')
     out[valid] = edge_values[edge_indices]
     return out
 
@@ -655,10 +655,10 @@ def pack_edge_field(edge_values: np.ndarray, m: "IndexMap") -> np.ndarray:
     has_k = edge_values.ndim == 2
     if has_k:
         nk = edge_values.shape[1]
-        out = np.zeros((ni, max_nj, n_kolor, nk), dtype=edge_values.dtype)
+        out = np.zeros((ni, max_nj, n_kolor, nk), dtype=edge_values.dtype, order='F')
         out[valid] = edge_values[edge_indices]
     else:
-        out = np.zeros((ni, max_nj, n_kolor), dtype=edge_values.dtype)
+        out = np.zeros((ni, max_nj, n_kolor), dtype=edge_values.dtype, order='F')
         out[valid] = edge_values[edge_indices]
     return out
 
@@ -683,7 +683,7 @@ def pack_vertex_field(vertex_values: np.ndarray, m: IndexMap) -> np.ndarray:
     has_k = vertex_values.ndim == 2
     ni, nj = m.ij_to_vertex.shape
     nk = vertex_values.shape[1] if has_k else 1
-    out = np.zeros((ni, nj, 1, nk), dtype=vertex_values.dtype)
+    out = np.zeros((ni, nj, 1, nk), dtype=vertex_values.dtype, order='F')
     i_arr = m.vertex_to_ij[:, 0]
     j_arr = m.vertex_to_ij[:, 1]
     valid = i_arr >= 0
@@ -771,7 +771,7 @@ def pack_cell_field(cell_values: np.ndarray, ijk_to_cell: np.ndarray) -> np.ndar
     nk = cell_values.shape[1] if has_k else 1
     valid = ijk_to_cell >= 0
     cell_indices = ijk_to_cell[valid]
-    out = np.zeros((ni, nj, n_kolor, nk), dtype=cell_values.dtype)
+    out = np.zeros((ni, nj, n_kolor, nk), dtype=cell_values.dtype, order='F')
     if has_k:
         out[valid] = cell_values[cell_indices]
     else:
@@ -864,7 +864,7 @@ def pack_c2e2co_field(field_np: np.ndarray, ijk_to_cell: np.ndarray) -> tuple[np
 
     ni, nj, _ = ijk_to_cell.shape
     n_neighbors = field_np.shape[1]
-    out_s = tuple(np.zeros((ni, nj, 2), dtype=field_np.dtype) for _ in range(n_neighbors))
+    out_s = tuple(np.zeros((ni, nj, 2), dtype=field_np.dtype, order='F') for _ in range(n_neighbors))
 
     for i in range(ni):
         for j in range(nj):
