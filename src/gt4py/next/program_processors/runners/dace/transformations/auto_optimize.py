@@ -841,12 +841,12 @@ def _gt_auto_configure_maps_and_strides(
             validate=False,
             validate_all=validate_all,
         )
-        # No gt_change_strides call needed: DaCe's default is Fortran-order (alphabetically-first
-        # dim = stride 1). With IDim first alphabetically among [IDim, JDim, Kolor], IDim already
-        # has stride 1 by default — matching the warp dimension set above.
-        # Calling gt_change_strides(HORIZONTAL) would re-confirm the same Fortran-order but
-        # recursively traverse all nested SDFGs, which is catastrophically slow when fusion
-        # didn't reduce the map count (e.g., 177 unfused kernels → 177× propagation).
+        # For strides: HORIZONTAL gives Fortran-order (alphabetically-first dim = stride 1).
+        # With IDim first alphabetically among [IDim, JDim, Kolor], this keeps IDim=stride-1
+        # in transients, matching the warp dimension.
+        gtx_transformations.gt_change_strides(
+            sdfg, prefered_direction_kind=gtx_common.DimensionKind.HORIZONTAL
+        )
         if gpu:
             gtx_transformations.gt_gpu_transformation(
                 sdfg,

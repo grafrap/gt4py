@@ -622,7 +622,15 @@ def apply_fieldview_transforms(
             symbolic_domain_sizes=symbolic_domain_sizes,
             offset_provider=offset_provider,
         )
-        for _ in range(10):
+        _prev_fuse_made_progress = True  # allow first iteration always
+        for _iter in range(10):
+            # If the previous iteration's FuseAsFieldOp made no progress, one more cleanup
+            # pass was already run. No further iterations will reduce the IR, so stop.
+            # Root cause of the 10x overrun: CSE creates new tlet_N names each iteration
+            # (advancing the global uids), so `inlined == ir` never fires even when the
+            # computation is structurally identical. Use fusion progress as the real signal.
+            if not _prev_fuse_made_progress:
+                break
             inlined = ir
             inlined = InlineLambdas.apply(inlined, opcount_preserving=True)
             inlined = ConstantFolding.apply(inlined)  # type: ignore[assignment]
@@ -639,6 +647,7 @@ def apply_fieldview_transforms(
                 inlined, offset_provider_type=offset_provider_type, uids=uids
             )
             inlined = MergeLet().visit(inlined)
+            _fuse_made_progress = False
             if not os.environ.get("GT4PY_DISABLE_FUSE_AS_FIELDOP"):
                 _n_before = str(inlined).count("as_fieldop")
                 _pre_fuse = inlined
@@ -659,10 +668,12 @@ def apply_fieldview_transforms(
                     inlined = _pre_fuse
                     _n_after = _n_before
                 print(f"[fusion] FuseAsFieldOp: {_n_before} -> {_n_after} as_fieldop nodes")
+                _fuse_made_progress = _n_after < _n_before
             inlined = ConstantFolding.apply(inlined)  # type: ignore[assignment]
             if inlined == ir:
                 break
             ir = inlined
+            _prev_fuse_made_progress = _fuse_made_progress
         ir = NormalizeShifts().visit(ir)
         ir = InlineLambdas.apply(ir, opcount_preserving=True, force_inline_lambda_args=True)
         # The fusion loop rebuilds the IR tree (InlineLambdas / FuseAsFieldOp create new nodes),
