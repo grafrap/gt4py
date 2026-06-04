@@ -678,6 +678,50 @@ def unpack_edge_field(struct_values: np.ndarray, m: "IndexMap", n_edge: int) -> 
     return out
 
 
+def pack_edge_field_compact(edge_values: np.ndarray, m: "IndexMap", shift_i: int, shift_j: int) -> np.ndarray:
+    """Pack edge field to compact (ni-shift_i, nj-shift_j, 3, nk) Fortran array.
+
+    IDim=shift_i lands at ptr[0], enabling cache-aligned GPU writes.
+    """
+    ijk = m.ijk_to_edge[shift_i:, shift_j:]
+    ni, nj, n_kolor = ijk.shape
+    valid = ijk >= 0
+    has_k = edge_values.ndim == 2
+    if has_k:
+        nk = edge_values.shape[1]
+        out = np.zeros((ni, nj, n_kolor, nk), dtype=edge_values.dtype, order='F')
+        out[valid] = edge_values[ijk[valid]]
+    else:
+        out = np.zeros((ni, nj, n_kolor), dtype=edge_values.dtype, order='F')
+        out[valid] = edge_values[ijk[valid]]
+    return out
+
+
+def pack_vertex_field_padded(vertex_values: np.ndarray, m: IndexMap, shift_i: int, shift_j: int, pad: int) -> np.ndarray:
+    """Pack vertex field to padded array for safe negative-offset reads on GPU.
+
+    Shape: (pad+ni_v-shift_i, pad+nj_v-shift_j, 1, nk).
+    Pass with origin={IDim: pad, JDim: pad} so DaCe range_0=-pad, making
+    ptr[i+pad] the access formula — no OOB for di=-1 from domain start i=0.
+    """
+    ni_v, nj_v = m.ij_to_vertex.shape
+    ni_out = pad + ni_v - shift_i
+    nj_out = pad + nj_v - shift_j
+    has_k = vertex_values.ndim == 2
+    nk = vertex_values.shape[1] if has_k else 1
+    out = np.zeros((ni_out, nj_out, 1, nk), dtype=vertex_values.dtype, order='F')
+    i_arr = m.vertex_to_ij[:, 0]
+    j_arr = m.vertex_to_ij[:, 1]
+    ci = i_arr - shift_i + pad
+    cj = j_arr - shift_j + pad
+    valid = (ci >= 0) & (ci < ni_out) & (cj >= 0) & (cj < nj_out)
+    if has_k:
+        out[ci[valid], cj[valid], 0, :] = vertex_values[valid, :]
+    else:
+        out[ci[valid], cj[valid], 0, 0] = vertex_values[valid]
+    return out if has_k else out[:, :, :, 0]
+
+
 def pack_vertex_field(vertex_values: np.ndarray, m: IndexMap) -> np.ndarray:
     """Packs an unstructured vertex field into [IDim, JDim, Kolor=1, (KDim)]."""
     has_k = vertex_values.ndim == 2

@@ -1236,10 +1236,12 @@ class SetAtRemapper(NodeTranslator):
             )
             if by_kolor is not None and kolor in by_kolor:
                 k_ilo, k_jlo, k_ihi, k_jhi = by_kolor[kolor]
-                ilo = ir.OffsetLiteral(value=k_ilo)
-                jlo = ir.OffsetLiteral(value=k_jlo)
-                ihi = ir.OffsetLiteral(value=k_ihi + 1)
-                jhi = ir.OffsetLiteral(value=k_jhi + 1)
+                _si = int(symbolic_domain_sizes.get("horizontal_start_shift_i", 0))
+                _sj = int(symbolic_domain_sizes.get("horizontal_start_shift_j", 0))
+                ilo = ir.OffsetLiteral(value=k_ilo - _si)
+                jlo = ir.OffsetLiteral(value=k_jlo - _sj)
+                ihi = ir.OffsetLiteral(value=k_ihi + 1 - _si)
+                jhi = ir.OffsetLiteral(value=k_jhi + 1 - _sj)
 
         if ilo is None:
             return None
@@ -1341,7 +1343,11 @@ class SetAtRemapper(NodeTranslator):
                 i0_lo, j0_lo, i0_hi, j0_hi = by_kolor[0]
                 i1_lo, j1_lo, i1_hi, j1_hi = by_kolor[1]
                 i2_lo, j2_lo, i2_hi, j2_hi = by_kolor[2]
-
+                _si = int(symbolic_domain_sizes.get("horizontal_start_shift_i", 0))
+                _sj = int(symbolic_domain_sizes.get("horizontal_start_shift_j", 0))
+                i0_lo -= _si; j0_lo -= _sj; i0_hi -= _si; j0_hi -= _sj
+                i1_lo -= _si; j1_lo -= _sj; i1_hi -= _si; j1_hi -= _sj
+                i2_lo -= _si; j2_lo -= _sj; i2_hi -= _si; j2_hi -= _sj
                 cond_k0 = _and(
                     _dom(copy.deepcopy(k_axis), ir.OffsetLiteral(value=0), ir.OffsetLiteral(value=1)),
                     _and(
@@ -1579,6 +1585,8 @@ class ThresholdConditionRewriter(NodeTranslator):
                                ir.OffsetLiteral(value=lo_val), ir.OffsetLiteral(value=hi_val))
             )
 
+        _si = int(symbolic_domain_sizes.get("horizontal_start_shift_i", 0))
+        _sj = int(symbolic_domain_sizes.get("horizontal_start_shift_j", 0))
         conds = []
         for k in range(n_kolors):
             ilo = symbolic_domain_sizes.get(f"{tid}_k{k}_ilo")
@@ -1589,7 +1597,8 @@ class ThresholdConditionRewriter(NodeTranslator):
                 return None
             conds.append(im.and_(
                 _dom(Kolor_d, k, k + 1),
-                im.and_(_dom(IDim_d, int(ilo), int(ihi)), _dom(JDim_d, int(jlo), int(jhi))),
+                im.and_(_dom(IDim_d, int(ilo) - _si, int(ihi) - _si),
+                        _dom(JDim_d, int(jlo) - _sj, int(jhi) - _sj)),
             ))
         if len(conds) == 2:
             return im.or_(conds[0], conds[1])
@@ -1689,6 +1698,8 @@ class ThresholdConditionRewriter(NodeTranslator):
                                ir.OffsetLiteral(value=lo), ir.OffsetLiteral(value=hi))
             )
 
+        _si = int(symbolic_domain_sizes.get("horizontal_start_shift_i", 0))
+        _sj = int(symbolic_domain_sizes.get("horizontal_start_shift_j", 0))
         conds = []
         for k in range(3):
             ilo = symbolic_domain_sizes.get(f"{range_key}_k{k}_ilo")
@@ -1699,7 +1710,8 @@ class ThresholdConditionRewriter(NodeTranslator):
                 break
             conds.append(im.and_(
                 _rdom(Kolor_d, k, k + 1),
-                im.and_(_rdom(IDim_d, int(ilo), int(ihi)), _rdom(JDim_d, int(jlo), int(jhi))),
+                im.and_(_rdom(IDim_d, int(ilo) - _si, int(ihi) - _si),
+                        _rdom(JDim_d, int(jlo) - _sj, int(jhi) - _sj)),
             ))
         if len(conds) == 3:
             return im.or_(conds[0], im.or_(conds[1], conds[2]))
