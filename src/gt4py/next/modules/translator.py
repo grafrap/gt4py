@@ -678,34 +678,46 @@ def unpack_edge_field(struct_values: np.ndarray, m: "IndexMap", n_edge: int) -> 
     return out
 
 
-def pack_edge_field_compact(edge_values: np.ndarray, m: "IndexMap", shift_i: int, shift_j: int) -> np.ndarray:
-    """Pack edge field to compact (ni-shift_i, nj-shift_j, 3, nk) Fortran array.
+_STRIDE_PAD = 32  # pad IDim to this multiple so each JDim row starts cache-line aligned
 
-    IDim=shift_i lands at ptr[0], enabling cache-aligned GPU writes.
+
+def _pad_to_stride(n: int) -> int:
+    """Round n up to the next multiple of _STRIDE_PAD."""
+    return int(np.ceil(n / _STRIDE_PAD)) * _STRIDE_PAD
+
+
+def pack_edge_field_compact(edge_values: np.ndarray, m: "IndexMap", shift_i: int, shift_j: int) -> np.ndarray:
+    """Pack edge field to compact Fortran array with IDim padded to a multiple of 32.
+
+    IDim=shift_i lands at ptr[0] (cache-aligned write start). IDim dimension is
+    padded to ceil(ni_raw/_STRIDE_PAD)*_STRIDE_PAD so each JDim row begins at a
+    cache-line boundary — DaCe strides are runtime parameters so no recompilation needed.
     """
     ijk = m.ijk_to_edge[shift_i:, shift_j:]
-    ni, nj, n_kolor = ijk.shape
+    ni_raw, nj, n_kolor = ijk.shape
+    ni = _pad_to_stride(ni_raw)
     valid = ijk >= 0
     has_k = edge_values.ndim == 2
     if has_k:
         nk = edge_values.shape[1]
         out = np.zeros((ni, nj, n_kolor, nk), dtype=edge_values.dtype, order='F')
-        out[valid] = edge_values[ijk[valid]]
+        out[:ni_raw][valid] = edge_values[ijk[valid]]
     else:
         out = np.zeros((ni, nj, n_kolor), dtype=edge_values.dtype, order='F')
-        out[valid] = edge_values[ijk[valid]]
+        out[:ni_raw][valid] = edge_values[ijk[valid]]
     return out
 
 
 def pack_vertex_field_padded(vertex_values: np.ndarray, m: IndexMap, shift_i: int, shift_j: int, pad: int) -> np.ndarray:
     """Pack vertex field to padded array for safe negative-offset reads on GPU.
 
-    Shape: (pad+ni_v-shift_i, pad+nj_v-shift_j, 1, nk).
-    Pass with origin={IDim: pad, JDim: pad} so DaCe range_0=-pad, making
-    ptr[i+pad] the access formula — no OOB for di=-1 from domain start i=0.
+    Shape: (padded(pad+ni_v-shift_i), pad+nj_v-shift_j, 1, nk) where the IDim
+    is rounded up to a multiple of _STRIDE_PAD for cache-line row alignment.
+    Pass with origin={IDim: pad, JDim: pad} so DaCe range_0=-pad.
     """
     ni_v, nj_v = m.ij_to_vertex.shape
-    ni_out = pad + ni_v - shift_i
+    ni_raw = pad + ni_v - shift_i
+    ni_out = _pad_to_stride(ni_raw)
     nj_out = pad + nj_v - shift_j
     has_k = vertex_values.ndim == 2
     nk = vertex_values.shape[1] if has_k else 1
@@ -714,7 +726,7 @@ def pack_vertex_field_padded(vertex_values: np.ndarray, m: IndexMap, shift_i: in
     j_arr = m.vertex_to_ij[:, 1]
     ci = i_arr - shift_i + pad
     cj = j_arr - shift_j + pad
-    valid = (ci >= 0) & (ci < ni_out) & (cj >= 0) & (cj < nj_out)
+    valid = (ci >= 0) & (ci < ni_raw) & (cj >= 0) & (cj < nj_out)
     if has_k:
         out[ci[valid], cj[valid], 0, :] = vertex_values[valid, :]
     else:

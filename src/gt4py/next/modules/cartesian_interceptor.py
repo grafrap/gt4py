@@ -1052,6 +1052,12 @@ class GenericStructuredWrapper:
             trailing_dims = list(field.domain.dims[2:]) if np_data.ndim > 2 else []
             if shift_i > 0:
                 struct_np = struct_np[shift_i:, shift_j:]
+                ni_raw = struct_np.shape[0]
+                ni_pad = int(np.ceil(ni_raw / 32)) * 32
+                if ni_pad != ni_raw:
+                    padded = np.zeros((ni_pad, *struct_np.shape[1:]), dtype=struct_np.dtype, order='F')
+                    padded[:ni_raw] = struct_np
+                    struct_np = padded
             return gtx.as_field(
                 [IDim, JDim, Kolor, local_dim, *trailing_dims],
                 struct_np,
@@ -1136,9 +1142,11 @@ class GenericStructuredWrapper:
                 # Boundary edges (below horizontal_start) are not in the compact array;
                 # preserve their pre-call values by starting from orig_np.
                 ijk_shifted = self.index_map.ijk_to_edge[shift_i:, shift_j:]
+                ni_raw = ijk_shifted.shape[0]
                 valid = ijk_shifted >= 0
                 unstruct_np = orig_np.copy()
-                unstruct_np[ijk_shifted[valid]] = struct_np[valid]
+                # struct_np may be IDim-padded beyond ni_raw; slice to match ijk_shifted.
+                unstruct_np[ijk_shifted[valid]] = struct_np[:ni_raw][valid]
             else:
                 unstruct_np = unpack_edge_field(struct_np, self.index_map, orig_np.shape[0])
         elif self._is_unstructured(original_unstructured_field, "Cell"):
