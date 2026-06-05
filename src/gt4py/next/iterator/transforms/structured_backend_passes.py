@@ -805,7 +805,18 @@ def _mapping_based_axis_bounds(
         return ir.OffsetLiteral(value=axis_lo), ir.OffsetLiteral(value=axis_hi)
     axis_los = [pair[axis_index] for pair in bounds_by_kolor.values()]
     axis_his = [pair[axis_hi_index] for pair in bounds_by_kolor.values()]
-    return ir.OffsetLiteral(value=min(axis_los)), ir.OffsetLiteral(value=max(axis_his) + 1)
+    lo = min(axis_los)
+    hi = max(axis_his) + 1
+    # Vertex fields are packed with origin shift (pack_vertex_field_padded uses
+    # horizontal_start_shift_i/j derived from edge bounds). Subtract the same shift
+    # here so the stencil domain matches the packed GT4Py coordinate system.
+    # Cell and Edge (kolor=None) don't use the padded pack, so no shift is needed.
+    if entity_name == "Vertex":
+        shift_key = "horizontal_start_shift_i" if axis_name == "IDim" else "horizontal_start_shift_j"
+        shift_val = int(symbolic_domain_sizes.get(shift_key, 0))
+        lo -= shift_val
+        hi -= shift_val
+    return ir.OffsetLiteral(value=lo), ir.OffsetLiteral(value=hi)
 
 
 def _cartesian_axis_bounds(
@@ -2089,6 +2100,7 @@ class NeighborReductionUnroller(NodeTranslator):
         domain: ir.Expr | None,
         neutral_element: ir.Expr,
         current_kolor: int | None = None,
+        setat_is_vertex: bool = False,
     ) -> ir.Expr | None:
         if cpm.is_applied_as_fieldop(expr):
             stencil = expr.fun.args[0]
@@ -2114,12 +2126,22 @@ class NeighborReductionUnroller(NodeTranslator):
                             _, is_ene = _conn_name_and_is_edge_to_non_edge(
                                 (ir.OffsetLiteral(value=conn), ir.OffsetLiteral(value=0))
                             )
+                            # In a vertex SetAt, current_kolor=0 is the vertex kolor, not an
+                            # edge kolor. For is_ene connectivities (E2C2V etc.) nested inside
+                            # V2E, using vertex kolor to select the kolor-0 branch is wrong:
+                            # after V2E applies Kolor shifts, the accessed vertex field ends at
+                            # Kolor=dk_V2E (OOB). Generate a full concat_where instead so the
+                            # correct E2C2V branch fires after V2E's Kolor shift.
+                            ck = (
+                                None if (is_ene and setat_is_vertex)
+                                else (current_kolor if (is_ene or current_kolor is not None) else None)
+                            )
                             return _build_field_concat_where_from_branches(
                                 field_expr,
                                 cast(tuple, entry["branches"]),
                                 domain,
                                 apply_edge_shape_bounds=_needs_edge_shape_bounds(conn),
-                                current_kolor=current_kolor if (is_ene or current_kolor is not None) else None,
+                                current_kolor=ck,
                             )
 
                 if isinstance(stencil.expr, ir.FunCall) and cpm.is_call_to(stencil.expr.fun, "map_"):
@@ -2152,6 +2174,7 @@ class NeighborReductionUnroller(NodeTranslator):
         conn_size: int,
         domain: ir.Expr | None,
         current_kolor: int | None = None,
+        setat_is_vertex: bool = False,
     ) -> ir.Expr:
         domain_bounds: dict[str, tuple[ir.Expr, ir.Expr]] = {}
         if cpm.is_call_to(domain, "cartesian_domain"):
@@ -2237,7 +2260,8 @@ class NeighborReductionUnroller(NodeTranslator):
             )(im.as_fieldop(im.lambda_("__x")(copy.deepcopy(widened_init)), domain)(base_field))
             for idx in range(conn_size):
                 elem_field = NeighborReductionUnroller._eval_list_field_at_idx(
-                    list_expr, idx, domain, neutral_element, current_kolor=current_kolor
+                    list_expr, idx, domain, neutral_element,
+                    current_kolor=current_kolor, setat_is_vertex=setat_is_vertex,
                 )
                 if elem_field is None:
                     break
@@ -2316,6 +2340,14 @@ class NeighborReductionUnroller(NodeTranslator):
 
     # ── visit_SetAt: edge-specialized kolor branch peeling ───────────────────
 
+    @staticmethod
+    def _expr_has_connectivity(expr: ir.Expr, conn_name: str) -> bool:
+        """Returns True if expr contains the named connectivity as an OffsetLiteral value."""
+        return any(
+            isinstance(node, ir.OffsetLiteral) and node.value == conn_name
+            for node in expr.pre_walk_values()
+        )
+
     def visit_SetAt(self, node: ir.SetAt, **kwargs) -> ir.SetAt:
         new_domain = self.visit(node.domain, **kwargs)
         if not self._is_structured_domain(new_domain):
@@ -2331,11 +2363,26 @@ class NeighborReductionUnroller(NodeTranslator):
                 if current_kolor is not None:
                     break
 
+        # When current_kolor==0 and domain is Kolor:[0,1), the domain is ambiguous:
+        # it could be a vertex SetAt (entity has 1 kolor) or a split edge kolor-0 SetAt
+        # (entity has 3 kolors, split into [0,1)). In a vertex SetAt, current_kolor=0
+        # represents the vertex kolor, not an edge kolor.  For is_ene connectivities
+        # (E2C2V etc.) nested inside V2E, the vertex kolor must not be used to select
+        # E2C2V's kolor-0 branch, because V2E will later apply Kolor shifts that would
+        # land u_vert at OOB Kolor positions.  Detect vertex SetAt via V2E connectivity
+        # presence (V2E = vertex→edge, only appears in vertex-output stencils).
+        setat_is_vertex = (
+            current_kolor == 0 and self._expr_has_connectivity(node.expr, "V2E")
+        )
+
         if current_kolor is None and not _expr_uses_edge_to_edge_connectivity(node.expr):
-            new_expr = self._visit_expr_with_kolor_branches(node.expr, new_domain, **kwargs)
+            new_expr = self._visit_expr_with_kolor_branches(
+                node.expr, new_domain, setat_is_vertex=setat_is_vertex, **kwargs
+            )
         else:
             new_expr = self.visit(
-                node.expr, current_domain=new_domain, current_kolor=current_kolor, **kwargs
+                node.expr, current_domain=new_domain, current_kolor=current_kolor,
+                setat_is_vertex=setat_is_vertex, **kwargs
             )
         new_target = self.visit(node.target, **kwargs)
         return ir.SetAt(expr=new_expr, domain=new_domain, target=new_target)
@@ -2381,6 +2428,16 @@ class NeighborReductionUnroller(NodeTranslator):
     def visit_FunCall(self, node: ir.FunCall, **kwargs) -> ir.Expr:
         current_domain = kwargs.get("current_domain")
         current_kolor: int | None = kwargs.get("current_kolor")
+        setat_is_vertex: bool = kwargs.get("setat_is_vertex", False)
+
+        def _ck(is_ene: bool) -> int | None:
+            # In a vertex SetAt, current_kolor is the vertex kolor (always 0), not an
+            # edge kolor. For is_ene connectivities (E2C2V etc.) nested inside V2E the
+            # vertex kolor must not be used to select branches — generate a full
+            # concat_where so the correct branch fires after V2E's own Kolor shift.
+            if is_ene and setat_is_vertex:
+                return None
+            return current_kolor if (is_ene or current_kolor is not None) else None
 
         # Path 1 — as_fieldop wrapping a single deref-shift:
         #   as_fieldop(λit. deref(shift(conn, slot)(it)), domain)(field)
@@ -2410,7 +2467,7 @@ class NeighborReductionUnroller(NodeTranslator):
                             cast(tuple, entry["branches"]),
                             current_domain,
                             apply_edge_shape_bounds=_needs_edge_shape_bounds(conn_name or None),
-                            current_kolor=current_kolor if (is_ene or current_kolor is not None) else None,
+                            current_kolor=_ck(is_ene),
                         )
                     elif entry["kind"] == "shift":
                         return _make_lifted_deref_shift(
@@ -2427,7 +2484,7 @@ class NeighborReductionUnroller(NodeTranslator):
                 rewritten_list_expr = self.visit(list_expr, **kwargs)
                 return self._build_generic_unrolled_reduce_expr(
                     red_op, red_init, rewritten_list_expr, conn_size, current_domain,
-                    current_kolor=current_kolor,
+                    current_kolor=current_kolor, setat_is_vertex=setat_is_vertex,
                 )
 
         new_node = self.generic_visit(node, **kwargs)
@@ -2451,7 +2508,7 @@ class NeighborReductionUnroller(NodeTranslator):
                         return _build_field_concat_where_from_branches(
                             arg, entry["branches"], current_domain,
                             apply_edge_shape_bounds=_needs_edge_shape_bounds(conn_name or None),
-                            current_kolor=current_kolor if (is_ene or current_kolor is not None) else None,
+                            current_kolor=_ck(is_ene),
                         )
                     return _build_concat_where_from_branches(arg, entry["branches"])
 
