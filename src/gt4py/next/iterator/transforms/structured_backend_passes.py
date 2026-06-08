@@ -807,10 +807,10 @@ def _mapping_based_axis_bounds(
     axis_his = [pair[axis_hi_index] for pair in bounds_by_kolor.values()]
     lo = min(axis_los)
     hi = max(axis_his) + 1
-    # Vertex fields are packed with origin shift (pack_vertex_field_padded uses
-    # horizontal_start_shift_i/j derived from edge bounds). Subtract the same shift
-    # here so the stencil domain matches the packed GT4Py coordinate system.
-    # Cell and Edge (kolor=None) don't use the padded pack, so no shift is needed.
+    # Vertex output stencils: horizontal_start_shift_i/j comes from vertex interior
+    # bounds (derived from vertex_to_ij). Subtract so the stencil write domain starts
+    # at 0 in logical coords, matching the as_field(origin=shift) coordinate system.
+    # Cell and Edge (kolor=None) handle shift separately in _per_kolor_domain.
     if entity_name == "Vertex":
         shift_key = "horizontal_start_shift_i" if axis_name == "IDim" else "horizontal_start_shift_j"
         shift_val = int(symbolic_domain_sizes.get(shift_key, 0))

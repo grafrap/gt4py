@@ -601,11 +601,78 @@ class GenericStructuredWrapper:
         # Cache for precomputed sparse pack index arrays (built on first use).
         # Key: local_dim_name str; Value: tuple of 6 numpy arrays or None.
         self._sparse_pack_mappings: dict[str, tuple | None] = {}
+        # Cache for (shift_i, shift_j) per horizontal_start value. Key: horizontal_start int.
+        self._shift_cache: dict[int, tuple[int, int]] = {}
         from gt4py._core import definitions as core_defs
         self._use_gpu = getattr(allocator, "device_type", core_defs.DeviceType.CPU) in (
             core_defs.DeviceType.CUDA,
             core_defs.DeviceType.ROCM,
         )
+
+    def _detect_output_entity(self) -> str | None:
+        """Return 'Vertex', 'Edge', or 'Cell' based on the program's output field entity."""
+        try:
+            from gt4py.next.ffront import program_ast as past
+            past_node = self._operator.past_stage.past_node
+            param_map = {str(p.id): p for p in past_node.params}
+            for call in past_node.body:
+                out_expr = call.kwargs.get("out")
+                if out_expr is None:
+                    continue
+                elts = out_expr.elts if isinstance(out_expr, past.TupleExpr) else [out_expr]
+                for elt in elts:
+                    if isinstance(elt, past.Name):
+                        name = str(elt.id)
+                    elif isinstance(elt, past.Subscript):
+                        name = str(elt.value.id)
+                    else:
+                        continue
+                    param = param_map.get(name)
+                    if param is None:
+                        continue
+                    # Eve field 'type' shadows the Python builtin; accessible as type_ or type.
+                    ftype = getattr(param, "type_", None) or getattr(param, "type", None)
+                    dims = getattr(ftype, "dims", None)
+                    if dims:
+                        d0 = str(dims[0].value) if hasattr(dims[0], "value") else str(dims[0])
+                        if d0 in ("Vertex", "Edge", "Cell"):
+                            return d0
+        except Exception:
+            pass
+        return None
+
+    def _compute_horizontal_shift(self, entity: str, horizontal_start: int) -> tuple[int, int]:
+        """Compute (shift_i, shift_j) from the output entity's interior bounds."""
+        if horizontal_start <= 0 or self.index_map is None:
+            return 0, 0
+        from gt4py.next.iterator.transforms.cart_unroll import (
+            _derive_entity_start_bounds_from_mapping,
+        )
+        if entity == "Vertex":
+            vij = getattr(self.index_map, "vertex_to_ij", None)
+            if vij is None:
+                return 0, 0
+            mapping_rows = tuple(tuple(int(x) for x in r) for r in vij)
+            bounds = _derive_entity_start_bounds_from_mapping(
+                "Vertex", mapping_rows=mapping_rows,
+                horizontal_start=horizontal_start,
+                max_i=self.max_i, max_j=self.max_j)
+        elif entity == "Edge":
+            eijk = getattr(self.index_map, "edge_to_ijk", None)
+            if eijk is None:
+                return 0, 0
+            mapping_rows = tuple(tuple(int(x) for x in r) for r in eijk)
+            bounds = _derive_entity_start_bounds_from_mapping(
+                "Edge", mapping_rows=mapping_rows,
+                horizontal_start=horizontal_start,
+                max_i=self.max_i, max_j=self.max_j)
+        else:
+            return 0, 0
+        if not bounds:
+            return 0, 0
+        shift_i = min(b[0] for b in bounds.values())
+        shift_j = min(b[1] for b in bounds.values())
+        return shift_i, shift_j
 
     def _get_or_compile(
         self,
@@ -674,24 +741,21 @@ class GenericStructuredWrapper:
                             sds[f"{param_name}_k{kolor}_jhi"] = jhi + 1  # exclusive
 
 
-        # Compute origin shift: shift per-kolor write domain to start at (0,0).
-        # Enables cache-aligned GPU writes (first write at ptr[0]).
-        if horizontal_start > 0:
-            _s_ijk = getattr(self.index_map, "edge_to_ijk", None) if self.index_map is not None else None
-            if _s_ijk is not None:
-                from gt4py.next.iterator.transforms.cart_unroll import (
-                    _derive_entity_start_bounds_from_mapping as _dsb,
-                )
-                _s_rows = tuple(tuple(int(x) for x in r) for r in _s_ijk)
-                _s_bounds = _dsb("Edge", mapping_rows=_s_rows,
-                                 horizontal_start=horizontal_start,
-                                 max_i=self.max_i, max_j=self.max_j)
-                if _s_bounds:
-                    _si = min(ilo for ilo, jlo, ihi, jhi in _s_bounds.values())
-                    _sj = min(jlo for ilo, jlo, ihi, jhi in _s_bounds.values())
-                    if _si > 0 or _sj > 0:
-                        sds["horizontal_start_shift_i"] = _si
-                        sds["horizontal_start_shift_j"] = _sj
+        # Origin-shift: move the coordinate origin so the first interior write lands at
+        # buffer offset 0 (cache-aligned). Detect the OUTPUT entity first so we compute
+        # bounds from the correct mapping (vertex_to_ij for vertex stencils, edge_to_ijk
+        # for edge stencils). Same shift_i/j is applied to ALL fields via as_field(origin=).
+        if horizontal_start not in self._shift_cache:
+            output_entity = self._detect_output_entity()
+            if output_entity is not None:
+                self._shift_cache[horizontal_start] = self._compute_horizontal_shift(
+                    output_entity, horizontal_start)
+            else:
+                self._shift_cache[horizontal_start] = (0, 0)
+        shift_i, shift_j = self._shift_cache[horizontal_start]
+        if shift_i > 0 or shift_j > 0:
+            sds["horizontal_start_shift_i"] = shift_i
+            sds["horizontal_start_shift_j"] = shift_j
 
         # Build the backend instance. DaCe requires auto_optimize to be passed explicitly
         # (factory.Trait is not accessible via SelfAttribute unless set). GTfn passes
@@ -1050,14 +1114,12 @@ class GenericStructuredWrapper:
             local_dim = field.domain.dims[1]
             struct_np = self._pack_sparse_local_field(field, np_data)
             trailing_dims = list(field.domain.dims[2:]) if np_data.ndim > 2 else []
+            # Origin approach: full array + coordinate-origin shift (no slicing).
+            # The DaCe kernel accesses ptr[i + shift_i] which equals the original position.
             if shift_i > 0:
-                struct_np = struct_np[shift_i:, shift_j:]
-                ni_raw = struct_np.shape[0]
-                ni_pad = int(np.ceil(ni_raw / 32)) * 32
-                if ni_pad != ni_raw:
-                    padded = np.zeros((ni_pad, *struct_np.shape[1:]), dtype=struct_np.dtype, order='F')
-                    padded[:ni_raw] = struct_np
-                    struct_np = padded
+                return gtx.as_field(
+                    [IDim, JDim, Kolor, local_dim, *trailing_dims], struct_np,
+                    origin={IDim: shift_i, JDim: shift_j}, allocator=self.allocator)
             return gtx.as_field(
                 [IDim, JDim, Kolor, local_dim, *trailing_dims],
                 struct_np,
@@ -1066,20 +1128,21 @@ class GenericStructuredWrapper:
 
         if self._is_unstructured(field, "Vertex"):
             trailing_dims = list(field.domain.dims[1:]) if np_data.ndim > 1 else []
-            if shift_i > 0 and self.index_map is not None:
-                _PAD = 1  # E2C2V max |di| = 1
-                struct_np = pack_vertex_field_padded(np_data, self.index_map, shift_i, shift_j, _PAD)
-                return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np,
-                                    origin={IDim: _PAD, JDim: _PAD}, allocator=self.allocator)
+            # Full pack + origin: vertex accesses at ptr[i_logical + shift_i] = ptr[i_original]. ✓
+            # V2E/E2C2V neighbor reads also stay in bounds because the shift cancels.
             struct_np = pack_vertex_field_to_structured(np_data, self.index_map)
+            if shift_i > 0:
+                return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np,
+                                    origin={IDim: shift_i, JDim: shift_j}, allocator=self.allocator)
             return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np, allocator=self.allocator)
 
         elif self._is_unstructured(field, "Edge"):
             trailing_dims = list(field.domain.dims[1:]) if np_data.ndim > 1 else []
-            if shift_i > 0 and self.index_map is not None:
-                struct_np = pack_edge_field_compact(np_data, self.index_map, shift_i, shift_j)
-                return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np, allocator=self.allocator)
+            # Full pack + origin: edge accesses at ptr[i_logical + shift_i] = ptr[i_original]. ✓
             struct_np = pack_edge_field(np_data, self.index_map)
+            if shift_i > 0:
+                return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np,
+                                    origin={IDim: shift_i, JDim: shift_j}, allocator=self.allocator)
             return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np, allocator=self.allocator)
 
         elif self._is_unstructured(field, "Cell"):
@@ -1087,12 +1150,14 @@ class GenericStructuredWrapper:
                 return field
             struct_np = pack_cell_field_to_structured(np_data, self.cell_to_ijk, self.ijk_to_cell)
             trailing_dims = list(field.domain.dims[1:]) if np_data.ndim > 1 else []
+            if shift_i > 0:
+                return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np,
+                                    origin={IDim: shift_i, JDim: shift_j}, allocator=self.allocator)
             return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np, allocator=self.allocator)
 
         return field
 
-    def _unpack_to_buffer(self, structured_field, original_unstructured_field,
-                          shift_i: int = 0, shift_j: int = 0):
+    def _unpack_to_buffer(self, structured_field, original_unstructured_field):
         # print(f"unpacking field:", structured_field, "to", original_unstructured_field)
         if not getattr(original_unstructured_field, "domain", None):
             return
@@ -1117,38 +1182,12 @@ class GenericStructuredWrapper:
             return
 
         if self._is_unstructured(original_unstructured_field, "Vertex"):
-            if shift_i > 0 and self.index_map is not None:
-                # Padded vertex array: reverse the ci = i_arr - shift_i + PAD mapping.
-                _PAD = 1
-                i_arr = self.index_map.vertex_to_ij[:, 0]
-                j_arr = self.index_map.vertex_to_ij[:, 1]
-                ci = i_arr - shift_i + _PAD
-                cj = j_arr - shift_j + _PAD
-                n_vertex = len(i_arr)
-                valid = (ci >= 0) & (ci < struct_np.shape[0]) & (cj >= 0) & (cj < struct_np.shape[1])
-                has_k = struct_np.ndim == 4
-                if has_k:
-                    nk = struct_np.shape[3]
-                    unstruct_np = np.zeros((n_vertex, nk), dtype=struct_np.dtype)
-                    unstruct_np[valid] = struct_np[ci[valid], cj[valid], 0, :]
-                else:
-                    unstruct_np = np.zeros((n_vertex,), dtype=struct_np.dtype)
-                    unstruct_np[valid] = struct_np[ci[valid], cj[valid], 0]
-            else:
-                unstruct_np = unpack_vertex_field_to_unstructured(struct_np, self.index_map)
+            # Origin approach: struct_np is the full vertex array at original positions.
+            # vertex_to_ij maps flat vertex index → (i_original, j_original).
+            unstruct_np = unpack_vertex_field_to_unstructured(struct_np, self.index_map)
         elif self._is_unstructured(original_unstructured_field, "Edge"):
-            if shift_i > 0 and self.index_map is not None:
-                # Compact packed array: use shifted ijk_to_edge to map back.
-                # Boundary edges (below horizontal_start) are not in the compact array;
-                # preserve their pre-call values by starting from orig_np.
-                ijk_shifted = self.index_map.ijk_to_edge[shift_i:, shift_j:]
-                ni_raw = ijk_shifted.shape[0]
-                valid = ijk_shifted >= 0
-                unstruct_np = orig_np.copy()
-                # struct_np may be IDim-padded beyond ni_raw; slice to match ijk_shifted.
-                unstruct_np[ijk_shifted[valid]] = struct_np[:ni_raw][valid]
-            else:
-                unstruct_np = unpack_edge_field(struct_np, self.index_map, orig_np.shape[0])
+            # Origin approach: struct_np is the full edge array at original positions.
+            unstruct_np = unpack_edge_field(struct_np, self.index_map, orig_np.shape[0])
         elif self._is_unstructured(original_unstructured_field, "Cell"):
             if self.cell_to_ijk is None:
                 return
@@ -1192,31 +1231,16 @@ class GenericStructuredWrapper:
             and int(val) > 0
         ))
 
-        # Compute the origin shift for this horizontal_start (same logic as _get_or_compile).
-        # If already cached, read from cache; otherwise compute inline.
-        _cached_sds = self._sds_cache.get((horizontal_start, extra_thresholds))
-        if _cached_sds is not None:
-            _pack_shift_i = int(_cached_sds.get("horizontal_start_shift_i", 0))
-            _pack_shift_j = int(_cached_sds.get("horizontal_start_shift_j", 0))
-        elif horizontal_start > 0 and self.index_map is not None:
-            _s_ijk = getattr(self.index_map, "edge_to_ijk", None)
-            if _s_ijk is not None:
-                from gt4py.next.iterator.transforms.cart_unroll import (
-                    _derive_entity_start_bounds_from_mapping as _dsb2,
-                )
-                _s_rows2 = tuple(tuple(int(x) for x in r) for r in _s_ijk)
-                _s_bounds2 = _dsb2("Edge", mapping_rows=_s_rows2,
-                                   horizontal_start=horizontal_start,
-                                   max_i=self.max_i, max_j=self.max_j)
-                if _s_bounds2:
-                    _pack_shift_i = min(ilo for ilo, jlo, ihi, jhi in _s_bounds2.values())
-                    _pack_shift_j = min(jlo for ilo, jlo, ihi, jhi in _s_bounds2.values())
-                else:
-                    _pack_shift_i = _pack_shift_j = 0
+        # Compute origin shift before packing. Must match what _get_or_compile stores
+        # in sds["horizontal_start_shift_i/j"] for IR domain consistency.
+        if horizontal_start > 0 and horizontal_start not in self._shift_cache:
+            _output_entity = self._detect_output_entity()
+            if _output_entity is not None:
+                self._shift_cache[horizontal_start] = self._compute_horizontal_shift(
+                    _output_entity, horizontal_start)
             else:
-                _pack_shift_i = _pack_shift_j = 0
-        else:
-            _pack_shift_i = _pack_shift_j = 0
+                self._shift_cache[horizontal_start] = (0, 0)
+        _pack_shift_i, _pack_shift_j = self._shift_cache.get(horizontal_start, (0, 0))
 
         structured_kwargs = {}
         packed_fields: list[tuple[object, object]] = []
@@ -1284,7 +1308,7 @@ class GenericStructuredWrapper:
 
         _unpack_start = time.perf_counter()
         for original_field, packed_field in packed_fields:
-            self._unpack_to_buffer(packed_field, original_field, _pack_shift_i, _pack_shift_j)
+            self._unpack_to_buffer(packed_field, original_field)
         _unpack_end = time.perf_counter()
         _unpack_elapsed = _unpack_end - _unpack_start
 
