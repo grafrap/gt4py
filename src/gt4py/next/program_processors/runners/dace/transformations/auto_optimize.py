@@ -112,6 +112,7 @@ def gt_auto_optimize(
     sdfg: dace.SDFG,
     gpu: bool,
     unit_strides_kind: Optional[gtx_common.DimensionKind] = None,
+    unit_strides_dim: Optional[list] = None,
     make_persistent: bool = False,
     gpu_block_size: Optional[Sequence[int | str] | str] = (32, 8, 1),
     gpu_block_size_1d: Optional[Sequence[int | str] | str] = (64, 1, 1),
@@ -373,6 +374,7 @@ def gt_auto_optimize(
             sdfg=sdfg,
             gpu=gpu,
             unit_strides_kind=unit_strides_kind,
+            unit_strides_dim=unit_strides_dim,
             gpu_block_size=gpu_block_size,
             gpu_launch_factor=gpu_launch_factor,
             gpu_launch_bounds=gpu_launch_bounds,
@@ -809,13 +811,14 @@ def _gt_auto_configure_maps_and_strides(
     sdfg: dace.SDFG,
     gpu: bool,
     unit_strides_kind: Optional[gtx_common.DimensionKind],
-    gpu_block_size: Optional[Sequence[int | str] | str],
-    gpu_launch_bounds: Optional[int | str],
-    gpu_launch_factor: Optional[int],
-    gpu_maxnreg: Optional[int],
-    optimization_hooks: dict[GT4PyAutoOptHook, GT4PyAutoOptHookFun],
-    gpu_block_size_spec: Optional[dict[str, Sequence[int | str] | str]],
-    validate_all: bool,
+    unit_strides_dim: Optional[list] = None,
+    gpu_block_size: Optional[Sequence[int | str] | str] = None,
+    gpu_launch_bounds: Optional[int | str] = None,
+    gpu_launch_factor: Optional[int] = None,
+    gpu_maxnreg: Optional[int] = None,
+    optimization_hooks: dict[GT4PyAutoOptHook, GT4PyAutoOptHookFun] = None,
+    gpu_block_size_spec: Optional[dict[str, Sequence[int | str] | str]] = None,
+    validate_all: bool = False,
 ) -> dace.SDFG:
     """Configure the Maps and the strides of the SDFG inplace.
 
@@ -827,6 +830,38 @@ def _gt_auto_configure_maps_and_strides(
 
     For a description of the arguments see the `gt_auto_optimize()` function.
     """
+
+    # If `unit_strides_dim` is given, use it directly to set the iteration order for a
+    # specific dimension (e.g., IDim), bypassing the kind-based logic. This makes the
+    # named dimension the innermost map parameter → x-thread (warp) on GPU.
+    if unit_strides_dim is not None:
+        gtx_transformations.gt_set_iteration_order(
+            sdfg=sdfg,
+            unit_strides_dim=unit_strides_dim,
+            validate=False,
+            validate_all=validate_all,
+        )
+        # For strides: HORIZONTAL gives Fortran-order (alphabetically-first dim = stride 1).
+        # With IDim first alphabetically among [IDim, JDim, Kolor], this keeps IDim=stride-1
+        # in transients, matching the warp dimension.
+        gtx_transformations.gt_change_strides(
+            sdfg, prefered_direction_kind=gtx_common.DimensionKind.HORIZONTAL
+        )
+        if gpu:
+            gtx_transformations.gt_gpu_transformation(
+                sdfg,
+                gpu_block_size=gpu_block_size,
+                gpu_launch_bounds=gpu_launch_bounds,
+                gpu_launch_factor=gpu_launch_factor,
+                gpu_maxnreg=gpu_maxnreg,
+                gpu_block_size_spec=gpu_block_size_spec,
+                validate=False,
+                validate_all=validate_all,
+                try_removing_trivial_maps=True,
+            )
+            if optimization_hooks and GT4PyAutoOptHook.AfterToGPU in optimization_hooks:
+                optimization_hooks[GT4PyAutoOptHook.AfterToGPU](sdfg)  # type: ignore[call-arg]
+        return sdfg
 
     # If `unit_strides_kind` is unknown we will not modify the Map order nor the
     #  strides, except if we are on GPU. The reason for this is that the maximal

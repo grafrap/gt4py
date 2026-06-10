@@ -6,6 +6,8 @@
 # Please, refer to the LICENSE file in the root directory.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import copy
+import numbers
 import os
 import sys
 import warnings
@@ -283,6 +285,66 @@ def _process_symbolic_domains_option(
     return symbolic_domain_sizes
 
 
+def pre_inline_scalar_params(
+    program: itir.Program, sds: dict | None
+) -> itir.Program:
+    """Substitute known scalar program param values from sds into the ITIR body.
+
+    Run this once, before any pass pipeline, when USE_STRUCTURED_BACKEND=1.  The result:
+    - Boolean params (e.g. limited_area=True) become ir.Literal so dead_code_elimination
+      can fold if_(True/False, ...) branches in the standard pipeline.
+    - Integer params (e.g. vertical_start=0, vertical_end=5) become OffsetLiteral values,
+      making domain bounds concrete before the structural passes run.
+
+    Threshold params are intentionally skipped because ThresholdConditionRewriter matches
+    them by SymRef name; substituting them first would suppress that rewriting.
+    """
+    if not sds or os.environ.get("USE_STRUCTURED_BACKEND", "0") != "1":
+        return program
+
+    # ThresholdConditionRewriter pattern-matches these by SymRef id — do not substitute.
+    _unsafe: frozenset[str] = frozenset({
+        "start_2nd_nudge_line_idx_e", "start_nudging_line_idx_e",
+        "start_halo_level_2_idx_e", "start_edge_lateral_boundary",
+        "start_edge_lateral_boundary_level_7", "start_edge_nudging_level_2",
+        "end_edge_nudging", "end_edge_halo", "horizontal_start_distance",
+        "horizontal_end_distance", "lateral_boundary_level_2",
+    })
+
+    from gt4py.next.type_system import type_specifications as _ts
+
+    subst: dict[str, itir.Expr] = {}
+    for param in program.params:
+        pid = str(param.id)
+        if pid in _unsafe:
+            continue
+        val = sds.get(pid)
+        # bool must be checked before Integral because bool subclasses int in Python.
+        if isinstance(val, bool):
+            subst[pid] = itir.Literal(
+                value=str(val), type=_ts.ScalarType(kind=_ts.ScalarKind.BOOL)
+            )
+        elif isinstance(val, numbers.Integral):
+            subst[pid] = itir.OffsetLiteral(value=int(val))
+
+    if not subst:
+        return program
+
+    class _Substitutor(eve.NodeTranslator):
+        def visit_SymRef(self, node: itir.SymRef, **kw) -> itir.Expr:
+            r = subst.get(node.id)
+            return copy.deepcopy(r) if r is not None else node
+
+    new_body = [_Substitutor().visit(stmt) for stmt in program.body]
+    return itir.Program(
+        id=program.id,
+        function_definitions=program.function_definitions,
+        params=program.params,
+        declarations=program.declarations,
+        body=new_body,
+    )
+
+
 # TODO(tehrengruber): Revisit interface to configure temporary extraction. We currently forward
 #  `extract_temporaries` and `temporary_extraction_heuristics` which is inconvenient.
 def apply_common_transforms(
@@ -478,31 +540,52 @@ def apply_fieldview_transforms(
     unroll_reduce: bool = False,
     cartesian_reduce_axis_ranges: Optional[dict[common.Dimension, tuple[int, int]]] = None,
     use_max_domain_range_on_unstructured_shift: Optional[bool] = None,
+    symbolic_domain_sizes: Optional[dict[str, str | int]] = None,
 ) -> itir.Program:
     offset_provider_type = common.offset_provider_to_type(offset_provider)
 
     uids = utils.IDGeneratorPool()
-
+    _print_ir_block("=== FIELDVIEW IR BEFORE TRANSFORMS ===", ir, enabled=True)
     symbolic_domain_sizes = _process_symbolic_domains_option(
-        ir, offset_provider, None, use_max_domain_range_on_unstructured_shift
+        ir,
+        offset_provider,
+        cast(Optional[dict[str, itir.Expr]], symbolic_domain_sizes),
+        use_max_domain_range_on_unstructured_shift,
     )
-
+    _print_ir_block(
+        "=== FIELDVIEW IR AFTER PROCESSING DOMAIN OPTIONS ===", ir, enabled=True
+    )
     ir = inline_fundefs.InlineFundefs().visit(ir)
     ir = inline_fundefs.prune_unreferenced_fundefs(ir)
-
+    _print_ir_block("=== FIELDVIEW IR AFTER INLINING FUNDEFS ===", ir, enabled=True)
     # required for dead-code-elimination and `prune_empty_concat_where` pass
     ir = concat_where.expand_tuple_args(ir, offset_provider_type=offset_provider_type)  # type: ignore[assignment]  # always an itir.Program
 
     ir = dead_code_elimination.dead_code_elimination(
         ir, offset_provider_type=offset_provider_type, uids=uids
     )
-
+    _print_ir_block("=== FIELDVIEW IR AFTER DEAD CODE ELIMINATION ===", ir, enabled=True)
     ir = inline_dynamic_shifts.InlineDynamicShifts.apply(
         ir, offset_provider_type=offset_provider_type, uids=uids
     )  # domain inference does not support dynamic offsets yet
 
+    if os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1":
+        ir = NormalizeShifts().visit(ir)
+        ir = inline_lifts.InlineLifts().visit(ir)
+        ir = cart_unroll.CartesianDomainAndTypeRemapper.apply(  # type: ignore[assignment]
+            ir,
+            symbolic_domain_sizes=cast(dict[str, str | int] | None, symbolic_domain_sizes),
+            offset_provider=offset_provider,
+        )
+        ir = cart_unroll.CartesianReductionUnroller.apply(ir)  # type: ignore[assignment]
+        ir = NormalizeShifts().visit(ir)
+        ir = concat_where.expand_tuple_args(ir, offset_provider_type=offset_provider_type)  # type: ignore[assignment]  # always an itir.Program
+        ir = dead_code_elimination.dead_code_elimination(
+            ir, offset_provider_type=offset_provider_type, uids=uids
+        )
+    _print_ir_block("=== FIELDVIEW IR AFTER CARTESIAN UNROLLING ===", ir, enabled=True)
     ir = infer_domain_ops.InferDomainOps.apply(ir)
-
+    _print_ir_block("=== FIELDVIEW IR AFTER INFERRING DOMAIN OPS ===", ir, enabled=True)
     ir = concat_where.canonicalize_domain_argument(ir)
 
     ir = ConstantFolding.apply(ir)  # type: ignore[assignment]  # always an itir.Program
@@ -511,15 +594,114 @@ def apply_fieldview_transforms(
     #     cartesian_reduce_axis_ranges = {common.Dimension("Kolor"): (0, 3)}
     # ir = UnrollCartesianReduce.apply(ir, axis_ranges=cartesian_reduce_axis_ranges)
 
-    ir = infer_domain.infer_program(
-        ir,
-        symbolic_domain_sizes=symbolic_domain_sizes,
-        offset_provider=offset_provider,
-    )
-    ir = ConstantFolding.apply(ir)  # type: ignore[assignment]  # always an itir.Program
+    # For the structured backend the first infer_program runs AFTER the fusion loop (below).
+    # Running it here sets annex.domain annotations that cause FuseAsFieldOp to merge
+    # as_fieldop nodes across kolor boundaries → CUDA_ERROR_ILLEGAL_ADDRESS on big grids.
+    if os.environ.get("USE_STRUCTURED_BACKEND", "0") != "1":
+        ir = infer_domain.infer_program(
+            ir,
+            symbolic_domain_sizes=symbolic_domain_sizes,
+            offset_provider=offset_provider,
+        )
+        ir = ConstantFolding.apply(ir)  # type: ignore[assignment]  # always an itir.Program
 
-    ir = prune_empty_concat_where.prune_empty_concat_where(ir)
+        ir = prune_empty_concat_where.prune_empty_concat_where(ir)
+        _print_ir_block("=== FIELDVIEW IR AFTER PRUNING EMPTY CONCAT WHERE ===", ir, enabled=True)
 
-    ir = remove_broadcast.RemoveBroadcast.apply(ir)
+    # RemoveBroadcast reads node.annex.domain (set by infer_program). For the structured
+    # backend, infer_program runs after the fusion loop, so RemoveBroadcast must also be deferred.
+    if os.environ.get("USE_STRUCTURED_BACKEND", "0") != "1":
+        ir = remove_broadcast.RemoveBroadcast.apply(ir)
 
+    # Fuse the per-op as_fieldop nodes produced by the structured backend passes. Without this,
+    # the IR keeps every `+`, `×`, `cast_`, `if`, `list_get` as a separate as_fieldop over the
+    # full structured domain (513×513×3×K for a 512² grid). Each as_fieldop becomes its own
+    # DaCe nested-SDFG/map writing to a per-op transient — works at tiny grids but exhausts and
+    # corrupts the GPU transient pool at 512² (CUDA_ERROR_ILLEGAL_ADDRESS). See CLAUDE.md
+    # § "Bug 6 — CUDA ILLEGAL_ADDRESS on big grids".
+    #
+    # We deliberately do NOT call `concat_where.transform_to_as_fieldop` here. The DaCe path
+    # in grafrap3 restricts `translate_as_fieldop` to single-field outputs (see
+    # gtir_to_sdfg_primitives.py:255 — raises NotImplementedError for tuple outputs). Calling
+    # transform_to_as_fieldop on a tuple-returning concat_where collapses it into a single
+    # tuple-output as_fieldop that DaCe cannot lower. concat_where is left intact and lowered
+    # by gtir_to_sdfg_concat_where.py — this matches what grafrap_dace did with
+    # `transform_concat_where_to_as_fieldop=False` in `apply_common_transforms`.
+    if os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1":
+        # Pre-fusion: annotate per-kolor domains so CSE in the fusion loop cannot merge
+        # kolor-distinct outer branches into one shared node. Without this, CSE collapses
+        # 3 identical stencil_as_fieldop branches (generated for non-split E2C2EO SetAts)
+        # into one shared node → post-fusion infer_program uses the union context
+        # Kolor:[0,3) → E2C back-propagation produces Kolor:[-2,3) for cell fields → GPU OOB.
+        ir = infer_domain.infer_program(
+            ir,
+            symbolic_domain_sizes=symbolic_domain_sizes,
+            offset_provider=offset_provider,
+        )
+        _prev_fuse_made_progress = True  # allow first iteration always
+        for _iter in range(10):
+            # If the previous iteration's FuseAsFieldOp made no progress, one more cleanup
+            # pass was already run. No further iterations will reduce the IR, so stop.
+            # Root cause of the 10x overrun: CSE creates new tlet_N names each iteration
+            # (advancing the global uids), so `inlined == ir` never fires even when the
+            # computation is structurally identical. Use fusion progress as the real signal.
+            if not _prev_fuse_made_progress:
+                break
+            inlined = ir
+            inlined = InlineLambdas.apply(inlined, opcount_preserving=True)
+            inlined = ConstantFolding.apply(inlined)  # type: ignore[assignment]
+            inlined = CollapseTuple.apply(
+                inlined,
+                enabled_transformations=~CollapseTuple.Transformation.PROPAGATE_TO_IF_ON_TUPLES,
+                uids=uids,
+                offset_provider_type=offset_provider_type,
+            )  # type: ignore[assignment]
+            inlined = InlineScalar.apply(inlined, offset_provider_type=offset_provider_type)
+            inlined = simplify_cart_shifts.SimplifyCartesianShifts.apply(inlined)  # type: ignore[assignment]
+            # CSE before FuseAsFieldOp: normalises repeated accesses to the same field.
+            inlined = CommonSubexpressionElimination.apply(
+                inlined, offset_provider_type=offset_provider_type, uids=uids
+            )
+            inlined = MergeLet().visit(inlined)
+            _fuse_made_progress = False
+            if not os.environ.get("GT4PY_DISABLE_FUSE_AS_FIELDOP"):
+                _n_before = str(inlined).count("as_fieldop")
+                _pre_fuse = inlined
+                try:
+                    inlined = fuse_as_fieldop.FuseAsFieldOp.apply(
+                        inlined, uids=uids, offset_provider_type=offset_provider_type
+                    )
+                except Exception:
+                    inlined = _pre_fuse
+                _n_after = str(inlined).count("as_fieldop")
+                # Reject fusion that collapses too aggressively in one step.
+                # nabla2_smag: 249→3 (83×) — FuseAsFieldOp merges as_fieldop nodes shared
+                # across kolor-split SetAts, creating a dangling connector (tlet_42_minus)
+                # in DaCe SDFG lowering. Threshold of 20 blocks this (83 > 20) while
+                # allowing typical 2-10× reductions for simpler stencils.
+                _ratio = int(os.environ.get("GT4PY_FUSE_RATIO_THRESHOLD", "20"))
+                if _n_before > 0 and _n_after > 0 and (_n_before // _n_after) > _ratio:
+                    inlined = _pre_fuse
+                    _n_after = _n_before
+                print(f"[fusion] FuseAsFieldOp: {_n_before} -> {_n_after} as_fieldop nodes")
+                _fuse_made_progress = _n_after < _n_before
+            inlined = ConstantFolding.apply(inlined)  # type: ignore[assignment]
+            if inlined == ir:
+                break
+            ir = inlined
+            _prev_fuse_made_progress = _fuse_made_progress
+        ir = NormalizeShifts().visit(ir)
+        ir = InlineLambdas.apply(ir, opcount_preserving=True, force_inline_lambda_args=True)
+        # The fusion loop rebuilds the IR tree (InlineLambdas / FuseAsFieldOp create new nodes),
+        # which strips the `node.annex.domain` that gtir_to_sdfg_concat_where.translate_concat_where
+        # reads at lowering time. Re-run domain inference so the annex is repopulated on the
+        # rebuilt concat_where nodes.
+        ir = infer_domain.infer_program(
+            ir,
+            symbolic_domain_sizes=symbolic_domain_sizes,
+            offset_provider=offset_provider,
+        )
+        ir = prune_empty_concat_where.prune_empty_concat_where(ir)
+        ir = remove_broadcast.RemoveBroadcast.apply(ir)
+    _print_ir_block("=== FINAL FIELDVIEW IR ===", ir, enabled=True)
     return ir

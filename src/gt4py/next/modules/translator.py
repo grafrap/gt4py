@@ -129,9 +129,9 @@ def pack_sparse_local_field_to_structured(
     tail_shape = coeff.shape[2:]
 
     if np.issubdtype(coeff.dtype, np.integer):
-        out = np.full((ni, nj, n_kolor, n_local, *tail_shape), -1, dtype=coeff.dtype)
+        out = np.full((ni, nj, n_kolor, n_local, *tail_shape), -1, dtype=coeff.dtype, order='F')
     else:
-        out = np.zeros((ni, nj, n_kolor, n_local, *tail_shape), dtype=coeff.dtype)
+        out = np.zeros((ni, nj, n_kolor, n_local, *tail_shape), dtype=coeff.dtype, order='F')
 
     if local_dim_name == "E2C":
         n_elem = min(coeff.shape[0], index_map.edge_to_ijk.shape[0])
@@ -304,7 +304,7 @@ def apply_sparse_pack_mapping(
 ) -> np.ndarray:
     """Apply precomputed sparse pack index arrays to pack coeff into structured layout."""
     ea, la, cia, cja, cka, sa = mapping
-    out = np.zeros(out_shape, dtype=coeff.dtype)
+    out = np.zeros(out_shape, dtype=coeff.dtype, order='F')
     if ea.size > 0:
         out[cia, cja, cka, sa] = coeff[ea, la]
     return out
@@ -604,7 +604,7 @@ def build_index_map_for_ragged_lonlat_e2v(
 def pack_vertex_field_to_structured(vertex_values: np.ndarray, m: IndexMap) -> np.ndarray:
     ni, max_nj = m.ij_to_vertex.shape
     trailing_shape = vertex_values.shape[1:]
-    out = np.zeros((ni, max_nj, 1, *trailing_shape), dtype=vertex_values.dtype)
+    out = np.zeros((ni, max_nj, 1, *trailing_shape), dtype=vertex_values.dtype, order='F')
     i_arr = m.vertex_to_ij[:, 0]
     j_arr = m.vertex_to_ij[:, 1]
     valid = i_arr >= 0
@@ -622,7 +622,7 @@ def pack_edge_field_to_structured(edge_values: np.ndarray, m: IndexMap) -> np.nd
             f"IndexMap edge id {edge_indices.max()} exceeds available edge axis {n_edge}. "
             "Use an index map generated for the current grid."
         )
-    out = np.zeros((ni, max_nj, n_kolor), dtype=edge_values.dtype)
+    out = np.zeros((ni, max_nj, n_kolor), dtype=edge_values.dtype, order='F')
     out[valid] = edge_values[edge_indices]
     return out
 
@@ -661,10 +661,10 @@ def pack_edge_field(edge_values: np.ndarray, m: "IndexMap") -> np.ndarray:
     has_k = edge_values.ndim == 2
     if has_k:
         nk = edge_values.shape[1]
-        out = np.zeros((ni, max_nj, n_kolor, nk), dtype=edge_values.dtype)
+        out = np.zeros((ni, max_nj, n_kolor, nk), dtype=edge_values.dtype, order='F')
         out[valid] = edge_values[edge_indices]
     else:
-        out = np.zeros((ni, max_nj, n_kolor), dtype=edge_values.dtype)
+        out = np.zeros((ni, max_nj, n_kolor), dtype=edge_values.dtype, order='F')
         out[valid] = edge_values[edge_indices]
     return out
 
@@ -684,12 +684,68 @@ def unpack_edge_field(struct_values: np.ndarray, m: "IndexMap", n_edge: int) -> 
     return out
 
 
+_STRIDE_PAD = 32  # pad IDim to this multiple so each JDim row starts cache-line aligned
+
+
+def _pad_to_stride(n: int) -> int:
+    """Round n up to the next multiple of _STRIDE_PAD."""
+    return int(np.ceil(n / _STRIDE_PAD)) * _STRIDE_PAD
+
+
+def pack_edge_field_compact(edge_values: np.ndarray, m: "IndexMap", shift_i: int, shift_j: int) -> np.ndarray:
+    """Pack edge field to compact Fortran array with IDim padded to a multiple of 32.
+
+    IDim=shift_i lands at ptr[0] (cache-aligned write start). IDim dimension is
+    padded to ceil(ni_raw/_STRIDE_PAD)*_STRIDE_PAD so each JDim row begins at a
+    cache-line boundary — DaCe strides are runtime parameters so no recompilation needed.
+    """
+    ijk = m.ijk_to_edge[shift_i:, shift_j:]
+    ni_raw, nj, n_kolor = ijk.shape
+    ni = _pad_to_stride(ni_raw)
+    valid = ijk >= 0
+    has_k = edge_values.ndim == 2
+    if has_k:
+        nk = edge_values.shape[1]
+        out = np.zeros((ni, nj, n_kolor, nk), dtype=edge_values.dtype, order='F')
+        out[:ni_raw][valid] = edge_values[ijk[valid]]
+    else:
+        out = np.zeros((ni, nj, n_kolor), dtype=edge_values.dtype, order='F')
+        out[:ni_raw][valid] = edge_values[ijk[valid]]
+    return out
+
+
+def pack_vertex_field_padded(vertex_values: np.ndarray, m: IndexMap, shift_i: int, shift_j: int, pad: int) -> np.ndarray:
+    """Pack vertex field to padded array for safe negative-offset reads on GPU.
+
+    Shape: (padded(pad+ni_v-shift_i), pad+nj_v-shift_j, 1, nk) where the IDim
+    is rounded up to a multiple of _STRIDE_PAD for cache-line row alignment.
+    Pass with origin={IDim: pad, JDim: pad} so DaCe range_0=-pad.
+    """
+    ni_v, nj_v = m.ij_to_vertex.shape
+    ni_raw = pad + ni_v - shift_i
+    ni_out = _pad_to_stride(ni_raw)
+    nj_out = pad + nj_v - shift_j
+    has_k = vertex_values.ndim == 2
+    nk = vertex_values.shape[1] if has_k else 1
+    out = np.zeros((ni_out, nj_out, 1, nk), dtype=vertex_values.dtype, order='F')
+    i_arr = m.vertex_to_ij[:, 0]
+    j_arr = m.vertex_to_ij[:, 1]
+    ci = i_arr - shift_i + pad
+    cj = j_arr - shift_j + pad
+    valid = (ci >= 0) & (ci < ni_raw) & (cj >= 0) & (cj < nj_out)
+    if has_k:
+        out[ci[valid], cj[valid], 0, :] = vertex_values[valid, :]
+    else:
+        out[ci[valid], cj[valid], 0, 0] = vertex_values[valid]
+    return out if has_k else out[:, :, :, 0]
+
+
 def pack_vertex_field(vertex_values: np.ndarray, m: IndexMap) -> np.ndarray:
     """Packs an unstructured vertex field into [IDim, JDim, Kolor=1, (KDim)]."""
     has_k = vertex_values.ndim == 2
     ni, nj = m.ij_to_vertex.shape
     nk = vertex_values.shape[1] if has_k else 1
-    out = np.zeros((ni, nj, 1, nk), dtype=vertex_values.dtype)
+    out = np.zeros((ni, nj, 1, nk), dtype=vertex_values.dtype, order='F')
     i_arr = m.vertex_to_ij[:, 0]
     j_arr = m.vertex_to_ij[:, 1]
     valid = i_arr >= 0
@@ -777,7 +833,7 @@ def pack_cell_field(cell_values: np.ndarray, ijk_to_cell: np.ndarray) -> np.ndar
     nk = cell_values.shape[1] if has_k else 1
     valid = ijk_to_cell >= 0
     cell_indices = ijk_to_cell[valid]
-    out = np.zeros((ni, nj, n_kolor, nk), dtype=cell_values.dtype)
+    out = np.zeros((ni, nj, n_kolor, nk), dtype=cell_values.dtype, order='F')
     if has_k:
         out[valid] = cell_values[cell_indices]
     else:
@@ -870,7 +926,7 @@ def pack_c2e2co_field(field_np: np.ndarray, ijk_to_cell: np.ndarray) -> tuple[np
 
     ni, nj, _ = ijk_to_cell.shape
     n_neighbors = field_np.shape[1]
-    out_s = tuple(np.zeros((ni, nj, 2), dtype=field_np.dtype) for _ in range(n_neighbors))
+    out_s = tuple(np.zeros((ni, nj, 2), dtype=field_np.dtype, order='F') for _ in range(n_neighbors))
 
     for i in range(ni):
         for j in range(nj):

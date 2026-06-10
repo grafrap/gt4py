@@ -20,6 +20,8 @@ from gt4py.next.modules.translator import (
     pack_vertex_field_to_structured,
     pack_edge_field_to_structured,
     pack_edge_field,
+    pack_edge_field_compact,
+    pack_vertex_field_padded,
     pack_cell_field_to_structured,
     unpack_vertex_field_to_unstructured,
     unpack_edge_field,
@@ -31,6 +33,18 @@ from gt4py.next.modules.translator import (
 )
 from gt4py.next.iterator.transforms.map_dict import map_dict as _MAP_DICT
 from gt4py.next.iterator import ir
+
+# Module-level global used to communicate symbolic_domain_sizes to the DaCe backend's
+# apply_fieldview_transforms at compile time. This works across threads because:
+# - The main thread sets it before calling _compiled_programs() (which blocks until done).
+# - The DaCe thread-pool compilation reads it while the main thread is blocked.
+# - It is cleared only after the blocking call returns, so no race condition exists.
+_CURRENT_COMPILE_SDS: dict | None = None
+
+
+def get_compile_sds() -> dict | None:
+    """Return the symbolic_domain_sizes currently being compiled, or None."""
+    return _CURRENT_COMPILE_SDS
 
 
 def _parse_map_dict_remap_table() -> dict[str, dict[int, dict[int, tuple[int, int, int]]]]:
@@ -481,7 +495,16 @@ def get_global_grid_mapping(e2v_override=None):
     return _CACHED_INDEX_MAP, _CACHED_REMAP_SIZES
 
 class GenericStructuredWrapper:
-    def __init__(self, operator, backend_factory, index_map, remap_sizes, allocator, offset_provider):
+    def __init__(
+        self,
+        operator,
+        backend_factory,
+        index_map,
+        remap_sizes,
+        allocator,
+        offset_provider,
+        symbolic_domain_sizes: dict | None = None,
+    ):
         self.index_map = index_map
         self.allocator = allocator
         self.operator_name = getattr(operator, "id", None) or getattr(operator, "__name__", "")
@@ -535,36 +558,41 @@ class GenericStructuredWrapper:
         self.e2c2e_conn = self._sanitized_conn.get("E2C2E")
         self.structured_offset_provider = self._build_structured_offset_provider(offset_provider)
 
-        # Build base symbolic_domain_sizes (without horizontal_start — injected lazily at call time).
-        symbolic_domain_sizes = {
+        # Build base symbolic_domain_sizes (without call-time overrides such as horizontal_start).
+        base_symbolic_domain_sizes = dict(symbolic_domain_sizes or {})
+        # print(f"Initializing {self.operator_name} wrapper with remap_sizes={remap_sizes} and symbolic_domain_sizes={base_symbolic_domain_sizes}")
+        base_symbolic_domain_sizes.update({
             "max_i": int(remap_sizes.max_i),
             "max_j": int(remap_sizes.max_j),
             # Always enable mapping-based bounds when index_map is available.
             "use_horizontal_start_mapping": index_map is not None,
-        }
+        })
+        # print(f"Base symbolic_domain_sizes after adding remap_sizes: {base_symbolic_domain_sizes}")
         if self.index_map is not None:
             edge_to_ijk = getattr(self.index_map, "edge_to_ijk", None)
             if edge_to_ijk is not None:
-                symbolic_domain_sizes["edge_to_ijk"] = [
+                base_symbolic_domain_sizes["edge_to_ijk"] = [
                     (int(i), int(j), int(k)) for i, j, k in np.asarray(edge_to_ijk)
                 ]
 
             vertex_to_ij = getattr(self.index_map, "vertex_to_ij", None)
             if vertex_to_ij is not None:
-                symbolic_domain_sizes["vertex_to_ij"] = [
+                base_symbolic_domain_sizes["vertex_to_ij"] = [
                     (int(i), int(j)) for i, j in np.asarray(vertex_to_ij)
                 ]
-
+        # print(f"Base symbolic_domain_sizes after adding index_map: {base_symbolic_domain_sizes}")
         if self.cell_to_ijk is not None:
-            symbolic_domain_sizes["cell_to_ijk"] = [
+            base_symbolic_domain_sizes["cell_to_ijk"] = [
                 (int(i), int(j), int(k)) for i, j, k in np.asarray(self.cell_to_ijk)
             ]
 
         # Store for lazy per-horizontal_start compilation.
         self._operator = operator
         self._backend_factory = backend_factory
-        self._symbolic_domain_sizes_base = symbolic_domain_sizes
-        # Cache keyed by (horizontal_start, extra_thresholds) tuple.
+        # print(f"Initialized {self.operator_name} wrapper with index_map={index_map}, remap_sizes={remap_sizes}, and symbolic_domain_sizes={base_symbolic_domain_sizes}")
+        self._symbolic_domain_sizes_base = base_symbolic_domain_sizes
+        # print(f"Initialized {self.operator_name} wrapper with remap_sizes={remap_sizes}, symbolic_domain_sizes_base={self._symbolic_domain_sizes_base}")
+        # Caches keyed by (horizontal_start, extra_thresholds) tuple.
         self._compiled_cache: dict[tuple, object] = {}
         # Stores the full symbolic_domain_sizes for each cache_key so that the
         # thread-local can be re-set at DaCe JIT-compilation time (which fires
@@ -573,11 +601,78 @@ class GenericStructuredWrapper:
         # Cache for precomputed sparse pack index arrays (built on first use).
         # Key: local_dim_name str; Value: tuple of 6 numpy arrays or None.
         self._sparse_pack_mappings: dict[str, tuple | None] = {}
+        # Cache for (shift_i, shift_j) per horizontal_start value. Key: horizontal_start int.
+        self._shift_cache: dict[int, tuple[int, int]] = {}
         from gt4py._core import definitions as core_defs
         self._use_gpu = getattr(allocator, "device_type", core_defs.DeviceType.CPU) in (
             core_defs.DeviceType.CUDA,
             core_defs.DeviceType.ROCM,
         )
+
+    def _detect_output_entity(self) -> str | None:
+        """Return 'Vertex', 'Edge', or 'Cell' based on the program's output field entity."""
+        try:
+            from gt4py.next.ffront import program_ast as past
+            past_node = self._operator.past_stage.past_node
+            param_map = {str(p.id): p for p in past_node.params}
+            for call in past_node.body:
+                out_expr = call.kwargs.get("out")
+                if out_expr is None:
+                    continue
+                elts = out_expr.elts if isinstance(out_expr, past.TupleExpr) else [out_expr]
+                for elt in elts:
+                    if isinstance(elt, past.Name):
+                        name = str(elt.id)
+                    elif isinstance(elt, past.Subscript):
+                        name = str(elt.value.id)
+                    else:
+                        continue
+                    param = param_map.get(name)
+                    if param is None:
+                        continue
+                    # Eve field 'type' shadows the Python builtin; accessible as type_ or type.
+                    ftype = getattr(param, "type_", None) or getattr(param, "type", None)
+                    dims = getattr(ftype, "dims", None)
+                    if dims:
+                        d0 = str(dims[0].value) if hasattr(dims[0], "value") else str(dims[0])
+                        if d0 in ("Vertex", "Edge", "Cell"):
+                            return d0
+        except Exception:
+            pass
+        return None
+
+    def _compute_horizontal_shift(self, entity: str, horizontal_start: int) -> tuple[int, int]:
+        """Compute (shift_i, shift_j) from the output entity's interior bounds."""
+        if horizontal_start <= 0 or self.index_map is None:
+            return 0, 0
+        from gt4py.next.iterator.transforms.cart_unroll import (
+            _derive_entity_start_bounds_from_mapping,
+        )
+        if entity == "Vertex":
+            vij = getattr(self.index_map, "vertex_to_ij", None)
+            if vij is None:
+                return 0, 0
+            mapping_rows = tuple(tuple(int(x) for x in r) for r in vij)
+            bounds = _derive_entity_start_bounds_from_mapping(
+                "Vertex", mapping_rows=mapping_rows,
+                horizontal_start=horizontal_start,
+                max_i=self.max_i, max_j=self.max_j)
+        elif entity == "Edge":
+            eijk = getattr(self.index_map, "edge_to_ijk", None)
+            if eijk is None:
+                return 0, 0
+            mapping_rows = tuple(tuple(int(x) for x in r) for r in eijk)
+            bounds = _derive_entity_start_bounds_from_mapping(
+                "Edge", mapping_rows=mapping_rows,
+                horizontal_start=horizontal_start,
+                max_i=self.max_i, max_j=self.max_j)
+        else:
+            return 0, 0
+        if not bounds:
+            return 0, 0
+        shift_i = min(b[0] for b in bounds.values())
+        shift_j = min(b[1] for b in bounds.values())
+        return shift_i, shift_j
 
     def _get_or_compile(
         self,
@@ -589,6 +684,7 @@ class GenericStructuredWrapper:
         if cache_key in self._compiled_cache:
             return self._compiled_cache[cache_key]
         sds = dict(self._symbolic_domain_sizes_base)
+        # print(f"sds in _get_or_compile for horizontal_start={horizontal_start}, extra_thresholds={extra_thresholds}: {sds}")
         sds["horizontal_start"] = horizontal_start
         sds["horizontal_start_edge"] = horizontal_start
         sds["horizontal_start_cell"] = horizontal_start
@@ -644,16 +740,27 @@ class GenericStructuredWrapper:
                             sds[f"{param_name}_k{kolor}_ihi"] = ihi + 1  # exclusive
                             sds[f"{param_name}_k{kolor}_jhi"] = jhi + 1  # exclusive
 
-        print(
-            f"[structured] compiling '{self.operator_name}' for "
-            f"horizontal_start={horizontal_start}, thresholds={extra_thresholds}"
-        )
 
-        # Detect whether the stored factory is a DaCe backend factory.
-        # DaCe requires auto_optimize and apply_common_transform to be passed explicitly
-        # because DaCeBackendFactory.auto_optimize is a factory.Trait (not accessible
-        # via SelfAttribute unless set) and apply_common_transform must be True for the
-        # structured backend transforms to run.
+        # Origin-shift: move the coordinate origin so the first interior write lands at
+        # buffer offset 0 (cache-aligned). Detect the OUTPUT entity first so we compute
+        # bounds from the correct mapping (vertex_to_ij for vertex stencils, edge_to_ijk
+        # for edge stencils). Same shift_i/j is applied to ALL fields via as_field(origin=).
+        if horizontal_start not in self._shift_cache:
+            output_entity = self._detect_output_entity()
+            if output_entity is not None:
+                self._shift_cache[horizontal_start] = self._compute_horizontal_shift(
+                    output_entity, horizontal_start)
+            else:
+                self._shift_cache[horizontal_start] = (0, 0)
+        shift_i, shift_j = self._shift_cache[horizontal_start]
+        if shift_i > 0 or shift_j > 0:
+            sds["horizontal_start_shift_i"] = shift_i
+            sds["horizontal_start_shift_j"] = shift_j
+
+        # Build the backend instance. DaCe requires auto_optimize to be passed explicitly
+        # (factory.Trait is not accessible via SelfAttribute unless set). GTfn passes
+        # symbolic_domain_sizes through the factory hierarchy; DaCe reads it from the
+        # thread-local set below.
         try:
             from gt4py.next.program_processors.runners.dace.workflow.backend import (
                 DaCeBackendFactory as _DaCeBackendFactory,
@@ -667,17 +774,21 @@ class GenericStructuredWrapper:
 
         _compile_start = time.perf_counter()
         if _factory_is_dace:
+            # We need cached=True (outer CachedStep, keyed by SDFG content hash) for C++
+            # compilation caching, but otf_workflow__cached_translation=False because the
+            # translation cache is keyed by ITIR hash — which does NOT include
+            # symbolic_domain_sizes / horizontal_start, causing wrong cached SDFGs to be
+            # reused across different horizontal_start values.
+            # _compiled_cache provides in-process caching per (horizontal_start, thresholds).
+            from gt4py.next.program_processors.runners.dace.workflow.backend import (
+                DaCeBackendFactory as _DaCeBackendFactory2,
+            )
             from gt4py.next import config as _gt4py_config
             from gt4py.next import common as _common
-            structured_backend = self._backend_factory(
+            structured_backend = _DaCeBackendFactory2(  # type: ignore[return-value]
                 gpu=self._use_gpu,
                 cached=True,
                 auto_optimize=True,
-                # Disable translation caching: the translation cache is keyed by ITIR
-                # hash which does NOT include symbolic_domain_sizes / horizontal_start.
-                # Reusing a cached translation for a different horizontal_start produces
-                # wrong SDFGs.  _compiled_cache provides in-process caching per
-                # (horizontal_start, thresholds).
                 otf_workflow__cached_translation=False,
                 otf_workflow__bare_translation__apply_common_transform=True,
                 otf_workflow__bare_translation__async_sdfg_call=False,
@@ -689,7 +800,7 @@ class GenericStructuredWrapper:
                 otf_workflow__bare_translation__unstructured_horizontal_has_unit_stride=(
                     _gt4py_config.UNSTRUCTURED_HORIZONTAL_HAS_UNIT_STRIDE
                 ),
-                otf_workflow__bare_translation__use_metrics=False,
+                otf_workflow__bare_translation__use_metrics=True,
                 otf_workflow__bare_translation__disable_field_origin_on_program_arguments=False,
                 otf_workflow__bare_translation__use_max_domain_range_on_unstructured_shift=None,
                 otf_workflow__bare_translation__symbolic_domain_sizes=sds,
@@ -701,13 +812,21 @@ class GenericStructuredWrapper:
                 otf_workflow__bare_translation__symbolic_domain_sizes=sds,
                 gpu=self._use_gpu,
             )
-
+        # Store sds so __call__ can re-set the ContextVar at DaCe pool-thread compile time.
+        self._sds_cache[cache_key] = sds
         from gt4py.next.program_processors.program_setup_utils import setup_program as _setup
-        compiled = _setup(
-            self._operator,
-            backend=structured_backend,
-            offset_provider=self.structured_offset_provider,
-        )
+        global _CURRENT_COMPILE_SDS
+        _CURRENT_COMPILE_SDS = sds
+        # print(f"Current_compile_sds: {_CURRENT_COMPILE_SDS}")
+        try:
+            compiled = _setup(
+                self._operator,
+                backend=structured_backend,
+                offset_provider=self.structured_offset_provider,
+            )
+        finally:
+            _CURRENT_COMPILE_SDS = None
+        # print(f"Current_compile_sds: {_CURRENT_COMPILE_SDS}")
         _compile_end = time.perf_counter()
         _compile_elapsed = _compile_end - _compile_start
         print(f"[timing] {self.operator_name} compilation: {_compile_elapsed:.8f}s")
@@ -987,7 +1106,7 @@ class GenericStructuredWrapper:
 
         return packed
 
-    def _pack_argument(self, field):
+    def _pack_argument(self, field, shift_i: int = 0, shift_j: int = 0):
         if not getattr(field, "domain", None):
             return field
 
@@ -997,6 +1116,12 @@ class GenericStructuredWrapper:
             local_dim = field.domain.dims[1]
             struct_np = self._pack_sparse_local_field(field, np_data)
             trailing_dims = list(field.domain.dims[2:]) if np_data.ndim > 2 else []
+            # Origin approach: full array + coordinate-origin shift (no slicing).
+            # The DaCe kernel accesses ptr[i + shift_i] which equals the original position.
+            if shift_i > 0:
+                return gtx.as_field(
+                    [IDim, JDim, Kolor, local_dim, *trailing_dims], struct_np,
+                    origin={IDim: shift_i, JDim: shift_j}, allocator=self.allocator)
             return gtx.as_field(
                 [IDim, JDim, Kolor, local_dim, *trailing_dims],
                 struct_np,
@@ -1004,13 +1129,22 @@ class GenericStructuredWrapper:
             )
 
         if self._is_unstructured(field, "Vertex"):
-            struct_np = pack_vertex_field_to_structured(np_data, self.index_map)
             trailing_dims = list(field.domain.dims[1:]) if np_data.ndim > 1 else []
+            # Full pack + origin: vertex accesses at ptr[i_logical + shift_i] = ptr[i_original]. ✓
+            # V2E/E2C2V neighbor reads also stay in bounds because the shift cancels.
+            struct_np = pack_vertex_field_to_structured(np_data, self.index_map)
+            if shift_i > 0:
+                return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np,
+                                    origin={IDim: shift_i, JDim: shift_j}, allocator=self.allocator)
             return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np, allocator=self.allocator)
 
         elif self._is_unstructured(field, "Edge"):
-            struct_np = pack_edge_field(np_data, self.index_map)
             trailing_dims = list(field.domain.dims[1:]) if np_data.ndim > 1 else []
+            # Full pack + origin: edge accesses at ptr[i_logical + shift_i] = ptr[i_original]. ✓
+            struct_np = pack_edge_field(np_data, self.index_map)
+            if shift_i > 0:
+                return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np,
+                                    origin={IDim: shift_i, JDim: shift_j}, allocator=self.allocator)
             return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np, allocator=self.allocator)
 
         elif self._is_unstructured(field, "Cell"):
@@ -1018,6 +1152,9 @@ class GenericStructuredWrapper:
                 return field
             struct_np = pack_cell_field_to_structured(np_data, self.cell_to_ijk, self.ijk_to_cell)
             trailing_dims = list(field.domain.dims[1:]) if np_data.ndim > 1 else []
+            if shift_i > 0:
+                return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np,
+                                    origin={IDim: shift_i, JDim: shift_j}, allocator=self.allocator)
             return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np, allocator=self.allocator)
 
         return field
@@ -1045,10 +1182,13 @@ class GenericStructuredWrapper:
             and local_dim_name in _SPARSE_REMAP_TABLE
         ):
             return
-        
+
         if self._is_unstructured(original_unstructured_field, "Vertex"):
+            # Origin approach: struct_np is the full vertex array at original positions.
+            # vertex_to_ij maps flat vertex index → (i_original, j_original).
             unstruct_np = unpack_vertex_field_to_unstructured(struct_np, self.index_map)
         elif self._is_unstructured(original_unstructured_field, "Edge"):
+            # Origin approach: struct_np is the full edge array at original positions.
             unstruct_np = unpack_edge_field(struct_np, self.index_map, orig_np.shape[0])
         elif self._is_unstructured(original_unstructured_field, "Cell"):
             if self.cell_to_ijk is None:
@@ -1075,30 +1215,7 @@ class GenericStructuredWrapper:
             except AttributeError:
                 pass
 
-        structured_kwargs = {}
-        packed_fields: list[tuple[object, object]] = []
-
-        _pack_start = time.perf_counter()
-
-        for arg_name, arg_val in kwargs.items():
-            if arg_name == "offset_provider":
-                continue
-            if isinstance(arg_val, tuple):
-                packed_tuple = tuple(self._pack_argument(f) for f in arg_val)
-                structured_kwargs[arg_name] = packed_tuple
-                for original_field, packed_field in zip(arg_val, packed_tuple, strict=False):
-                    if getattr(original_field, "domain", None) is not None:
-                        packed_fields.append((original_field, packed_field))
-            else:
-                # print(f"Packing argument '{arg_name}' for operator '{self.operator_name}'")
-                packed_arg = self._pack_argument(arg_val)
-                structured_kwargs[arg_name] = packed_arg
-                if getattr(arg_val, "domain", None) is not None:
-                    packed_fields.append((arg_val, packed_arg))
-
-        _pack_end = time.perf_counter()
-        _pack_elapsed = _pack_end - _pack_start
-        # Determine horizontal_start for lazy compilation (use 0 if not present).
+        # Determine horizontal_start and thresholds BEFORE packing so shift is known.
         hs_raw = (
             kwargs.get("horizontal_start_edge")
             or kwargs.get("horizontal_start_e")
@@ -1107,7 +1224,6 @@ class GenericStructuredWrapper:
         )
         horizontal_start = int(hs_raw) if hs_raw is not None else 0
 
-        # Collect known threshold parameters (edge and cell) so per-kolor bounds can be computed.
         _all_threshold_params = _KNOWN_EDGE_THRESHOLD_PARAMS | _KNOWN_CELL_THRESHOLD_PARAMS
         extra_thresholds = tuple(sorted(
             (name, int(val))
@@ -1116,34 +1232,83 @@ class GenericStructuredWrapper:
             and isinstance(val, (int, np.integer))
             and int(val) > 0
         ))
+
+        # Compute origin shift before packing. Must match what _get_or_compile stores
+        # in sds["horizontal_start_shift_i/j"] for IR domain consistency.
+        if horizontal_start > 0 and horizontal_start not in self._shift_cache:
+            _output_entity = self._detect_output_entity()
+            if _output_entity is not None:
+                self._shift_cache[horizontal_start] = self._compute_horizontal_shift(
+                    _output_entity, horizontal_start)
+            else:
+                self._shift_cache[horizontal_start] = (0, 0)
+        _pack_shift_i, _pack_shift_j = self._shift_cache.get(horizontal_start, (0, 0))
+
+        structured_kwargs = {}
+        packed_fields: list[tuple[object, object]] = []
+
+        _pack_start = time.perf_counter()
+        for arg_name, arg_val in kwargs.items():
+            if arg_name == "offset_provider":
+                continue
+            if isinstance(arg_val, tuple):
+                packed_tuple = tuple(self._pack_argument(f, _pack_shift_i, _pack_shift_j) for f in arg_val)
+                structured_kwargs[arg_name] = packed_tuple
+                for original_field, packed_field in zip(arg_val, packed_tuple, strict=False):
+                    if getattr(original_field, "domain", None) is not None:
+                        packed_fields.append((original_field, packed_field))
+            else:
+                # print(f"Packing argument '{arg_name}' for operator '{self.operator_name}'")
+                packed_arg = self._pack_argument(arg_val, _pack_shift_i, _pack_shift_j)
+                structured_kwargs[arg_name] = packed_arg
+                if getattr(arg_val, "domain", None) is not None:
+                    packed_fields.append((arg_val, packed_arg))
+        _pack_end = time.perf_counter()
+        _pack_elapsed = _pack_end - _pack_start
+
         compiled = self._get_or_compile(horizontal_start, extra_thresholds)
         
         _exec_start = time.perf_counter()
 
-        if isinstance(compiled, functools.partial) and hasattr(compiled.func, "_compiled_programs"):
-            bound_kwargs = dict(compiled.keywords or {})
-            offset_provider = bound_kwargs.pop("offset_provider", self.structured_offset_provider)
-            enable_jit = bound_kwargs.pop("enable_jit", None)
+        # Re-set the ContextVar so DaCe pool-thread compilation sees the correct
+        # symbolic_domain_sizes. ContextVar is inherited by ThreadPoolExecutor threads
+        # (via contextvars.copy_context), unlike threading.local.
+        # Set global so the DaCe pool-thread compilation can read it.
+        # The main thread is blocked inside _compiled_programs() while the pool thread
+        # compiles, so this global is stable for the duration — no race condition.
+        global _CURRENT_COMPILE_SDS
+        _call_sds = self._sds_cache.get((horizontal_start, extra_thresholds))
+        if _call_sds is not None:
+            _CURRENT_COMPILE_SDS = _call_sds
+        try:
+            _exec_start = time.perf_counter()
+            if isinstance(compiled, functools.partial) and hasattr(compiled.func, "_compiled_programs"):
+                bound_kwargs = dict(compiled.keywords or {})
+                offset_provider = bound_kwargs.pop("offset_provider", self.structured_offset_provider)
+                enable_jit = bound_kwargs.pop("enable_jit", None)
 
-            merged_kwargs = {**bound_kwargs, **structured_kwargs}
+                merged_kwargs = {**bound_kwargs, **structured_kwargs}
 
-            params = getattr(compiled.func.past_stage.past_node, "params", ())
-            ordered_args = []
-            for param in params:
-                name = str(param.id)
-                if name in merged_kwargs:
-                    ordered_args.append(merged_kwargs.pop(name))
+                params = getattr(compiled.func.past_stage.past_node, "params", ())
+                ordered_args = []
+                for param in params:
+                    name = str(param.id)
+                    if name in merged_kwargs:
+                        ordered_args.append(merged_kwargs.pop(name))
 
-            compiled.func._compiled_programs(
-                *ordered_args,
-                offset_provider=offset_provider,
-                enable_jit=enable_jit,
-            )
-        else:
-            # Fallback for non-partial wrappers.
-            compiled(**structured_kwargs)
-        _exec_end = time.perf_counter()
-        _exec_elapsed = _exec_end - _exec_start
+                compiled.func._compiled_programs(
+                    *ordered_args,
+                    offset_provider=offset_provider,
+                    enable_jit=enable_jit,
+                )
+            else:
+                # Fallback for non-partial wrappers.
+                compiled(**structured_kwargs)
+            _exec_end = time.perf_counter()
+            _exec_elapsed = _exec_end - _exec_start
+        finally:
+            if _call_sds is not None:
+                _CURRENT_COMPILE_SDS = None
 
         _unpack_start = time.perf_counter()
         for original_field, packed_field in packed_fields:

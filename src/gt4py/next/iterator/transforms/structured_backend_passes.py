@@ -37,7 +37,6 @@ from gt4py.next.iterator import ir
 from gt4py.next.iterator.ir_utils import common_pattern_matcher as cpm, ir_makers as im
 from gt4py.next.iterator.type_system import type_specifications as it_ts
 from gt4py.next.type_system import type_specifications as ts
-import numpy as np
 
 map_dict = map_dict_module.map_dict
 
@@ -371,6 +370,25 @@ def _build_field_concat_where_from_branches(
             return None, None
         return fallback, fallback + 1
 
+    def _narrow_kolor(d: ir.Expr, kolor: int) -> ir.Expr | None:
+        if d is None or not cpm.is_call_to(d, "cartesian_domain"):
+            return None
+        new_ranges = []
+        for rng in d.args:
+            if (
+                cpm.is_call_to(rng, "named_range")
+                and len(rng.args) == 3
+                and _get_axis_name(rng.args[0]) == "Kolor"
+            ):
+                new_ranges.append(im.named_range(
+                    cast(ir.AxisLiteral | common.Dimension, copy.deepcopy(rng.args[0])),
+                    ir.OffsetLiteral(value=kolor),
+                    ir.OffsetLiteral(value=kolor + 1),
+                ))
+            else:
+                new_ranges.append(copy.deepcopy(rng))
+        return im.call("cartesian_domain")(*new_ranges)
+
     if current_kolor is not None:
         inferred = inferred_kolor_start
         fallback_spec = branches[-1][1] if branches else None
@@ -400,6 +418,10 @@ def _build_field_concat_where_from_branches(
         edge_domain = _edge_shape_domain(source_kolor, shift_spec)
         if edge_domain is not None:
             branch_domain = edge_domain
+    if source_kolor is not None:
+        narrowed = _narrow_kolor(branch_domain, source_kolor)
+        if narrowed is not None:
+            branch_domain = narrowed
     expr = _make_lifted_deref_shift(arg, shift_spec, branch_domain)
     if len(branches) == 1:
         return expr
@@ -783,7 +805,18 @@ def _mapping_based_axis_bounds(
         return ir.OffsetLiteral(value=axis_lo), ir.OffsetLiteral(value=axis_hi)
     axis_los = [pair[axis_index] for pair in bounds_by_kolor.values()]
     axis_his = [pair[axis_hi_index] for pair in bounds_by_kolor.values()]
-    return ir.OffsetLiteral(value=min(axis_los)), ir.OffsetLiteral(value=max(axis_his) + 1)
+    lo = min(axis_los)
+    hi = max(axis_his) + 1
+    # Vertex output stencils: horizontal_start_shift_i/j comes from vertex interior
+    # bounds (derived from vertex_to_ij). Subtract so the stencil write domain starts
+    # at 0 in logical coords, matching the as_field(origin=shift) coordinate system.
+    # Cell and Edge (kolor=None) handle shift separately in _per_kolor_domain.
+    if entity_name == "Vertex":
+        shift_key = "horizontal_start_shift_i" if axis_name == "IDim" else "horizontal_start_shift_j"
+        shift_val = int(symbolic_domain_sizes.get(shift_key, 0))
+        lo -= shift_val
+        hi -= shift_val
+    return ir.OffsetLiteral(value=lo), ir.OffsetLiteral(value=hi)
 
 
 def _cartesian_axis_bounds(
@@ -944,8 +977,6 @@ class StructuredTypeRemapper(NodeTranslator):
             return False
         if not StructuredTypeRemapper._program_uses_horizontal_unstructured_axis(node):
             return False
-        if os.environ.get("GT4PY_CART_DEBUG", "0") == "1":
-            print(f"[structured_backend] {node.id}: proceeding with structured remap")
 
         program_param_ids = {str(param.id) for param in node.params}
 
@@ -1103,7 +1134,6 @@ class SetAtRemapper(NodeTranslator):
                     new_body.append(self.visit(stmt, current_kolor=k, **child_kwargs))
             else:
                 new_body.append(self.visit(stmt, **child_kwargs))
-
         return ir.Program(
             id=node.id,
             function_definitions=node.function_definitions,
@@ -1217,10 +1247,12 @@ class SetAtRemapper(NodeTranslator):
             )
             if by_kolor is not None and kolor in by_kolor:
                 k_ilo, k_jlo, k_ihi, k_jhi = by_kolor[kolor]
-                ilo = ir.OffsetLiteral(value=k_ilo)
-                jlo = ir.OffsetLiteral(value=k_jlo)
-                ihi = ir.OffsetLiteral(value=k_ihi + 1)
-                jhi = ir.OffsetLiteral(value=k_jhi + 1)
+                _si = int(symbolic_domain_sizes.get("horizontal_start_shift_i", 0))
+                _sj = int(symbolic_domain_sizes.get("horizontal_start_shift_j", 0))
+                ilo = ir.OffsetLiteral(value=k_ilo - _si)
+                jlo = ir.OffsetLiteral(value=k_jlo - _sj)
+                ihi = ir.OffsetLiteral(value=k_ihi + 1 - _si)
+                jhi = ir.OffsetLiteral(value=k_jhi + 1 - _sj)
 
         if ilo is None:
             return None
@@ -1322,7 +1354,11 @@ class SetAtRemapper(NodeTranslator):
                 i0_lo, j0_lo, i0_hi, j0_hi = by_kolor[0]
                 i1_lo, j1_lo, i1_hi, j1_hi = by_kolor[1]
                 i2_lo, j2_lo, i2_hi, j2_hi = by_kolor[2]
-
+                _si = int(symbolic_domain_sizes.get("horizontal_start_shift_i", 0))
+                _sj = int(symbolic_domain_sizes.get("horizontal_start_shift_j", 0))
+                i0_lo -= _si; j0_lo -= _sj; i0_hi -= _si; j0_hi -= _sj
+                i1_lo -= _si; j1_lo -= _sj; i1_hi -= _si; j1_hi -= _sj
+                i2_lo -= _si; j2_lo -= _sj; i2_hi -= _si; j2_hi -= _sj
                 cond_k0 = _and(
                     _dom(copy.deepcopy(k_axis), ir.OffsetLiteral(value=0), ir.OffsetLiteral(value=1)),
                     _and(
@@ -1560,6 +1596,8 @@ class ThresholdConditionRewriter(NodeTranslator):
                                ir.OffsetLiteral(value=lo_val), ir.OffsetLiteral(value=hi_val))
             )
 
+        _si = int(symbolic_domain_sizes.get("horizontal_start_shift_i", 0))
+        _sj = int(symbolic_domain_sizes.get("horizontal_start_shift_j", 0))
         conds = []
         for k in range(n_kolors):
             ilo = symbolic_domain_sizes.get(f"{tid}_k{k}_ilo")
@@ -1570,7 +1608,8 @@ class ThresholdConditionRewriter(NodeTranslator):
                 return None
             conds.append(im.and_(
                 _dom(Kolor_d, k, k + 1),
-                im.and_(_dom(IDim_d, int(ilo), int(ihi)), _dom(JDim_d, int(jlo), int(jhi))),
+                im.and_(_dom(IDim_d, int(ilo) - _si, int(ihi) - _si),
+                        _dom(JDim_d, int(jlo) - _sj, int(jhi) - _sj)),
             ))
         if len(conds) == 2:
             return im.or_(conds[0], conds[1])
@@ -1670,6 +1709,8 @@ class ThresholdConditionRewriter(NodeTranslator):
                                ir.OffsetLiteral(value=lo), ir.OffsetLiteral(value=hi))
             )
 
+        _si = int(symbolic_domain_sizes.get("horizontal_start_shift_i", 0))
+        _sj = int(symbolic_domain_sizes.get("horizontal_start_shift_j", 0))
         conds = []
         for k in range(3):
             ilo = symbolic_domain_sizes.get(f"{range_key}_k{k}_ilo")
@@ -1680,7 +1721,8 @@ class ThresholdConditionRewriter(NodeTranslator):
                 break
             conds.append(im.and_(
                 _rdom(Kolor_d, k, k + 1),
-                im.and_(_rdom(IDim_d, int(ilo), int(ihi)), _rdom(JDim_d, int(jlo), int(jhi))),
+                im.and_(_rdom(IDim_d, int(ilo) - _si, int(ihi) - _si),
+                        _rdom(JDim_d, int(jlo) - _sj, int(jhi) - _sj)),
             ))
         if len(conds) == 3:
             return im.or_(conds[0], im.or_(conds[1], conds[2]))
@@ -1864,6 +1906,24 @@ class SymbolicSizeInliner(NodeTranslator):
                     if bounds is not None:
                         return copy.deepcopy(bounds[idx_val])
 
+        # named_range(axis, lo, hi) — inline SymRef bounds with known integer values.
+        # Handles vertical bounds (e.g. vertical_start, vertical_end) that SetAtRemapper
+        # copies verbatim from the original unstructured domain, as well as any other
+        # symbolic SymRef bounds that have a concrete integer in symbolic_domain_sizes.
+        if cpm.is_call_to(new_node, "named_range") and len(new_node.args) == 3:
+            axis_arg, lo_arg, hi_arg = new_node.args
+            new_lo, new_hi = lo_arg, hi_arg
+            if isinstance(lo_arg, ir.SymRef):
+                val = symbolic_domain_sizes.get(lo_arg.id)
+                if isinstance(val, numbers.Integral):
+                    new_lo = ir.OffsetLiteral(value=int(val))
+            if isinstance(hi_arg, ir.SymRef):
+                val = symbolic_domain_sizes.get(hi_arg.id)
+                if isinstance(val, numbers.Integral):
+                    new_hi = ir.OffsetLiteral(value=int(val))
+            if new_lo is not lo_arg or new_hi is not hi_arg:
+                return ir.FunCall(fun=new_node.fun, args=[axis_arg, new_lo, new_hi])
+
         return new_node
 
     @classmethod
@@ -2040,6 +2100,7 @@ class NeighborReductionUnroller(NodeTranslator):
         domain: ir.Expr | None,
         neutral_element: ir.Expr,
         current_kolor: int | None = None,
+        setat_is_vertex: bool = False,
     ) -> ir.Expr | None:
         if cpm.is_applied_as_fieldop(expr):
             stencil = expr.fun.args[0]
@@ -2065,12 +2126,22 @@ class NeighborReductionUnroller(NodeTranslator):
                             _, is_ene = _conn_name_and_is_edge_to_non_edge(
                                 (ir.OffsetLiteral(value=conn), ir.OffsetLiteral(value=0))
                             )
+                            # In a vertex SetAt, current_kolor=0 is the vertex kolor, not an
+                            # edge kolor. For is_ene connectivities (E2C2V etc.) nested inside
+                            # V2E, using vertex kolor to select the kolor-0 branch is wrong:
+                            # after V2E applies Kolor shifts, the accessed vertex field ends at
+                            # Kolor=dk_V2E (OOB). Generate a full concat_where instead so the
+                            # correct E2C2V branch fires after V2E's Kolor shift.
+                            ck = (
+                                None if (is_ene and setat_is_vertex)
+                                else (current_kolor if (is_ene or current_kolor is not None) else None)
+                            )
                             return _build_field_concat_where_from_branches(
                                 field_expr,
                                 cast(tuple, entry["branches"]),
                                 domain,
                                 apply_edge_shape_bounds=_needs_edge_shape_bounds(conn),
-                                current_kolor=current_kolor if is_ene else None,
+                                current_kolor=ck,
                             )
 
                 if isinstance(stencil.expr, ir.FunCall) and cpm.is_call_to(stencil.expr.fun, "map_"):
@@ -2103,6 +2174,7 @@ class NeighborReductionUnroller(NodeTranslator):
         conn_size: int,
         domain: ir.Expr | None,
         current_kolor: int | None = None,
+        setat_is_vertex: bool = False,
     ) -> ir.Expr:
         domain_bounds: dict[str, tuple[ir.Expr, ir.Expr]] = {}
         if cpm.is_call_to(domain, "cartesian_domain"):
@@ -2188,7 +2260,8 @@ class NeighborReductionUnroller(NodeTranslator):
             )(im.as_fieldop(im.lambda_("__x")(copy.deepcopy(widened_init)), domain)(base_field))
             for idx in range(conn_size):
                 elem_field = NeighborReductionUnroller._eval_list_field_at_idx(
-                    list_expr, idx, domain, neutral_element, current_kolor=current_kolor
+                    list_expr, idx, domain, neutral_element,
+                    current_kolor=current_kolor, setat_is_vertex=setat_is_vertex,
                 )
                 if elem_field is None:
                     break
@@ -2267,6 +2340,14 @@ class NeighborReductionUnroller(NodeTranslator):
 
     # ── visit_SetAt: edge-specialized kolor branch peeling ───────────────────
 
+    @staticmethod
+    def _expr_has_connectivity(expr: ir.Expr, conn_name: str) -> bool:
+        """Returns True if expr contains the named connectivity as an OffsetLiteral value."""
+        return any(
+            isinstance(node, ir.OffsetLiteral) and node.value == conn_name
+            for node in expr.pre_walk_values()
+        )
+
     def visit_SetAt(self, node: ir.SetAt, **kwargs) -> ir.SetAt:
         new_domain = self.visit(node.domain, **kwargs)
         if not self._is_structured_domain(new_domain):
@@ -2282,11 +2363,26 @@ class NeighborReductionUnroller(NodeTranslator):
                 if current_kolor is not None:
                     break
 
-        if current_kolor is None and not _e2c2e_on_local_intermediate(node.expr):
-            new_expr = self._visit_expr_with_kolor_branches(node.expr, new_domain, **kwargs)
+        # When current_kolor==0 and domain is Kolor:[0,1), the domain is ambiguous:
+        # it could be a vertex SetAt (entity has 1 kolor) or a split edge kolor-0 SetAt
+        # (entity has 3 kolors, split into [0,1)). In a vertex SetAt, current_kolor=0
+        # represents the vertex kolor, not an edge kolor.  For is_ene connectivities
+        # (E2C2V etc.) nested inside V2E, the vertex kolor must not be used to select
+        # E2C2V's kolor-0 branch, because V2E will later apply Kolor shifts that would
+        # land u_vert at OOB Kolor positions.  Detect vertex SetAt via V2E connectivity
+        # presence (V2E = vertex→edge, only appears in vertex-output stencils).
+        setat_is_vertex = (
+            current_kolor == 0 and self._expr_has_connectivity(node.expr, "V2E")
+        )
+
+        if current_kolor is None and not _expr_uses_edge_to_edge_connectivity(node.expr):
+            new_expr = self._visit_expr_with_kolor_branches(
+                node.expr, new_domain, setat_is_vertex=setat_is_vertex, **kwargs
+            )
         else:
             new_expr = self.visit(
-                node.expr, current_domain=new_domain, current_kolor=current_kolor, **kwargs
+                node.expr, current_domain=new_domain, current_kolor=current_kolor,
+                setat_is_vertex=setat_is_vertex, **kwargs
             )
         new_target = self.visit(node.target, **kwargs)
         return ir.SetAt(expr=new_expr, domain=new_domain, target=new_target)
@@ -2332,6 +2428,16 @@ class NeighborReductionUnroller(NodeTranslator):
     def visit_FunCall(self, node: ir.FunCall, **kwargs) -> ir.Expr:
         current_domain = kwargs.get("current_domain")
         current_kolor: int | None = kwargs.get("current_kolor")
+        setat_is_vertex: bool = kwargs.get("setat_is_vertex", False)
+
+        def _ck(is_ene: bool) -> int | None:
+            # In a vertex SetAt, current_kolor is the vertex kolor (always 0), not an
+            # edge kolor. For is_ene connectivities (E2C2V etc.) nested inside V2E the
+            # vertex kolor must not be used to select branches — generate a full
+            # concat_where so the correct branch fires after V2E's own Kolor shift.
+            if is_ene and setat_is_vertex:
+                return None
+            return current_kolor if (is_ene or current_kolor is not None) else None
 
         # Path 1 — as_fieldop wrapping a single deref-shift:
         #   as_fieldop(λit. deref(shift(conn, slot)(it)), domain)(field)
@@ -2361,7 +2467,7 @@ class NeighborReductionUnroller(NodeTranslator):
                             cast(tuple, entry["branches"]),
                             current_domain,
                             apply_edge_shape_bounds=_needs_edge_shape_bounds(conn_name or None),
-                            current_kolor=current_kolor if is_ene else None,
+                            current_kolor=_ck(is_ene),
                         )
                     elif entry["kind"] == "shift":
                         return _make_lifted_deref_shift(
@@ -2378,7 +2484,7 @@ class NeighborReductionUnroller(NodeTranslator):
                 rewritten_list_expr = self.visit(list_expr, **kwargs)
                 return self._build_generic_unrolled_reduce_expr(
                     red_op, red_init, rewritten_list_expr, conn_size, current_domain,
-                    current_kolor=current_kolor,
+                    current_kolor=current_kolor, setat_is_vertex=setat_is_vertex,
                 )
 
         new_node = self.generic_visit(node, **kwargs)
@@ -2402,7 +2508,7 @@ class NeighborReductionUnroller(NodeTranslator):
                         return _build_field_concat_where_from_branches(
                             arg, entry["branches"], current_domain,
                             apply_edge_shape_bounds=_needs_edge_shape_bounds(conn_name or None),
-                            current_kolor=current_kolor if is_ene else None,
+                            current_kolor=_ck(is_ene),
                         )
                     return _build_concat_where_from_branches(arg, entry["branches"])
 

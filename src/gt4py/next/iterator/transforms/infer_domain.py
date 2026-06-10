@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import sys
 import typing
 
 from gt4py import eve
@@ -400,8 +401,42 @@ def _infer_concat_where(
     infered_args_expr = []
     actual_domains: AccessedDomains = {}
     cond, true_field, false_field = expr.args
-    symbolic_cond = domain_utils.SymbolicDomain.from_expr(cond)
-    cond_complement = domain_utils.domain_complement(symbolic_cond)
+    if cpm.is_call_to(cond, "and_"):
+        # _build_edge_validity_masked_expr generates and_(Kolor_domain, IDim_domain, JDim_domain).
+        # TRUE branch uses the FULL merged domain so IDim/JDim are restricted to per-kolor valid extent
+        # (prevents E2C OOB on large grids and incorrect cell-field kolor count inference).
+        # FALSE branch complement uses Kolor-only: full complement's IDim:[ihi,+∞) intersects empty
+        # with outer IDim:[ilo,ihi), pruning the FALSE branch → wrong results.
+        flat_cart_doms: list[domain_utils.SymbolicDomain] = []
+        stack = list(cond.args)
+        while stack:
+            sub = stack.pop()
+            if cpm.is_call_to(sub, "and_"):
+                stack.extend(sub.args)
+            elif cpm.is_call_to(sub, "cartesian_domain"):
+                flat_cart_doms.append(domain_utils.SymbolicDomain.from_expr(sub))
+        if flat_cart_doms:
+            grid_type = flat_cart_doms[0].grid_type
+            merged_ranges: dict = {}
+            for sub_dom in flat_cart_doms:
+                merged_ranges.update(sub_dom.ranges)
+            symbolic_cond = domain_utils.SymbolicDomain(grid_type=grid_type, ranges=merged_ranges)
+            kolor_dim = next(
+                (dim for dom in flat_cart_doms for dim in dom.ranges if dim.value == "Kolor"),
+                None,
+            )
+            if kolor_dim is not None:
+                cond_complement = domain_utils.domain_complement(
+                    domain_utils.SymbolicDomain(grid_type=grid_type, ranges={kolor_dim: merged_ranges[kolor_dim]})
+                )
+            else:
+                cond_complement = domain_utils.domain_complement(symbolic_cond)
+        else:
+            symbolic_cond = domain_utils.SymbolicDomain.from_expr(cond.args[0])
+            cond_complement = domain_utils.domain_complement(symbolic_cond)
+    else:
+        symbolic_cond = domain_utils.SymbolicDomain.from_expr(cond)
+        cond_complement = domain_utils.domain_complement(symbolic_cond)
 
     def _remap_legacy_horizontal_domain(
         symbolic_domain: domain_utils.SymbolicDomain,
@@ -628,6 +663,34 @@ def _infer_stmt(
 
 
 def infer_program(
+    program: itir.Program,
+    *,
+    offset_provider: common.OffsetProvider | common.OffsetProviderType,
+    symbolic_domain_sizes: Optional[dict[str, itir.Expr]] = None,
+    allow_uninferred: bool = False,
+    keep_existing_domains: bool = False,
+) -> itir.Program:
+    """
+    Infer the domain of all field subexpressions inside a program.
+
+    See :func:`infer_expr` for more details.
+    """
+    old_limit = sys.getrecursionlimit()
+    if old_limit < 10000:
+        sys.setrecursionlimit(10000)
+    try:
+        return _infer_program_impl(
+            program,
+            offset_provider=offset_provider,
+            symbolic_domain_sizes=symbolic_domain_sizes,
+            allow_uninferred=allow_uninferred,
+            keep_existing_domains=keep_existing_domains,
+        )
+    finally:
+        sys.setrecursionlimit(old_limit)
+
+
+def _infer_program_impl(
     program: itir.Program,
     *,
     offset_provider: common.OffsetProvider | common.OffsetProviderType,

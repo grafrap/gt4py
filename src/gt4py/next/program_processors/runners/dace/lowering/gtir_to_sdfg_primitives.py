@@ -78,28 +78,21 @@ def _parse_fieldop_arg(
     """
     Helper method to visit an expression passed as argument to a field operator
     and create the local view for the field argument.
+
+    Returns a single local view for scalar/field args, a (nested) tuple of local views
+    for tuple-typed args, or `None` for arguments that the caller should strip because
+    domain inference marked them NEVER (e.g. `as_fieldop(λ x → 0)(unused_field)`).
     """
     arg = sdfg_builder.visit(node, ctx=ctx)
 
     if isinstance(arg, gtir_to_sdfg_types.FieldopData):
         return arg.get_local_view(domain, ctx.sdfg)
-    elif arg is None:
-        # translate_symbol_ref returns None for NEVER-domain symbols.  In the
-        # structured backend, domain inference may mark sparse-local fields (e.g.
-        # Field[IDim, JDim, Kolor, C2EDim]) as NEVER because their access pattern
-        # after structural type remapping is not recognized.  Recover by retrieving
-        # the field directly from the SDFG.
-        if isinstance(node, gtir.SymRef):
-            symbol_name = str(node.id)
-            gt_symbol_type = ctx.get_symbol_type(symbol_name)
-            if gt_symbol_type is not None:
-                recovered = _get_data_nodes(ctx.sdfg, ctx.state, sdfg_builder, symbol_name, gt_symbol_type)
-                if isinstance(recovered, gtir_to_sdfg_types.FieldopData):
-                    return recovered.get_local_view(domain, ctx.sdfg)
-        return None
-    else:
-        # handle tuples of fields
-        return gtx_utils.tree_map(lambda targ: targ.get_local_view(domain, ctx.sdfg))(arg)
+    if arg is None:
+        # domain NEVER: the lambda body never accesses this argument.
+        # Return None so the caller can strip the dead arg + its lambda param.
+        return None  # type: ignore[return-value]
+    # handle tuples of fields
+    return gtx_utils.tree_map(lambda targ: targ.get_local_view(domain, ctx.sdfg))(arg)
 
 
 def _create_field_operator_impl(
@@ -205,11 +198,13 @@ def _create_field_operator(
         node_type: The GT4Py type of the IR node that produces this field.
         sdfg_builder: The object used to build the map scope in the provided SDFG.
         input_edges: List of edges to pass input data into the dataflow.
-        output_tree: A tree representation of the dataflow output data.
+        output_tree: A (possibly nested) tree of dataflow output edges. For a single
+            field this is one `DataflowOutputEdge`; for a tuple-of-fields as_fieldop
+            this is the corresponding nested tuple of output edges.
 
     Returns:
         The descriptor of the field operator result, which can be either a single
-        field or a tuple fields.
+        field or a (nested) tuple of fields.
     """
 
     if len(domain) == 0:
@@ -236,14 +231,13 @@ def _create_field_operator(
         return _create_field_operator_impl(
             ctx, sdfg_builder, domain, output_tree, node_type, map_exit
         )
-    else:
-        # handle tuples of fields
-        output_symbol_tree = gtir_to_sdfg_utils.make_symbol_tree("x", node_type)
-        return gtx_utils.tree_map(
-            lambda output_edge, output_sym: _create_field_operator_impl(
-                ctx, sdfg_builder, domain, output_edge, output_sym.type, map_exit
-            )
-        )(output_tree, output_symbol_tree)
+    # handle tuples of fields
+    output_symbol_tree = gtir_to_sdfg_utils.make_symbol_tree("x", node_type)
+    return gtx_utils.tree_map(
+        lambda output_edge, output_sym: _create_field_operator_impl(
+            ctx, sdfg_builder, domain, output_edge, output_sym.type, map_exit
+        )
+    )(output_tree, output_symbol_tree)
 
 
 def translate_as_fieldop(
@@ -307,15 +301,27 @@ def translate_as_fieldop(
         )
 
     # visit the list of arguments to be passed to the lambda expression
-    fieldop_args = [_parse_fieldop_arg(arg, ctx, sdfg_builder, field_domain) for arg in node.args]
+    raw_fieldop_args = [_parse_fieldop_arg(arg, ctx, sdfg_builder, field_domain) for arg in node.args]
+
+    # Filter out None args: domain inference marks a symbol as NEVER when the lambda body
+    # never accesses the corresponding parameter (e.g. `as_fieldop(λ x → 0)(unused_field)`).
+    # Remove both the dead argument and the corresponding dead lambda parameter so that
+    # translate_lambda_to_dataflow receives matching param/arg lists.
+    assert isinstance(stencil_expr, gtir.Lambda)
+    live_pairs = [(p, a) for p, a in zip(stencil_expr.params, raw_fieldop_args) if a is not None]
+    if len(live_pairs) < len(stencil_expr.params):
+        live_params, fieldop_args = zip(*live_pairs) if live_pairs else ([], [])
+        stencil_expr = gtir.Lambda(params=list(live_params), expr=stencil_expr.expr)
+    else:
+        fieldop_args = raw_fieldop_args  # type: ignore[assignment]
 
     # represent the field operator as a mapped tasklet graph, which will range over the field domain
-    input_edges, output_edges = gtir_dataflow.translate_lambda_to_dataflow(
+    input_edges, output_tree = gtir_dataflow.translate_lambda_to_dataflow(
         ctx.sdfg, ctx.state, sdfg_builder, stencil_expr, fieldop_args
     )
 
     return _create_field_operator(
-        ctx, field_domain, node.type, sdfg_builder, input_edges, output_edges
+        ctx, field_domain, node.type, sdfg_builder, input_edges, output_tree
     )
 
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import dace
 import factory
@@ -18,7 +18,7 @@ import factory
 from gt4py._core import definitions as core_defs
 from gt4py.next import common, config
 from gt4py.next.instrumentation import metrics
-from gt4py.next.iterator import ir as itir
+from gt4py.next.iterator import ir as itir, transforms as itir_transforms
 from gt4py.next.iterator.transforms import pass_manager
 from gt4py.next.otf import code_specs, definitions, stages, workflow
 from gt4py.next.otf.binding import interface
@@ -29,6 +29,49 @@ from gt4py.next.program_processors.runners.dace import (
 )
 from gt4py.next.program_processors.runners.dace.workflow import common as gtx_wfdcommon
 from gt4py.next.type_system import type_specifications as ts
+
+
+# DaCe SDFG map parameter name for the Kolor dimension.
+# Computed once using the same function the SDFG lowering uses — guaranteed to match actual params.
+_KOLOR_MAP_PARAM: str = gtx_dace_lowering.get_map_variable(common.Dimension("Kolor"))
+
+
+def _kolor_aware_fusion_callback(
+    self: Any,
+    first_map_node: Union[dace.nodes.MapExit, dace.nodes.MapEntry],
+    second_map_entry: dace.nodes.MapEntry,
+    graph: dace.SDFGState,
+    sdfg: dace.SDFG,
+) -> bool:
+    """Refuse to fuse maps with different single-element Kolor ranges.
+
+    Per-kolor split stencils produce separate maps per Kolor value (Kolor:[k,k+1)).
+    Fusing two such maps with different k values creates a dimensionality mismatch
+    in the fusion temporary (InvalidSDFGEdgeError). Fusion is allowed when either
+    map has no Kolor parameter, both share the same Kolor start index, or the range
+    is symbolic and cannot be evaluated at transform time.
+    """
+    first_map_entry = (
+        first_map_node
+        if isinstance(first_map_node, dace.nodes.MapEntry)
+        else graph.entry_node(first_map_node)
+    )
+    first_params = first_map_entry.map.params
+    second_params = second_map_entry.map.params
+
+    if _KOLOR_MAP_PARAM not in first_params or _KOLOR_MAP_PARAM not in second_params:
+        return True  # One or both maps have no Kolor — allow fusion
+
+    first_kolor_range = first_map_entry.map.range[first_params.index(_KOLOR_MAP_PARAM)]
+    second_kolor_range = second_map_entry.map.range[second_params.index(_KOLOR_MAP_PARAM)]
+
+    try:
+        if int(first_kolor_range[0]) != int(second_kolor_range[0]):
+            return False  # Different Kolor values — refuse fusion
+    except (TypeError, ValueError):
+        pass  # Symbolic range — cannot determine, allow fusion conservatively
+
+    return True
 
 
 def find_constant_symbols(
@@ -95,6 +138,7 @@ def find_constant_symbols(
                 constant_symbols |= {sdfg_symbol.name: 0 for sdfg_symbol in sdfg_origin_symbols}
 
     return constant_symbols
+
 
 
 def make_sdfg_call_async(sdfg: dace.SDFG, gpu: bool) -> None:
@@ -411,17 +455,49 @@ class DaCeTranslator(
         offset_provider: common.OffsetProvider,
         column_axis: Optional[common.Dimension],
     ) -> dace.SDFG:
+        import os as _os
+
+        symbolic_domain_sizes = None
+        if _os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1":
+            try:
+                from gt4py.next.modules.cartesian_interceptor import get_compile_sds
+                symbolic_domain_sizes = get_compile_sds()
+            except ImportError:
+                pass
+            if symbolic_domain_sizes is None:
+                try:
+                    from gt4py.next.program_processors.codegens.gtfn.gtfn_module import (
+                        GTFNTranslationStep,
+                    )
+                    symbolic_domain_sizes = (
+                        GTFNTranslationStep._resolve_symbolic_domain_sizes_from_mesh_metadata()
+                    ) or None
+                except Exception:
+                    pass
+
         if not self.disable_itir_transforms:
             if self.apply_common_transform:
                 ir = self._preprocess_program(ir, offset_provider)
             else:
-                ir = pass_manager.apply_fieldview_transforms(
+                ir = itir_transforms.pre_inline_scalar_params(ir, symbolic_domain_sizes)
+                ir = itir_transforms.apply_fieldview_transforms(
                     ir,
                     use_max_domain_range_on_unstructured_shift=self.use_max_domain_range_on_unstructured_shift,
                     offset_provider=offset_provider,
+                    unroll_reduce=True,
+                    symbolic_domain_sizes=symbolic_domain_sizes,
                 )
         pass_manager._print_ir_block("IR after common transforms", ir, enabled=True)
         offset_provider_type = common.offset_provider_to_type(offset_provider)
+
+        if _os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1":
+            structured_dim_entries = {
+                "IDim": common.Dimension("IDim"),
+                "JDim": common.Dimension("JDim"),
+                "Kolor": common.Dimension("Kolor"),
+            }
+            offset_provider_type = {**offset_provider_type, **structured_dim_entries}
+
         on_gpu = self.device_type != core_defs.DeviceType.CPU
 
         sdfg = gtx_dace_lowering.build_sdfg_from_gtir(ir, offset_provider_type, column_axis)
@@ -438,12 +514,102 @@ class DaCeTranslator(
         if self.auto_optimize:
             auto_optimize_args = {} if self.auto_optimize_args is None else self.auto_optimize_args
 
-            gtx_transformations.gt_auto_optimize(
-                sdfg,
-                gpu=on_gpu,
-                constant_symbols=constant_symbols,
-                **auto_optimize_args,
-            )
+            if _os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1":
+                # Step 1: constant folding — always safe, no structural SDFG changes.
+                if constant_symbols:
+                    gtx_transformations.gt_substitute_compiletime_symbols(
+                        sdfg, constant_symbols, validate=False
+                    )
+
+                # Step 2: gt_auto_optimize with disable_splitting=True for all structured stencils.
+                # Only the two propagate_memlets_sdfg calls in Phase 1's splitting block
+                # (auto_optimize.py lines 557, 572) are unsafe for per-kolor split stencils
+                # (they collapse single-element Kolor:[k,k+1) ranges → InvalidSDFGEdgeError).
+                # disable_splitting=True skips exactly that block; all other phases are safe:
+                #   Phase 1: MapFusionVertical/Horizontal, MapPromoter, GT4PyMapBufferElimination
+                #   Phase 3: GT4PyMoveTaskletIntoMap, RemoveScalarCopies, FuseHorizontalConditionBlocks
+                #   Phase 4: gt_set_iteration_order + gt_change_strides (with unit_strides_kind)
+                # unit_strides_kind=VERTICAL makes K (stride-1 in [IDim,JDim,Kolor,K]) the
+                # innermost CPU loop for cache-coherent memory access.
+                #
+                # Fallback: for a small subset of stencils, Phase 1 map fusion creates a
+                # temporary with wrong dimensionality (scalar vs array mismatch).
+                # Phase 3's FuseHorizontalConditionBlocks hardcodes validate=True and catches
+                # this as InvalidSDFGEdgeError. We snapshot the SDFG before attempting
+                # gt_auto_optimize and restore+apply a safe subset on failure.
+                # Experiment selector: set DACE_OPT_EXPERIMENT env var to override defaults:
+                #   "D"  → blocking_dim=JDim, blocking_size=8  (loop tiling)
+                #   "E"  → fuse_tasklets=True  (tasklet fusion — catastrophic for E2C2V, avoid)
+                #   "F"  → scan_loop_unrolling=True  (K-loop unrolling, now the default below)
+                #   "G"  → reuse_transients=True  (catastrophic SDFG corruption, avoid)
+                #   "none" → disable all extras (pure opt_v2 baseline)
+                _exp = _os.environ.get("DACE_OPT_EXPERIMENT", "FD")
+                _extra: dict = {}
+                if _exp != "none":
+                    if "D" in _exp:
+                        _extra["blocking_dim"] = common.Dimension("JDim")
+                        _extra["blocking_size"] = 8
+                    if "E" in _exp:
+                        _extra["fuse_tasklets"] = True
+                    if "F" in _exp:
+                        _extra["scan_loop_unrolling"] = True
+                        _extra["scan_loop_unrolling_factor"] = 0
+                    if "G" in _exp:
+                        _extra["reuse_transients"] = True
+
+                _hooks = {
+                    gtx_transformations.GT4PyAutoOptHook.TopLevelDataFlowMapFusionVerticalCallBack:
+                        _kolor_aware_fusion_callback,
+                    gtx_transformations.GT4PyAutoOptHook.TopLevelDataFlowMapFusionHorizontalCallBack:
+                        _kolor_aware_fusion_callback,
+                }
+                structured_opt_args: dict = {
+                    # IDim is alphabetically first among [IDim, JDim, Kolor] → stride-1
+                    # in DaCe transients (Fortran-order). unit_strides_dim makes IDim the
+                    # innermost map param → x-thread (warp) on GPU. IDim has ~510 values
+                    # → blockDim.x=32 → 256 threads/block (vs 8 with Kolor as warp).
+                    "unit_strides_dim": [common.Dimension("IDim")],
+                    "disable_splitting": True,
+                    "validate": False,
+                    "optimization_hooks": _hooks,
+                    "gpu_launch_bounds": "256, 8",
+                    **_extra,
+                    **(auto_optimize_args or {}),
+                }
+                sdfg_snapshot = sdfg.to_json()
+                try:
+                    gtx_transformations.gt_auto_optimize(
+                        sdfg,
+                        gpu=on_gpu,
+                        constant_symbols=None,  # already substituted above
+                        **structured_opt_args,
+                    )
+                except Exception:
+                    # Restore SDFG from snapshot and apply safe fallback:
+                    # buffer elimination + iteration order (no map fusion).
+                    sdfg = dace.SDFG.from_json(sdfg_snapshot)
+                    sdfg.apply_transformations_repeated(
+                        gtx_transformations.GT4PyMapBufferElimination(assume_pointwise=True),
+                        validate=False,
+                        validate_all=False,
+                    )
+                    gtx_transformations.gt_set_iteration_order(
+                        sdfg,
+                        unit_strides_dim=[common.Dimension("IDim")],
+                        validate=False,
+                    )
+                    if on_gpu:
+                        gtx_transformations.gt_gpu_transformation(
+                            sdfg, try_removing_trivial_maps=True,
+                            gpu_launch_bounds="256, 8",
+                        )
+            else:
+                gtx_transformations.gt_auto_optimize(
+                    sdfg,
+                    gpu=on_gpu,
+                    constant_symbols=constant_symbols,
+                    **auto_optimize_args,
+                )
         elif on_gpu:
             # Note that `gt_substitute_compiletime_symbols()` will run `gt_simplify()`
             # at entry, in order to avoid some issue in constant propagatation.
@@ -493,7 +659,20 @@ class DaCeTranslator(
             inp.args.column_axis,
         )
 
-        arg_types = inp.args.args
+        import os as _os
+        if _os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1":
+            # apply_fieldview_transforms remaps param types inside StructuredTypeRemapper,
+            # but that transformation is on a NEW program object not accessible here.
+            # Re-apply _cartesian_remapped_type to each arg type so the bindings
+            # match the SDFG (which was built with the structured remapped types).
+            from gt4py.next.iterator.transforms.structured_backend_passes import (
+                StructuredTypeRemapper as _STR,
+            )
+            arg_types = tuple(
+                _STR._cartesian_remapped_type(t) for t in inp.args.args
+            )
+        else:
+            arg_types = inp.args.args
 
         if self.symbolic_domain_sizes:
             # After StructuredTypeRemapper runs, the SDFG has IDim/JDim/Kolor-shaped
