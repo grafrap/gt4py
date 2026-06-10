@@ -807,11 +807,12 @@ def _mapping_based_axis_bounds(
     axis_his = [pair[axis_hi_index] for pair in bounds_by_kolor.values()]
     lo = min(axis_los)
     hi = max(axis_his) + 1
-    # Vertex output stencils: horizontal_start_shift_i/j comes from vertex interior
-    # bounds (derived from vertex_to_ij). Subtract so the stencil write domain starts
-    # at 0 in logical coords, matching the as_field(origin=shift) coordinate system.
-    # Cell and Edge (kolor=None) handle shift separately in _per_kolor_domain.
-    if entity_name == "Vertex":
+    # For Vertex and non-split Edge (kolor=None) SetAts, subtract shift so the write
+    # domain starts at logical 0+max_neg_di, matching the as_field(origin=shift)
+    # coordinate system.  Per-kolor conditions in _build_edge_validity_masked_expr
+    # also subtract shift, so both ends are now consistent.
+    # Cell (kolor=None) is always per-kolor-split, so no adjustment needed here.
+    if entity_name in {"Vertex", "Edge"}:
         shift_key = "horizontal_start_shift_i" if axis_name == "IDim" else "horizontal_start_shift_j"
         shift_val = int(symbolic_domain_sizes.get(shift_key, 0))
         lo -= shift_val

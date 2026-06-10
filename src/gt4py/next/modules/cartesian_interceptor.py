@@ -670,8 +670,48 @@ class GenericStructuredWrapper:
             return 0, 0
         if not bounds:
             return 0, 0
-        shift_i = min(b[0] for b in bounds.values())
-        shift_j = min(b[1] for b in bounds.values())
+        base_shift_i = min(b[0] for b in bounds.values())
+        base_shift_j = min(b[1] for b in bounds.values())
+
+        # Compute required padding from ALL connectivities in this stencil.
+        # For each connectivity present in _sanitized_conn, look up its IDim/JDim shifts
+        # in map_dict and find the maximum negative shift in each direction.
+        max_neg_di = 0
+        max_neg_dj = 0
+        if self._sanitized_conn:
+            from gt4py.next.iterator.transforms.map_dict import map_dict
+            from gt4py.next.iterator import ir as _ir
+            for conn_name in self._sanitized_conn:
+                for (conn_lit, slot_lit), value in map_dict.items():
+                    if not (hasattr(conn_lit, "value") and conn_lit.value == conn_name):
+                        continue
+                    if not isinstance(value, dict) or "branches" not in value:
+                        continue
+                    for branch in value["branches"]:
+                        if not (isinstance(branch, tuple) and len(branch) == 2):
+                            continue
+                        _, offsets = branch
+                        if offsets is None:
+                            continue
+                        k = 0
+                        while k + 1 < len(offsets):
+                            ax = offsets[k]; val = offsets[k + 1]; k += 2
+                            if not (hasattr(ax, "value") and hasattr(val, "value")):
+                                continue
+                            if not isinstance(val.value, int):
+                                continue
+                            if ax.value == "IDim" and val.value < 0:
+                                max_neg_di = max(max_neg_di, -val.value)
+                            elif ax.value == "JDim" and val.value < 0:
+                                max_neg_dj = max(max_neg_dj, -val.value)
+
+        # Reduce the origin shift so the array retains max_neg_di/dj rows of pre-interior
+        # padding, preventing OOB reads on neighbors with negative IDim/JDim offsets.
+        shift_i = max(0, base_shift_i - max_neg_di)
+        shift_j = max(0, base_shift_j - max_neg_dj)
+        print(f"[structured] {self.operator_name}: base_shift=({base_shift_i},{base_shift_j})"
+              f" max_neg=({max_neg_di},{max_neg_dj}) shift=({shift_i},{shift_j})"
+              f" conns={sorted(self._sanitized_conn.keys())}")
         return shift_i, shift_j
 
     def _get_or_compile(
