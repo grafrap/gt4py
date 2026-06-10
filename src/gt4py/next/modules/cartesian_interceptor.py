@@ -799,7 +799,7 @@ class GenericStructuredWrapper:
                 otf_workflow__bare_translation__unstructured_horizontal_has_unit_stride=(
                     _gt4py_config.UNSTRUCTURED_HORIZONTAL_HAS_UNIT_STRIDE
                 ),
-                otf_workflow__bare_translation__use_metrics=False,
+                otf_workflow__bare_translation__use_metrics=True,
                 otf_workflow__bare_translation__disable_field_origin_on_program_arguments=False,
                 otf_workflow__bare_translation__use_max_domain_range_on_unstructured_shift=None,
             )

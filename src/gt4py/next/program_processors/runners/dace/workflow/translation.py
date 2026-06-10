@@ -540,6 +540,7 @@ class DaCeTranslator(
                     "disable_splitting": True,
                     "validate": False,
                     "optimization_hooks": _hooks,
+                    "gpu_launch_bounds": "256, 8",
                     **_extra,
                     **(auto_optimize_args or {}),
                 }
@@ -567,7 +568,8 @@ class DaCeTranslator(
                     )
                     if on_gpu:
                         gtx_transformations.gt_gpu_transformation(
-                            sdfg, try_removing_trivial_maps=True
+                            sdfg, try_removing_trivial_maps=True,
+                            gpu_launch_bounds="256, 8",
                         )
             else:
                 gtx_transformations.gt_auto_optimize(
