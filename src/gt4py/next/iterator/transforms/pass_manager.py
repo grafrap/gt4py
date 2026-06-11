@@ -90,7 +90,7 @@ def _write_debug_output(text: str, *, stream=None) -> None:
     if stream is not None:
         print(text, file=stream, end="")
 
-    debug_file = "ir_out.txt"  # os.environ.get("GT4PY_PRINT_IR_FILE")
+    debug_file = os.environ.get("GT4PY_PRINT_IR_FILE", "ir_out.txt")
     if debug_file:
         mode = "a" if _DEBUG_FILE_INITIALIZED else "w"
         with open(debug_file, mode, encoding="utf-8") as output:
@@ -377,6 +377,10 @@ def apply_common_transforms(
         ir, offset_provider, symbolic_domain_sizes, use_max_domain_range_on_unstructured_shift
     )
 
+    # Substitute compile-time scalar params (e.g. limited_area=False) so that the
+    # dead_code_elimination call below can fold the inactive if/else branch.
+    ir = pre_inline_scalar_params(ir, symbolic_domain_sizes)
+
     uids = utils.IDGeneratorPool()
     ir = MergeLet().visit(ir)
     ir = inline_fundefs.InlineFundefs().visit(ir)
@@ -443,6 +447,24 @@ def apply_common_transforms(
     )
     if transform_concat_where_to_as_fieldop:
         ir = concat_where.transform_to_as_fieldop(ir)
+    elif (
+        os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1"
+        and os.environ.get("GT4PY_CONCAT_WHERE_AS_FIELDOP", "0") == "1"
+    ):
+        # OPT-IN (default OFF). Structured DaCe path: the caller passes
+        # transform_concat_where_to_as_fieldop=False because DaCe cannot lower a tuple-output
+        # as_fieldop (gtir_to_sdfg_primitives.py:255 raises NotImplementedError). A SINGLE-FIELD
+        # concat_where can be rewritten into one `if_`-based as_fieldop, which the fusion loop
+        # below collapses into a SINGLE DaCe map (apply_diffusion_to_vn: 12 -> 3 kernels).
+        #
+        # WARNING — this is OFF by default because full fusion evaluates BOTH branches at every
+        # position: for asymmetric-cost branches (e.g. diffusion_vn, whose nudging branch runs an
+        # expensive E2C2V nabla4) this runs the expensive branch over the whole domain incl. the
+        # boundary frame + adds branch divergence, regressing runtime (~+22% on the 516 grid)
+        # even though kernel count drops. Only enable it for stencils whose branches are cheap.
+        # The default path keeps nudging/boundary as separate restricted maps and removes only
+        # the copy kernels via MapSplitter + GT4PyMapBufferElimination (see translation.py).
+        ir = concat_where.transform_to_as_fieldop(ir, only_single_field=True)
     _print_ir_block("=== GTIR AFTER TRANSFORM AS FIELDOP ===", ir, enabled=print_ir)
     for _ in range(10):
         inlined = ir
@@ -521,6 +543,25 @@ def apply_common_transforms(
     ir = InlineLambdas.apply(
         ir, opcount_preserving=True, force_inline_lambda_args=force_inline_lambda_args
     )
+
+    # NOTE: composed-reduction fusion (e.g. rbf_nabla4 v2e2c2v: E2C2V nabla4 -> edge field ->
+    # V2E reduction) is deliberately NOT forced. The edge intermediate is materialised once as a
+    # separate map; force-inlining it into the outer reduction recomputes the (itself E2C2V)
+    # nabla4 at all 6 V2E slots x 2 outputs and measured ~9x SLOWER at 512x512 (21.0 ms vs
+    # 2.25 ms). The 2-kernel materialised form is optimal. See Opt.md "Optimization 6".
+
+    # Structured DaCe path: split a per-kolor edge-threshold `concat_where` SetAt into
+    # separate restricted SetAts (interior nudging rect + boundary frame rects) that write the
+    # target directly. This removes the native concat_where lowering's full-domain boundary
+    # temp + per-kolor copy maps, while keeping the expensive interior (nabla4) stencil
+    # restricted to the nudging zone (unlike the `if_` form). Runs before the final
+    # infer_program so domain annexes are repopulated on the new restricted as_fieldops.
+    # Set GT4PY_DISABLE_CONCAT_WHERE_SETAT_SPLIT=1 to fall back to the native lowering.
+    if (
+        os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1"
+        and os.environ.get("GT4PY_DISABLE_CONCAT_WHERE_SETAT_SPLIT", "0") != "1"
+    ):
+        ir = cart_unroll.ConcatWhereSetAtSplitter.apply(ir)
 
     ir = infer_domain.infer_program(
         ir,

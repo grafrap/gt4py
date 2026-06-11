@@ -610,6 +610,259 @@ def _kolor_cw_condition_to_domain(cond: ir.Expr, fallback_domain: ir.Expr) -> ir
 
 
 # =====================================================================
+# ConcatWhereSetAtSplitter — split a per-kolor threshold concat_where SetAt
+# into separate restricted SetAts (interior + boundary frame), writing the
+# target directly so the DaCe lowering produces no temp buffer + copy maps.
+# =====================================================================
+
+def _domain_ranges_map(domain: ir.Expr) -> dict[str, tuple[ir.Expr, ir.Expr]] | None:
+    """Parse a cartesian_domain into {axis_name: (lo_expr, hi_expr)} or None."""
+    if not cpm.is_call_to(domain, "cartesian_domain"):
+        return None
+    out: dict[str, tuple[ir.Expr, ir.Expr]] = {}
+    for nr in domain.args:
+        args = _named_range_args(nr)
+        if args is None:
+            return None
+        name = _get_axis_name(args[0])
+        if name is None:
+            return None
+        out[name] = (args[1], args[2])
+    return out
+
+
+def _literal_int(e: ir.Expr) -> int | None:
+    """Return the integer value of an OffsetLiteral / integer Literal, else None."""
+    if isinstance(e, ir.OffsetLiteral) and isinstance(e.value, numbers.Integral):
+        return int(e.value)
+    if isinstance(e, ir.Literal):
+        try:
+            return int(e.value)
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+def _half_space_condition(cond: ir.Expr) -> tuple[str, str, int] | None:
+    """Parse a single-axis half-space cartesian_domain condition.
+
+    `c⟨ X: [-∞, a[ ⟩` -> ("X", "lt", a)  (region is X < a)
+    `c⟨ X: [a, ∞[ ⟩`  -> ("X", "ge", a)  (region is X >= a)
+    Returns None if `cond` is not a clean single-axis half-space.
+    """
+    if not (cpm.is_call_to(cond, "cartesian_domain") and len(cond.args) == 1):
+        return None
+    nr = _named_range_args(cond.args[0])
+    if nr is None:
+        return None
+    axis = _get_axis_name(nr[0])
+    if axis is None:
+        return None
+    lo, hi = nr[1], nr[2]
+    lo_neg_inf = isinstance(lo, ir.InfinityLiteral) and lo.name == "NEGATIVE"
+    hi_pos_inf = isinstance(hi, ir.InfinityLiteral) and hi.name == "POSITIVE"
+    if lo_neg_inf and not hi_pos_inf:
+        v = _literal_int(hi)
+        return (axis, "lt", v) if v is not None else None
+    if hi_pos_inf and not lo_neg_inf:
+        v = _literal_int(lo)
+        return (axis, "ge", v) if v is not None else None
+    return None
+
+
+def _match_threshold_concat_where(
+    expr: ir.Expr,
+) -> tuple[ir.Expr, list[ir.Expr], ir.Expr] | None:
+    """Match `(λ(b) → concat_where(c1, b, concat_where(c2, b, ... INNER)))(BOUNDARY)`.
+
+    Returns `(boundary_expr, [conditions], interior_expr)` where every concat_where true
+    branch is the bound boundary field `b`, or None if `expr` is not this pattern.
+    """
+    if not (isinstance(expr, ir.FunCall) and isinstance(expr.fun, ir.Lambda)):
+        return None
+    if len(expr.fun.params) != 1 or len(expr.args) != 1:
+        return None
+    b_name = str(expr.fun.params[0].id)
+    boundary = expr.args[0]
+    conds: list[ir.Expr] = []
+    cur: ir.Expr = expr.fun.expr
+    while cpm.is_call_to(cur, "concat_where") and len(cur.args) == 3:
+        cond, true_branch, rest = cur.args
+        if not (isinstance(true_branch, ir.SymRef) and str(true_branch.id) == b_name):
+            return None  # boundary is not the shared true branch -> not our pattern
+        conds.append(cond)
+        cur = rest
+    if not conds or cpm.is_call_to(cur, "concat_where"):
+        return None
+    interior = cur
+    # The interior branch must not reference the boundary field.
+    for ref in interior.pre_walk_values().if_isinstance(ir.SymRef):
+        if str(ref.id) == b_name:
+            return None
+    return boundary, conds, interior
+
+
+def _retarget_as_fieldop_domain(afo: ir.Expr, new_domain: ir.Expr) -> ir.Expr:
+    """Rebuild `as_fieldop(stencil, dom)(args)` with `dom` replaced by `new_domain`."""
+    if not cpm.is_applied_as_fieldop(afo):
+        return copy.deepcopy(afo)
+    stencil = afo.fun.args[0]
+    return im.as_fieldop(copy.deepcopy(stencil), copy.deepcopy(new_domain))(
+        *[copy.deepcopy(a) for a in afo.args]
+    )
+
+
+class ConcatWhereSetAtSplitter(NodeTranslator):
+    """Split a per-kolor edge-threshold `concat_where` SetAt into restricted SetAts.
+
+    The structured backend lowers an edge threshold (e.g. start_2nd_nudge_line_idx_e) into
+
+        SetAt(out, (λ(b) → concat_where(c1, b, concat_where(c2, b, ... INTERIOR)))(BOUNDARY),
+              D_full)
+
+    where the conditions `ci` are half-space cartesian_domains on IDim/JDim (the Kolor ones
+    are vestigial inside a single-kolor domain) selecting the boundary frame (true branch =
+    bound `b` = BOUNDARY computed over the whole kolor domain), and INTERIOR is the nudging
+    as_fieldop restricted to the interior rectangle.
+
+    The native DaCe `concat_where` lowering materialises BOUNDARY over the full domain into a
+    temp and copies the frame sub-regions back to `out` (1 full-domain compute + ≥2 copy maps
+    per kolor). This pass instead emits direct writes:
+
+        SetAt(out, INTERIOR, interior_rect)          # nudging zone (keeps nabla4 restricted)
+        SetAt(out, BOUNDARY, frame_rect_i)  × ≤4     # cheap boundary, frame only
+
+    eliminating the temp buffer and all copy maps while — unlike `transform_to_as_fieldop`'s
+    `if_` form — NOT evaluating the expensive interior stencil over the boundary frame.
+
+    Only fires when at least one IDim/JDim condition narrows the interior (horizontal edge
+    threshold) and every Kolor condition is vestigial; bails on vertical (KDim) thresholds and
+    any unrecognised condition, leaving them to the native lowering.
+    """
+
+    @classmethod
+    def apply(cls, node: ir.Program, **kwargs) -> ir.Program:
+        return cls().visit(node, **kwargs)
+
+    def visit_Program(self, node: ir.Program, **kwargs) -> ir.Program:
+        new_body: list[ir.Stmt] = []
+        for stmt in node.body:
+            split = self._try_split(stmt) if isinstance(stmt, ir.SetAt) else None
+            if split is not None:
+                new_body.extend(split)
+            else:
+                new_body.append(stmt)
+        return ir.Program(
+            id=node.id,
+            function_definitions=node.function_definitions,
+            params=node.params,
+            declarations=node.declarations,
+            body=new_body,
+        )
+
+    def _try_split(self, stmt: ir.SetAt) -> list[ir.SetAt] | None:
+        match = _match_threshold_concat_where(stmt.expr)
+        if match is None:
+            return None
+        boundary, conds, interior = match
+
+        # Both branches must be real `as_fieldop` computations. This rejects the per-kolor
+        # edge-validity mask pattern (`concat_where(cond_k, stencil_expr, ... , target)`), whose
+        # else-branch is the bare `target` (vn) passthrough — splitting that would silently turn
+        # the interior into a `vn = vn` no-op and mis-place the real computation.
+        if not (cpm.is_applied_as_fieldop(boundary) and cpm.is_applied_as_fieldop(interior)):
+            return None
+
+        dom = _domain_ranges_map(stmt.domain)
+        if dom is None or "IDim" not in dom or "JDim" not in dom:
+            return None
+        i_lo, i_hi = _literal_int(dom["IDim"][0]), _literal_int(dom["IDim"][1])
+        j_lo, j_hi = _literal_int(dom["JDim"][0]), _literal_int(dom["JDim"][1])
+        if None in (i_lo, i_hi, j_lo, j_hi):
+            return None
+        k_range = dom.get("Kolor")
+        k_lo = _literal_int(k_range[0]) if k_range is not None else None
+        k_hi = _literal_int(k_range[1]) if k_range is not None else None
+
+        ni_lo, ni_hi, nj_lo, nj_hi = i_lo, i_hi, j_lo, j_hi
+        narrowed_ij = False
+        for cond in conds:
+            hs = _half_space_condition(cond)
+            if hs is None:
+                return None  # unrecognised condition -> leave to native lowering
+            axis, kind, val = hs
+            if axis == "IDim":
+                if kind == "lt":
+                    ni_lo = max(ni_lo, val)
+                else:
+                    ni_hi = min(ni_hi, val)
+                narrowed_ij = True
+            elif axis == "JDim":
+                if kind == "lt":
+                    nj_lo = max(nj_lo, val)
+                else:
+                    nj_hi = min(nj_hi, val)
+                narrowed_ij = True
+            elif axis == "Kolor":
+                # Must be vestigial within the single-kolor domain, else we cannot represent
+                # the boundary region with I/J rectangles only.
+                if k_lo is None or k_hi is None:
+                    return None
+                if kind == "lt" and val > k_lo:
+                    return None
+                if kind == "ge" and val < k_hi:
+                    return None
+            else:
+                # Vertical (KDim) or unknown threshold axis — not representable here.
+                return None
+
+        if not narrowed_ij or ni_lo >= ni_hi or nj_lo >= nj_hi:
+            return None  # nothing to split (or empty interior) — keep native lowering
+
+        other_ranges = [
+            nr for nr in stmt.domain.args if _get_axis_name(nr.args[0]) not in ("IDim", "JDim")
+        ]
+
+        def _rect(il: int, ih: int, jl: int, jh: int) -> ir.Expr:
+            idim = cast(Any, common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL))
+            jdim = cast(Any, common.Dimension("JDim", kind=common.DimensionKind.HORIZONTAL))
+            return im.call("cartesian_domain")(
+                im.named_range(idim, ir.OffsetLiteral(value=il), ir.OffsetLiteral(value=ih)),
+                im.named_range(jdim, ir.OffsetLiteral(value=jl), ir.OffsetLiteral(value=jh)),
+                *[copy.deepcopy(nr) for nr in other_ranges],
+            )
+
+        out: list[ir.SetAt] = []
+        interior_dom = _rect(ni_lo, ni_hi, nj_lo, nj_hi)
+        out.append(
+            ir.SetAt(
+                target=copy.deepcopy(stmt.target),
+                domain=interior_dom,
+                expr=_retarget_as_fieldop_domain(interior, interior_dom),
+            )
+        )
+        # Non-overlapping frame: left/right span full height, bottom/top span interior width.
+        frame_rects = [
+            (i_lo, ni_lo, j_lo, j_hi),
+            (ni_hi, i_hi, j_lo, j_hi),
+            (ni_lo, ni_hi, j_lo, nj_lo),
+            (ni_lo, ni_hi, nj_hi, j_hi),
+        ]
+        for il, ih, jl, jh in frame_rects:
+            if il >= ih or jl >= jh:
+                continue
+            rect = _rect(il, ih, jl, jh)
+            out.append(
+                ir.SetAt(
+                    target=copy.deepcopy(stmt.target),
+                    domain=rect,
+                    expr=_retarget_as_fieldop_domain(boundary, rect),
+                )
+            )
+        return out
+
+
+# =====================================================================
 # Symbolic-size helpers (extracted from old visit_FunCall / visit_SetAt closures)
 # =====================================================================
 

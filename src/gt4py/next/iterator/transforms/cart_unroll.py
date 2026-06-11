@@ -29,6 +29,7 @@ from gt4py.next.iterator.transforms.structured_backend_passes import (
     KolorConstantPropagation,
     CanDerefRewriter,
     RewriteCartesianCanDeref,
+    ConcatWhereSetAtSplitter,
     # Module-level helpers used by cartesian_interceptor.py, tests, and other callers
     _derive_entity_start_bounds_from_mapping,
     _derive_entity_range_bounds_from_mapping,
@@ -57,6 +58,7 @@ __all__ = [
     "CartesianDomainAndTypeRemapper",
     "CartesianReductionUnroller",
     "CartUnroll",
+    "ConcatWhereSetAtSplitter",
     "StructuredBackend",
     "StructuredTypeRemapper",
     "SetAtRemapper",

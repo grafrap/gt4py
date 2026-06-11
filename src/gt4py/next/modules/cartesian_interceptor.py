@@ -176,6 +176,15 @@ _KNOWN_CELL_THRESHOLD_PARAMS: frozenset[str] = frozenset({
     "lateral_boundary_level_2",
 })
 
+# Scalar boolean program parameters whose runtime values should be baked in at
+# compile time so that dead-code elimination can fold the inactive branch.
+# pre_inline_scalar_params (pass_manager.py) substitutes these as ir.Literal(bool)
+# → dead_code_elimination removes the unused `if/else` branch from the GT4Py IR
+# → DaCe never sees the dead conditional states → fewer kernels compiled.
+_KNOWN_BOOL_SCALAR_PARAMS: frozenset[str] = frozenset({
+    "limited_area",
+})
+
 
 def _inject_edge_range_bounds(
     edge_mapping_rows: tuple[tuple[int, ...], ...],
@@ -718,9 +727,10 @@ class GenericStructuredWrapper:
         self,
         horizontal_start: int,
         extra_thresholds: tuple[tuple[str, int], ...] = (),
+        extra_scalars: tuple[tuple[str, bool], ...] = (),
     ):
         """Return (and cache) a compiled program for the given horizontal_start + thresholds."""
-        cache_key = (horizontal_start, extra_thresholds)
+        cache_key = (horizontal_start, extra_thresholds, extra_scalars)
         if cache_key in self._compiled_cache:
             return self._compiled_cache[cache_key]
         sds = dict(self._symbolic_domain_sizes_base)
@@ -780,6 +790,12 @@ class GenericStructuredWrapper:
                             sds[f"{param_name}_k{kolor}_ihi"] = ihi + 1  # exclusive
                             sds[f"{param_name}_k{kolor}_jhi"] = jhi + 1  # exclusive
 
+
+        # Inject scalar boolean params so pre_inline_scalar_params can substitute them as
+        # ir.Literal before DCE folds the dead if/else branch (e.g. limited_area=False
+        # removes the limited_area=True concat_where branch from the GT4Py IR entirely).
+        for name, val in extra_scalars:
+            sds[name] = val
 
         # Origin-shift: move the coordinate origin so the first interior write lands at
         # buffer offset 0 (cache-aligned). Detect the OUTPUT entity first so we compute
@@ -1272,6 +1288,12 @@ class GenericStructuredWrapper:
             and isinstance(val, (int, np.integer))
             and int(val) > 0
         ))
+        extra_scalars = tuple(sorted(
+            (name, bool(val))
+            for name, val in kwargs.items()
+            if name in _KNOWN_BOOL_SCALAR_PARAMS
+            and isinstance(val, (bool, np.bool_))
+        ))
 
         # Compute origin shift before packing. Must match what _get_or_compile stores
         # in sds["horizontal_start_shift_i/j"] for IR domain consistency.
@@ -1306,7 +1328,7 @@ class GenericStructuredWrapper:
         _pack_end = time.perf_counter()
         _pack_elapsed = _pack_end - _pack_start
 
-        compiled = self._get_or_compile(horizontal_start, extra_thresholds)
+        compiled = self._get_or_compile(horizontal_start, extra_thresholds, extra_scalars)
         
         _exec_start = time.perf_counter()
 
@@ -1317,7 +1339,7 @@ class GenericStructuredWrapper:
         # The main thread is blocked inside _compiled_programs() while the pool thread
         # compiles, so this global is stable for the duration — no race condition.
         global _CURRENT_COMPILE_SDS
-        _call_sds = self._sds_cache.get((horizontal_start, extra_thresholds))
+        _call_sds = self._sds_cache.get((horizontal_start, extra_thresholds, extra_scalars))
         if _call_sds is not None:
             _CURRENT_COMPILE_SDS = _call_sds
         try:

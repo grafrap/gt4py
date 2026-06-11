@@ -6,6 +6,7 @@
 # Please, refer to the LICENSE file in the root directory.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import dataclasses
 import functools
 
 from gt4py.eve import NodeTranslator, PreserveLocationVisitor
@@ -52,28 +53,42 @@ def _in(pos: itir.Expr, domain: itir.Expr) -> itir.Expr:
     return functools.reduce(im.and_, ret)
 
 
+@dataclasses.dataclass
 class _TransformToAsFieldop(PreserveLocationVisitor, NodeTranslator):
     PRESERVED_ANNEX_ATTRS = (
         "type",
         "domain",
     )
 
+    #: When True, only single-field (non-tuple) `concat_where` expressions are rewritten;
+    #: tuple-output `concat_where` is left intact. Used by the structured DaCe backend, whose
+    #: `translate_as_fieldop` cannot lower tuple-output `as_fieldop` (it raises
+    #: `NotImplementedError`), so tuple-output `concat_where` must stay a native node lowered
+    #: by `gtir_to_sdfg_concat_where.py`.
+    only_single_field: bool = False
+
     @classmethod
-    def apply(cls, node: itir.Node):
+    def apply(cls, node: itir.Node, *, only_single_field: bool = False):
         """
         Transform `concat_where` expressions into equivalent `as_fieldop` expressions.
 
         Note that (backward) domain inference may not be executed after this pass as it can not
         correctly infer the accessed domains when the value selection is represented as an `if_`
         inside the `as_fieldop.
+
+        Args:
+            only_single_field: If True, only rewrite single-field `concat_where`; leave
+                tuple-output `concat_where` untouched (required for the structured DaCe backend).
         """
-        node = cls().visit(node)
+        node = cls(only_single_field=only_single_field).visit(node)
         node = type_inference.SanitizeTypes().visit(node)
         return node
 
     def visit_FunCall(self, node: itir.FunCall) -> itir.FunCall:
         node = self.generic_visit(node)
-        if cpm.is_call_to(node, "concat_where"):
+        if cpm.is_call_to(node, "concat_where") and not (
+            self.only_single_field and isinstance(node.type, ts.TupleType)
+        ):
             cond, true_branch, false_branch = node.args
             assert isinstance(cond.type, ts.DomainType)
             position = [im.index(dim) for dim in cond.type.dims]

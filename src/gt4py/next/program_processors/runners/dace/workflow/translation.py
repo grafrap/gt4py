@@ -74,6 +74,54 @@ def _kolor_aware_fusion_callback(
     return True
 
 
+def _inline_multi_consumer_transients(sdfg: dace.SDFG) -> None:
+    """Inline producer maps into each consumer when an intermediate has >1 reader.
+
+    `MapPromoter` only promotes transients that are "single use" (one reader). For
+    nabla4-type stencils the E2C2V intermediate (e.g. `gtir_tmp_31`) is written once
+    but consumed by two separate maps (boundary zone and interior zone). This helper
+    calls `inline_dataflow_into_map` per consumer edge, embedding the producer
+    computation as a NestedSDFG inside each consumer. The intermediate is then dead
+    and removed by the subsequent `gt_auto_optimize` passes.
+
+    Fixed-point loop: restarts after each successful inline because the SDFG
+    structure changes and iterators become stale.
+    """
+    n_inlined = 1
+    while n_inlined > 0:
+        n_inlined = 0
+        for state in sdfg.states():
+            scope_dict = state.scope_dict()
+            for map_entry in list(state.nodes()):
+                if not isinstance(map_entry, dace.nodes.MapEntry):
+                    continue
+                if scope_dict.get(map_entry) is not None:
+                    continue  # only top-level maps
+                for edge in list(state.out_edges(map_entry)):
+                    if not edge.src_conn or not edge.src_conn.startswith("OUT_"):
+                        continue
+                    in_conn = "IN_" + edge.src_conn[4:]
+                    in_edges = list(state.in_edges_by_connector(map_entry, in_conn))
+                    if len(in_edges) != 1:
+                        continue
+                    src = in_edges[0].src
+                    if not isinstance(src, dace.nodes.AccessNode):
+                        continue
+                    desc = sdfg.arrays.get(src.data)
+                    if desc is None or not desc.transient:
+                        continue
+                    if state.out_degree(src) <= 1:
+                        continue  # single consumer — MapPromoter already handles it
+                    result = gtx_transformations.inline_dataflow_into_map(sdfg, state, edge)
+                    if result is not None:
+                        n_inlined += 1
+                        break  # state changed — restart from outer while
+                if n_inlined > 0:
+                    break  # restart state loop
+            if n_inlined > 0:
+                break  # restart sdfg-states loop
+
+
 def find_constant_symbols(
     ir: itir.Program,
     sdfg: dace.SDFG,
@@ -502,7 +550,7 @@ class DaCeTranslator(
 
         sdfg = gtx_dace_lowering.build_sdfg_from_gtir(ir, offset_provider_type, column_axis)
         # get sdfg here sdfg.save()
-        sdfg.save("before_gpu_transformation.sdfg", compress=True)
+        # sdfg.save("before_gpu_transformation.sdfg", compress=True)
         constant_symbols = find_constant_symbols(
             ir,
             sdfg,
@@ -542,6 +590,7 @@ class DaCeTranslator(
                 #   "E"  → fuse_tasklets=True  (tasklet fusion — catastrophic for E2C2V, avoid)
                 #   "F"  → scan_loop_unrolling=True  (K-loop unrolling, now the default below)
                 #   "G"  → reuse_transients=True  (catastrophic SDFG corruption, avoid)
+                #   "I"  → inline multi-consumer transients (E2C2V intermediate elimination)
                 #   "none" → disable all extras (pure opt_v2 baseline)
                 _exp = _os.environ.get("DACE_OPT_EXPERIMENT", "FD")
                 _extra: dict = {}
@@ -556,6 +605,8 @@ class DaCeTranslator(
                         _extra["scan_loop_unrolling_factor"] = 0
                     if "G" in _exp:
                         _extra["reuse_transients"] = True
+                    if "I" in _exp:
+                        _inline_multi_consumer_transients(sdfg)
 
                 _hooks = {
                     gtx_transformations.GT4PyAutoOptHook.TopLevelDataFlowMapFusionVerticalCallBack:
@@ -635,7 +686,7 @@ class DaCeTranslator(
             gtx_transformations.gt_substitute_compiletime_symbols(
                 sdfg, constant_symbols, validate=True
             )
-        sdfg.save("after_gpu_transformation.sdfg")
+        # sdfg.save("after_gpu_transformation.sdfg")
         if self.async_sdfg_call:
             make_sdfg_call_async(sdfg, on_gpu)
         else:

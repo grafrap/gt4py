@@ -86,6 +86,86 @@ map_dict = {  # V2E:
             ir.OffsetLiteral(value=2),
         ),
     },
+    # V2E2C2V: vertex → 7 unique vertices reachable via V2E then E2C2V.
+    # Kolor delta = 0 for all slots (V2E kolor offset and E2C2V branch offset cancel).
+    # Slot assignment: 0=center(0,0), 1=N(0,1), 2=NW(-1,1), 3=E(1,0), 4=SE(1,-1), 5=S(0,-1), 6=W(-1,0)
+    (ir.OffsetLiteral(value="V2E2C2V"), ir.OffsetLiteral(value=0)): {
+        "kind": "shift",
+        "shifts": (
+            ir.OffsetLiteral(value="IDim"),
+            ir.OffsetLiteral(value=0),
+            ir.OffsetLiteral(value="JDim"),
+            ir.OffsetLiteral(value=0),
+            ir.OffsetLiteral(value="Kolor"),
+            ir.OffsetLiteral(value=0),
+        ),
+    },
+    (ir.OffsetLiteral(value="V2E2C2V"), ir.OffsetLiteral(value=1)): {
+        "kind": "shift",
+        "shifts": (
+            ir.OffsetLiteral(value="IDim"),
+            ir.OffsetLiteral(value=0),
+            ir.OffsetLiteral(value="JDim"),
+            ir.OffsetLiteral(value=1),
+            ir.OffsetLiteral(value="Kolor"),
+            ir.OffsetLiteral(value=0),
+        ),
+    },
+    (ir.OffsetLiteral(value="V2E2C2V"), ir.OffsetLiteral(value=2)): {
+        "kind": "shift",
+        "shifts": (
+            ir.OffsetLiteral(value="IDim"),
+            ir.OffsetLiteral(value=-1),
+            ir.OffsetLiteral(value="JDim"),
+            ir.OffsetLiteral(value=1),
+            ir.OffsetLiteral(value="Kolor"),
+            ir.OffsetLiteral(value=0),
+        ),
+    },
+    (ir.OffsetLiteral(value="V2E2C2V"), ir.OffsetLiteral(value=3)): {
+        "kind": "shift",
+        "shifts": (
+            ir.OffsetLiteral(value="IDim"),
+            ir.OffsetLiteral(value=1),
+            ir.OffsetLiteral(value="JDim"),
+            ir.OffsetLiteral(value=0),
+            ir.OffsetLiteral(value="Kolor"),
+            ir.OffsetLiteral(value=0),
+        ),
+    },
+    (ir.OffsetLiteral(value="V2E2C2V"), ir.OffsetLiteral(value=4)): {
+        "kind": "shift",
+        "shifts": (
+            ir.OffsetLiteral(value="IDim"),
+            ir.OffsetLiteral(value=1),
+            ir.OffsetLiteral(value="JDim"),
+            ir.OffsetLiteral(value=-1),
+            ir.OffsetLiteral(value="Kolor"),
+            ir.OffsetLiteral(value=0),
+        ),
+    },
+    (ir.OffsetLiteral(value="V2E2C2V"), ir.OffsetLiteral(value=5)): {
+        "kind": "shift",
+        "shifts": (
+            ir.OffsetLiteral(value="IDim"),
+            ir.OffsetLiteral(value=0),
+            ir.OffsetLiteral(value="JDim"),
+            ir.OffsetLiteral(value=-1),
+            ir.OffsetLiteral(value="Kolor"),
+            ir.OffsetLiteral(value=0),
+        ),
+    },
+    (ir.OffsetLiteral(value="V2E2C2V"), ir.OffsetLiteral(value=6)): {
+        "kind": "shift",
+        "shifts": (
+            ir.OffsetLiteral(value="IDim"),
+            ir.OffsetLiteral(value=-1),
+            ir.OffsetLiteral(value="JDim"),
+            ir.OffsetLiteral(value=0),
+            ir.OffsetLiteral(value="Kolor"),
+            ir.OffsetLiteral(value=0),
+        ),
+    },
     # V2C:
     (ir.OffsetLiteral(value="V2C"), ir.OffsetLiteral(value=0)): {
         "kind": "shift",
