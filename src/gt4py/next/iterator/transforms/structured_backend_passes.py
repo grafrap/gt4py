@@ -3352,11 +3352,14 @@ class ComposedShiftInliner(NodeTranslator):
             vertex_param_names[j] = names
 
         # Add a lifted-deref-shift param for each (outer_shift, edge_scalar_j) pair
+        def _enc(v: int) -> str:
+            return f"m{-v}" if v < 0 else str(v)
+
         edge_param_names: dict[tuple[tuple[int,int,int], int], str] = {}
         for outer_sh in unique_outer_shifts:
             di, dj, dk = outer_sh
             for j, edge_arg in edge_scalar_args.items():
-                pname = f"__csi_e_{di}n{dj}n{dk}_p{j}"
+                pname = f"__csi_e_{_enc(di)}n{_enc(dj)}n{_enc(dk)}_p{j}"
                 edge_param_names[(outer_sh, j)] = pname
                 new_params.append(ir.Sym(id=pname))
                 new_args.append(

@@ -669,3 +669,117 @@ class TestEdgeCellEdgeFusionThreshold:
         shifts = _collect_outer_shifts(result)
         assert shifts == {(0, 0, 0), (-1, 0, 0)}, \
             f"Expected E2C∘C2E composed shifts with threshold inner, got {shifts}"
+
+
+# ── Test: multi-arg inner as_fieldop (formula inlining, rbf_nabla4 pattern) ──
+
+class TestMultiArgFormulaInlining:
+    """ComposedShiftInliner fuses an inner as_fieldop that has multiple per-kolor
+    shifted vertex args (simulating the rbf_nabla4 nabla4 formula structure).
+
+    Uses the actual V2E and E2C2V shifts from the parallelogram mesh:
+      6 outer V2E shifts × 4 E2C2V slot groups (3 kolors each)
+      = 24 compositions → 7 unique (di, dj, 0) vertex positions
+
+    Inner formula (simplified, no scalar factors): u2 + u3 + u0 + u1
+    The pass inlines this formula once per outer V2E slot.
+
+    Per-j CSE (no cross-arg dedup): 4 unique composed shifts per slot × 4 slots = 16 params.
+    All composed dk = 0 (valid vertex kolor-0 domain).
+    """
+
+    # 6 outer V2E shifts (di, dj, dk) — dk selects edge kolor
+    _V2E_SHIFTS = [(-1, 0, 2), (-1, 0, 1), (0, -1, 0), (0, -1, 2), (0, 0, 1), (0, 0, 0)]
+
+    # The 7 unique V2E∘E2C2V composed vertex positions (all dk=0)
+    _UNIQUE_7 = {(0, 1, 0), (-1, 1, 0), (-1, 0, 0), (1, 0, 0), (0, -1, 0), (1, -1, 0), (0, 0, 0)}
+
+    def _make_setat(self, include_scalar: bool = False) -> ir.SetAt:
+        vertex_dom = _cartesian_domain(0, 1)
+        edge_dom = _cartesian_domain(0, 3)
+        u_src = im.ref("u_vert")
+
+        # 4 per-kolor shifted vertex args (E2C2V slots 2, 3, 0, 1 — threshold format)
+        cw_args = [
+            _make_3branch_cw_threshold(u_src, vertex_dom, (-1, 1, 0), (0, 1, -1), (1, 1, -2)),
+            _make_3branch_cw_threshold(u_src, vertex_dom, (1, 0, 0), (1, -1, -1), (0, 0, -2)),
+            _make_3branch_cw_threshold(u_src, vertex_dom, (0, 0, 0), (0, 0, -1), (0, 1, -2)),
+            _make_3branch_cw_threshold(u_src, vertex_dom, (0, 1, 0), (1, 0, -1), (1, 0, -2)),
+        ]
+
+        if include_scalar:
+            # Add a plain edge-domain scalar arg (pnv1) — not per-kolor shifted
+            inner_stencil = im.lambda_("u2", "u3", "u0", "u1", "pnv1")(
+                im.plus(
+                    im.plus(im.plus(im.plus(
+                        im.deref(im.ref("u2")), im.deref(im.ref("u3"))),
+                        im.deref(im.ref("u0"))), im.deref(im.ref("u1"))),
+                    im.deref(im.ref("pnv1"))
+                )
+            )
+            inner_args = cw_args + [im.ref("pnv1_field")]
+        else:
+            inner_stencil = im.lambda_("u2", "u3", "u0", "u1")(
+                im.plus(im.plus(im.plus(
+                    im.deref(im.ref("u2")), im.deref(im.ref("u3"))),
+                    im.deref(im.ref("u0"))), im.deref(im.ref("u1")))
+            )
+            inner_args = cw_args
+
+        inner_asfop = im.as_fieldop(inner_stencil, edge_dom)(*inner_args)
+
+        # Outer vertex stencil: sum of 6 V2E-shifted accesses to edge intermediate
+        accesses = [_make_outer_access("inter", di, dj, dk) for di, dj, dk in self._V2E_SHIFTS]
+        body = accesses[0]
+        for a in accesses[1:]:
+            body = im.plus(body, a)
+        outer_asfop = im.as_fieldop(im.lambda_("inter")(body), vertex_dom)(inner_asfop)
+        return ir.SetAt(expr=outer_asfop, domain=vertex_dom, target=ir.SymRef(id="out"))
+
+    def test_fires(self):
+        """Edge-domain intermediate [0,3) is eliminated after fusion."""
+        result = ComposedShiftInliner.apply(self._make_setat())
+        assert not _has_inner_on_domain(result, 0, 3), \
+            "Edge-domain intermediate should be eliminated for multi-arg inner"
+
+    def test_7_unique_composed_positions(self):
+        """Composed shifts cover exactly the 7 V2E2C2V vertex positions."""
+        result = ComposedShiftInliner.apply(self._make_setat())
+        shifts = _collect_outer_shifts(result)
+        assert shifts == self._UNIQUE_7, \
+            f"Expected 7 V2E2C2V positions, got {shifts}"
+
+    def test_16_vertex_args(self):
+        """Per-j CSE: 4 unique per E2C2V slot × 4 slots = 16 vertex read params."""
+        result = ComposedShiftInliner.apply(self._make_setat())
+        assert cpm.is_applied_as_fieldop(result.expr)
+        n_lifted = sum(
+            1 for arg in result.expr.args
+            if ComposedShiftInliner._get_lifted_shift(arg) is not None
+        )
+        assert n_lifted == 16, f"Expected 16 vertex-read args, got {n_lifted}"
+
+    def test_with_scalar_fires(self):
+        """Pass fires even when inner has a plain edge-scalar arg alongside per-kolor args."""
+        result = ComposedShiftInliner.apply(self._make_setat(include_scalar=True))
+        assert not _has_inner_on_domain(result, 0, 3), \
+            "Edge-domain intermediate should be eliminated with mixed (vertex+scalar) inner args"
+
+    def test_with_scalar_22_lifted_args(self):
+        """With 1 edge scalar: 16 vertex reads + 6 V2E-shifted scalar reads = 22 total."""
+        result = ComposedShiftInliner.apply(self._make_setat(include_scalar=True))
+        assert cpm.is_applied_as_fieldop(result.expr)
+        n_lifted = sum(
+            1 for arg in result.expr.args
+            if ComposedShiftInliner._get_lifted_shift(arg) is not None
+        )
+        assert n_lifted == 22, f"Expected 22 lifted args (16 vertex + 6 scalar), got {n_lifted}"
+
+    def test_no_minus_in_param_names(self):
+        """Edge scalar param names must not contain '-' (invalid C identifier).
+        Regression for the _enc() fix in _try_inline_intermediate."""
+        result = ComposedShiftInliner.apply(self._make_setat(include_scalar=True))
+        new_stencil = result.expr.fun.args[0]
+        for param in new_stencil.params:
+            assert "-" not in param.id, \
+                f"Param name contains '-' (invalid C identifier): {param.id!r}"
