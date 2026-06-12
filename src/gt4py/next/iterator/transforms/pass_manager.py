@@ -418,6 +418,7 @@ def apply_common_transforms(
             "=== GTIR AFTER CARTESIAN DOMAIN AND TYPE REMAPPING ===", ir, enabled=print_ir
         )
         ir = cart_unroll.CartesianReductionUnroller.apply(ir)  # type: ignore[assignment]
+        ir = cart_unroll.ComposedShiftInliner.apply(ir)  # type: ignore[assignment]
         ir = NormalizeShifts().visit(ir)
         _print_ir_block("=== GTIR AFTER CARTESIAN UNROLLING ===", ir, enabled=print_ir)
         # ir = cart_unroll.KolorConstantPropagation.apply(ir)  # type: ignore[assignment]
@@ -619,6 +620,7 @@ def apply_fieldview_transforms(
             offset_provider=offset_provider,
         )
         ir = cart_unroll.CartesianReductionUnroller.apply(ir)  # type: ignore[assignment]
+        ir = cart_unroll.ComposedShiftInliner.apply(ir)  # type: ignore[assignment]
         ir = NormalizeShifts().visit(ir)
         ir = concat_where.expand_tuple_args(ir, offset_provider_type=offset_provider_type)  # type: ignore[assignment]  # always an itir.Program
         ir = dead_code_elimination.dead_code_elimination(

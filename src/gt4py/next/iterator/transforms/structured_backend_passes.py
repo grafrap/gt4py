@@ -16,9 +16,10 @@ Passes (in execution order):
   4. ThresholdConditionRewriter — General dispatcher + entity-specialized: rewrite threshold conds
   5. SymbolicSizeInliner      — General: inline symbolic domain sizes
   6. NeighborReductionUnroller — General + edge-specialized kolor peeling: unroll reductions
-  7. KolorConstantPropagation — General (optional, disabled): dead kolor branch elimination
-  8. CanDerefRewriter         — General: replace can_deref with True
-  9. StructuredBackend        — Orchestration: run all passes in order
+  7. ComposedShiftInliner     — General: fuse chained as_fieldop intermediates into composed shifts
+  8. KolorConstantPropagation — General (optional, disabled): dead kolor branch elimination
+  9. CanDerefRewriter         — General: replace can_deref with True
+ 10. StructuredBackend        — Orchestration: run all passes in order
 
 cart_unroll.py is a backward-compat shim that re-exports the old class names from here.
 """
@@ -2872,6 +2873,485 @@ class CanDerefRewriter(NodeTranslator):
 
 
 # =====================================================================
+# ComposedShiftInliner — fuse chained as_fieldop intermediates
+# =====================================================================
+
+
+class _SymRefSubstituter(NodeTranslator):
+    """Replace SymRef(name) with substitutions[name] for each name in the map."""
+
+    def __init__(self, subs: dict[str, ir.Expr]) -> None:
+        self._subs = subs
+
+    def visit_SymRef(self, node: ir.SymRef, **kwargs: Any) -> ir.Expr:
+        return copy.deepcopy(self._subs.get(node.id, node))
+
+
+class _IntermediateSubstituter(NodeTranslator):
+    """Replace deref(shift_chain(SymRef(param))) with the pre-computed inlined value."""
+
+    def __init__(
+        self, param_name: str, shift_to_value: dict[tuple[int, int, int], ir.Expr]
+    ) -> None:
+        self._param_name = param_name
+        self._shift_to_value = shift_to_value
+
+    def visit_FunCall(self, node: ir.FunCall, **kwargs: Any) -> ir.Expr:
+        if (
+            isinstance(node.fun, ir.SymRef)
+            and node.fun.id == "deref"
+            and len(node.args) == 1
+        ):
+            sh = ComposedShiftInliner._decode_deref_of_param(node, self._param_name)
+            if sh is not None and sh in self._shift_to_value:
+                return copy.deepcopy(self._shift_to_value[sh])
+        return self.generic_visit(node, **kwargs)
+
+
+class _BetaReducer(NodeTranslator):
+    """Eagerly beta-reduce (λ(params) → body)(args) application nodes."""
+
+    def visit_FunCall(self, node: ir.FunCall, **kwargs: Any) -> ir.Expr:
+        node = self.generic_visit(node, **kwargs)
+        if isinstance(node.fun, ir.Lambda) and len(node.fun.params) == len(node.args):
+            subs = {p.id: copy.deepcopy(a) for p, a in zip(node.fun.params, node.args)}
+            return _SymRefSubstituter(subs).visit(copy.deepcopy(node.fun.expr))
+        return node
+
+
+class ComposedShiftInliner(NodeTranslator):
+    """Fuse chained as_fieldop intermediate fields into direct composed shifts.
+
+    After NeighborReductionUnroller, all shift chains are fully concrete.
+    This pass detects patterns where an outer as_fieldop on domain D_out
+    accesses an inner as_fieldop intermediate on a different domain D_in at
+    two or more distinct (IDim, JDim, Kolor) offsets, and the inner stencil
+    reads source fields via per-kolor concat_where branches.  The two shift
+    layers are composed and the intermediate is inlined, eliminating the
+    separate inner kernel.
+
+    Supported connectivity pairs (non-exhaustive):
+      V2E ∘ E2C2V  →  V2E2C2V   (vertex ← edge ← vertex)
+      E2C ∘ C2E    →  E2C2E     (edge ← cell ← edge)
+      C2E ∘ E2C    →  C2E2C     (cell ← edge ← cell)
+      V2C ∘ C2V    →  V2C2V     (vertex ← cell ← vertex)
+
+    Runs after NeighborReductionUnroller, before CanDerefRewriter.
+    """
+
+    # ---- low-level static helpers ----------------------------------------
+
+    @staticmethod
+    def _decode_shift_args(shift_args: list) -> tuple[int, int, int] | None:
+        """Decode [axis, delta, ...] pairs → (di, dj, dk).
+
+        Axis literals may be normalized ('_OffIDim') or bare ('IDim').
+        Missing axes default to 0.
+        """
+        dims: dict[str, int] = {"IDim": 0, "JDim": 0, "Kolor": 0}
+        i = 0
+        while i + 1 < len(shift_args):
+            axis_lit, val_lit = shift_args[i], shift_args[i + 1]
+            if not isinstance(axis_lit, ir.OffsetLiteral) or not isinstance(
+                val_lit, ir.OffsetLiteral
+            ):
+                return None
+            if not isinstance(val_lit.value, int):
+                return None
+            axis_str = str(axis_lit.value)
+            matched = False
+            for dim in ("IDim", "JDim", "Kolor"):
+                if dim in axis_str:
+                    dims[dim] = int(val_lit.value)
+                    matched = True
+                    break
+            if not matched:
+                return None
+            i += 2
+        if i != len(shift_args):
+            return None
+        return (dims["IDim"], dims["JDim"], dims["Kolor"])
+
+    @staticmethod
+    def _decode_deref_of_param(
+        deref_node: ir.FunCall, param_name: str
+    ) -> tuple[int, int, int] | None:
+        """If deref_node = deref(shift_chain(SymRef(param))), return (di, dj, dk).
+
+        Returns (0,0,0) for the identity.  Returns None otherwise.
+        """
+        if not (
+            isinstance(deref_node.fun, ir.SymRef) and deref_node.fun.id == "deref"
+        ):
+            return None
+        if len(deref_node.args) != 1:
+            return None
+        inner = deref_node.args[0]
+        if isinstance(inner, ir.SymRef) and inner.id == param_name:
+            return (0, 0, 0)
+        if not isinstance(inner, ir.FunCall):
+            return None
+        shift_fun = inner.fun
+        if not (
+            isinstance(shift_fun, ir.FunCall)
+            and isinstance(shift_fun.fun, ir.SymRef)
+            and shift_fun.fun.id == "shift"
+        ):
+            return None
+        if len(inner.args) != 1:
+            return None
+        arg0 = inner.args[0]
+        if not isinstance(arg0, ir.SymRef) or arg0.id != param_name:
+            return None
+        return ComposedShiftInliner._decode_shift_args(list(shift_fun.args))
+
+    @staticmethod
+    def _collect_deref_shifts_of_param(
+        expr: ir.Expr, param_name: str
+    ) -> list[tuple[int, int, int]]:
+        """Return all (di, dj, dk) from deref(shift_chain(SymRef(param))) in expr."""
+        result: list[tuple[int, int, int]] = []
+        for node in expr.pre_walk_values().if_isinstance(ir.FunCall):
+            if not (isinstance(node.fun, ir.SymRef) and node.fun.id == "deref"):
+                continue
+            sh = ComposedShiftInliner._decode_deref_of_param(node, param_name)
+            if sh is not None:
+                result.append(sh)
+        return result
+
+    @staticmethod
+    def _get_lifted_shift(expr: ir.Expr) -> tuple[int, int, int] | None:
+        """Extract shift from as_fieldop(λit → deref(shift_chain(it)), dom)(field).
+
+        Returns (0,0,0) for the identity.  Returns None if not this pattern.
+        """
+        if not (cpm.is_applied_as_fieldop(expr) and len(expr.args) == 1):
+            return None
+        stencil = expr.fun.args[0]
+        if not isinstance(stencil, ir.Lambda) or len(stencil.params) != 1:
+            return None
+        it_name = stencil.params[0].id
+        body = stencil.expr
+        if not (
+            isinstance(body, ir.FunCall)
+            and isinstance(body.fun, ir.SymRef)
+            and body.fun.id == "deref"
+        ):
+            return None
+        if len(body.args) != 1:
+            return None
+        inner = body.args[0]
+        if isinstance(inner, ir.SymRef) and inner.id == it_name:
+            return (0, 0, 0)
+        if not isinstance(inner, ir.FunCall):
+            return None
+        shift_fun = inner.fun
+        if not (
+            isinstance(shift_fun, ir.FunCall)
+            and isinstance(shift_fun.fun, ir.SymRef)
+            and shift_fun.fun.id == "shift"
+        ):
+            return None
+        if len(inner.args) != 1:
+            return None
+        it_ref = inner.args[0]
+        if not isinstance(it_ref, ir.SymRef) or it_ref.id != it_name:
+            return None
+        return ComposedShiftInliner._decode_shift_args(list(shift_fun.args))
+
+    @staticmethod
+    def _extract_kolor_branch_shifts(
+        expr: ir.Expr,
+        _next_kolor: int = 0,
+    ) -> dict[int, tuple[int, int, int]] | None:
+        """Parse a concat_where tree into {kolor → (di, dj, dk)}.
+
+        Handles the structure produced by _build_field_concat_where_from_branches:
+
+          concat_where(K[k, k+1), leaf_k, rest_for_higher_kolors)
+
+        where the condition K[k, k+1) identifies the kolor for the true branch,
+        and the false branch covers all remaining (higher) kolors recursively.
+        Each leaf must be a lifted-deref-shift as_fieldop.
+
+        Returns None if the structure does not match or any leaf is malformed.
+        """
+        if not cpm.is_call_to(expr, "concat_where") or len(expr.args) != 3:
+            # Base case: single-kolor leaf (no more branching)
+            sh = ComposedShiftInliner._get_lifted_shift(expr)
+            return {_next_kolor: sh} if sh is not None else None
+
+        cond, true_branch, false_branch = expr.args
+        # cond is K[k, k+1): the true branch handles exactly kolor k
+        cond_kolor = _kolor_from_cw_condition(cond)
+        if cond_kolor is None:
+            return None
+
+        true_sh = ComposedShiftInliner._get_lifted_shift(true_branch)
+        if true_sh is None:
+            return None
+
+        # false_branch handles all kolors above cond_kolor — recurse
+        rest = ComposedShiftInliner._extract_kolor_branch_shifts(
+            false_branch, _next_kolor=cond_kolor + 1
+        )
+        if rest is None:
+            return None
+
+        return {cond_kolor: true_sh, **rest}
+
+    @staticmethod
+    def _get_lifted_shift_source(expr: ir.Expr) -> ir.Expr | None:
+        """Return the source field from a concat_where tree of lifted deref shifts.
+
+        Descends the false-branch chain (lowest kolor) to find the innermost
+        as_fieldop(stencil, dom)(source) and returns its source argument.
+        """
+        cur = expr
+        while cpm.is_call_to(cur, "concat_where") and len(cur.args) == 3:
+            cur = cur.args[2]  # false_branch
+        if cpm.is_applied_as_fieldop(cur) and len(cur.args) == 1:
+            return cur.args[0]
+        return None
+
+    @staticmethod
+    def _get_kolor_range(domain: ir.Expr | None) -> tuple[int, int] | None:
+        """Return (lo, hi) for the Kolor axis in a cartesian_domain, or None."""
+        if domain is None or not cpm.is_call_to(domain, "cartesian_domain"):
+            return None
+        for nr in domain.args:
+            if _named_range_args(nr) is None:
+                continue
+            if _get_axis_name(nr.args[0]) != "Kolor":
+                continue
+            lo, hi = nr.args[1], nr.args[2]
+            if isinstance(lo, ir.OffsetLiteral) and isinstance(hi, ir.OffsetLiteral):
+                return (int(lo.value), int(hi.value))
+        return None
+
+    @staticmethod
+    def _resolve_inner_asfop(expr: ir.Expr) -> ir.FunCall | None:
+        """Return the inner as_fieldop, possibly beta-reducing a λ-redex wrapper."""
+        if cpm.is_applied_as_fieldop(expr):
+            return expr
+        if isinstance(expr, ir.FunCall) and isinstance(expr.fun, ir.Lambda):
+            lam = expr.fun
+            if len(lam.params) == len(expr.args):
+                subs = {
+                    p.id: copy.deepcopy(a) for p, a in zip(lam.params, expr.args)
+                }
+                result = _SymRefSubstituter(subs).visit(copy.deepcopy(lam.expr))
+                if cpm.is_applied_as_fieldop(result):
+                    return result
+        return None
+
+    @staticmethod
+    def _shift_to_spec(shift: tuple[int, int, int]) -> tuple[ir.OffsetLiteral, ...]:
+        """Build an OffsetLiteral shift spec from (di, dj, dk)."""
+        di, dj, dk = shift
+        return (
+            ir.OffsetLiteral(value="IDim"), ir.OffsetLiteral(value=di),
+            ir.OffsetLiteral(value="JDim"), ir.OffsetLiteral(value=dj),
+            ir.OffsetLiteral(value="Kolor"), ir.OffsetLiteral(value=dk),
+        )
+
+    # ---- main transformation ---------------------------------------------
+
+    @classmethod
+    def apply(cls, node: ir.Node, **kwargs: Any) -> ir.Node:
+        return cls().visit(node, **kwargs)
+
+    def visit_SetAt(self, node: ir.SetAt, **kwargs: Any) -> ir.SetAt:
+        node = self.generic_visit(node, **kwargs)
+        return self._try_compose_and_inline(node)
+
+    def _try_compose_and_inline(self, setat: ir.SetAt) -> ir.SetAt:
+        outer_expr = setat.expr
+        if not cpm.is_applied_as_fieldop(outer_expr):
+            return setat
+        outer_stencil = outer_expr.fun.args[0]
+        outer_domain = outer_expr.fun.args[1] if len(outer_expr.fun.args) > 1 else None
+        if not isinstance(outer_stencil, ir.Lambda) or outer_domain is None:
+            return setat
+
+        outer_kolor_range = self._get_kolor_range(outer_domain)
+        if outer_kolor_range is None:
+            return setat
+
+        for idx, (param, actual_arg) in enumerate(
+            zip(outer_stencil.params, outer_expr.args)
+        ):
+            result = self._try_inline_intermediate(
+                setat,
+                outer_expr,
+                outer_stencil,
+                outer_domain,
+                outer_kolor_range,
+                idx,
+                param,
+                actual_arg,
+            )
+            if result is not None:
+                return result
+
+        return setat
+
+    def _try_inline_intermediate(
+        self,
+        setat: ir.SetAt,
+        outer_expr: ir.FunCall,
+        outer_stencil: ir.Lambda,
+        outer_domain: ir.Expr,
+        outer_kolor_range: tuple[int, int],
+        idx: int,
+        param: ir.Sym,
+        actual_arg: ir.Expr,
+    ) -> ir.SetAt | None:
+        # Resolve inner as_fieldop (may be wrapped in a λ-redex)
+        inner_asfop = self._resolve_inner_asfop(actual_arg)
+        if inner_asfop is None:
+            return None
+
+        inner_stencil = inner_asfop.fun.args[0]
+        inner_domain = (
+            inner_asfop.fun.args[1] if len(inner_asfop.fun.args) > 1 else None
+        )
+        if not isinstance(inner_stencil, ir.Lambda) or inner_domain is None:
+            return None
+
+        # Domains must differ (same entity → not a chained pattern)
+        inner_kolor_range = self._get_kolor_range(inner_domain)
+        if inner_kolor_range is None or inner_kolor_range == outer_kolor_range:
+            return None
+
+        # Collect distinct outer accesses to the intermediate param
+        all_shifts = self._collect_deref_shifts_of_param(
+            outer_stencil.expr, param.id
+        )
+        unique_outer_shifts: list[tuple[int, int, int]] = list(
+            dict.fromkeys(all_shifts)
+        )
+        if len(unique_outer_shifts) < 2:
+            return None  # need ≥2 distinct accesses to be worth inlining
+
+        # Categorize inner stencil args into vertex-type (concat_where) and
+        # edge-scalar (everything else)
+        vertex_type_args: dict[int, dict[int, tuple[int, int, int]]] = {}
+        vertex_arg_sources: dict[int, ir.Expr] = {}
+        edge_scalar_args: dict[int, ir.Expr] = {}
+
+        for j, inner_actual in enumerate(inner_asfop.args):
+            kolor_shifts = self._extract_kolor_branch_shifts(inner_actual)
+            source = self._get_lifted_shift_source(inner_actual)
+            if kolor_shifts is not None and source is not None:
+                vertex_type_args[j] = kolor_shifts
+                vertex_arg_sources[j] = source
+            else:
+                edge_scalar_args[j] = inner_actual
+
+        # Build composition table and validate composed kolors
+        outer_kolor_lo, outer_kolor_hi = outer_kolor_range
+        composed_per: dict[tuple[tuple[int,int,int], int], tuple[int,int,int]] = {}
+
+        for outer_sh in unique_outer_shifts:
+            dk_out = outer_sh[2]
+            for j, kolor_shifts in vertex_type_args.items():
+                if dk_out not in kolor_shifts:
+                    return None
+                di_in, dj_in, dk_in = kolor_shifts[dk_out]
+                dk_comp = dk_out + dk_in
+                if not (outer_kolor_lo <= dk_comp < outer_kolor_hi):
+                    return None
+                composed_per[(outer_sh, j)] = (
+                    outer_sh[0] + di_in,
+                    outer_sh[1] + dj_in,
+                    dk_comp,
+                )
+
+        # CSE: unique composed shifts per vertex-type arg j
+        unique_per_j: dict[int, list[tuple[int,int,int]]] = {}
+        shift_to_idx_per_j: dict[int, dict[tuple[int,int,int], int]] = {}
+        for j in vertex_type_args:
+            shifts_for_j = [composed_per[(s, j)] for s in unique_outer_shifts]
+            unique = list(dict.fromkeys(shifts_for_j))
+            unique_per_j[j] = unique
+            shift_to_idx_per_j[j] = {sh: i for i, sh in enumerate(unique)}
+
+        # Build new outer lambda params/args (drop the intermediate at idx)
+        new_params: list[ir.Sym] = [
+            p for i, p in enumerate(outer_stencil.params) if i != idx
+        ]
+        new_args: list[ir.Expr] = [
+            copy.deepcopy(a) for i, a in enumerate(outer_expr.args) if i != idx
+        ]
+
+        # Add a lifted-deref-shift param for each unique composed vertex position
+        vertex_param_names: dict[int, list[str]] = {}
+        for j, unique_shifts in unique_per_j.items():
+            source = vertex_arg_sources[j]
+            names: list[str] = []
+            for k, shift in enumerate(unique_shifts):
+                pname = f"__csi_v{j}_{k}"
+                names.append(pname)
+                new_params.append(ir.Sym(id=pname))
+                new_args.append(
+                    _make_lifted_deref_shift(
+                        copy.deepcopy(source),
+                        self._shift_to_spec(shift),
+                        outer_domain,
+                    )
+                )
+            vertex_param_names[j] = names
+
+        # Add a lifted-deref-shift param for each (outer_shift, edge_scalar_j) pair
+        edge_param_names: dict[tuple[tuple[int,int,int], int], str] = {}
+        for outer_sh in unique_outer_shifts:
+            di, dj, dk = outer_sh
+            for j, edge_arg in edge_scalar_args.items():
+                pname = f"__csi_e_{di}n{dj}n{dk}_p{j}"
+                edge_param_names[(outer_sh, j)] = pname
+                new_params.append(ir.Sym(id=pname))
+                new_args.append(
+                    _make_lifted_deref_shift(
+                        copy.deepcopy(edge_arg),
+                        self._shift_to_spec(outer_sh),
+                        outer_domain,
+                    )
+                )
+
+        # Build inlined value for each unique outer shift
+        deref_to_value: dict[tuple[int,int,int], ir.Expr] = {}
+        for outer_sh in unique_outer_shifts:
+            inner_subs: dict[str, ir.Expr] = {}
+            for j, p in enumerate(inner_stencil.params):
+                if j in vertex_type_args:
+                    composed = composed_per[(outer_sh, j)]
+                    pidx = shift_to_idx_per_j[j][composed]
+                    inner_subs[p.id] = ir.SymRef(id=vertex_param_names[j][pidx])
+                else:
+                    inner_subs[p.id] = ir.SymRef(
+                        id=edge_param_names[(outer_sh, j)]
+                    )
+            deref_to_value[outer_sh] = _SymRefSubstituter(inner_subs).visit(
+                copy.deepcopy(inner_stencil.expr)
+            )
+
+        # Substitute intermediate accesses in the outer stencil body
+        new_body = _IntermediateSubstituter(param.id, deref_to_value).visit(
+            copy.deepcopy(outer_stencil.expr)
+        )
+        # Beta-reduce any resulting lambda applications
+        new_body = _BetaReducer().visit(new_body)
+
+        new_lambda = ir.Lambda(params=new_params, expr=new_body)
+        new_fun = ir.FunCall(
+            fun=ir.SymRef(id="as_fieldop"), args=[new_lambda, outer_domain]
+        )
+        new_outer = ir.FunCall(fun=new_fun, args=new_args)
+        return ir.SetAt(expr=new_outer, domain=setat.domain, target=setat.target)
+
+
+# =====================================================================
 # Orchestration: StructuredBackend
 # =====================================================================
 
@@ -2887,7 +3367,8 @@ class StructuredBackend:
       4. ThresholdConditionRewriter — threshold condition rewriting
       5. SymbolicSizeInliner      — symbolic size inlining
       6. NeighborReductionUnroller — reduction unrolling
-      7. CanDerefRewriter         — can_deref → True
+      7. ComposedShiftInliner     — fuse chained intermediates into composed shifts
+      8. CanDerefRewriter         — can_deref → True
       (KolorConstantPropagation is optional, not wired in by default)
     """
 
@@ -2923,6 +3404,7 @@ class StructuredBackend:
         node = ThresholdConditionRewriter.apply(node, symbolic_domain_sizes=effective)
         node = SymbolicSizeInliner.apply(node, symbolic_domain_sizes=effective)
         node = NeighborReductionUnroller.apply(node)
+        node = ComposedShiftInliner.apply(node)
         node = CanDerefRewriter.apply(node)
         return node
 
