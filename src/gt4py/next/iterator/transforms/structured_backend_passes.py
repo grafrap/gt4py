@@ -552,9 +552,9 @@ def _kolor_from_domain(domain: ir.Expr | None) -> int | None:
         if _get_axis_name(nr.args[0]) != "Kolor":
             continue
         lo, hi = nr.args[1], nr.args[2]
-        if isinstance(lo, ir.OffsetLiteral) and isinstance(hi, ir.OffsetLiteral):
-            if hi.value - lo.value == 1:
-                return int(lo.value)
+        lo_val, hi_val = _extract_index_value(lo), _extract_index_value(hi)
+        if lo_val is not None and hi_val is not None and hi_val - lo_val == 1:
+            return lo_val
     return None
 
 
@@ -3173,8 +3173,9 @@ class ComposedShiftInliner(NodeTranslator):
             if _get_axis_name(nr.args[0]) != "Kolor":
                 continue
             lo, hi = nr.args[1], nr.args[2]
-            if isinstance(lo, ir.OffsetLiteral) and isinstance(hi, ir.OffsetLiteral):
-                return (int(lo.value), int(hi.value))
+            lo_val, hi_val = _extract_index_value(lo), _extract_index_value(hi)
+            if lo_val is not None and hi_val is not None:
+                return (lo_val, hi_val)
         return None
 
     @staticmethod
@@ -3225,7 +3226,6 @@ class ComposedShiftInliner(NodeTranslator):
         outer_kolor_range = self._get_kolor_range(outer_domain)
         if outer_kolor_range is None:
             return setat
-
         for idx, (param, actual_arg) in enumerate(
             zip(outer_stencil.params, outer_expr.args)
         ):
@@ -3296,6 +3296,27 @@ class ComposedShiftInliner(NodeTranslator):
                 vertex_arg_sources[j] = source
             else:
                 edge_scalar_args[j] = inner_actual
+
+        # Guard: if no inner args are vertex-type concat_where trees, skip.
+        if not vertex_type_args:
+            return None
+
+        # Guard: skip if any edge_scalar_arg param is accessed via list_get in the inner
+        # body. list_get access means the arg is a sparse-local field (Field[Edge, LocalDim]).
+        # Creating a plain lifted-deref-shift for such a field returns ListType output, which
+        # DaCe cannot lower. Plain deref (scalar) access is fine and is handled below.
+        for j in edge_scalar_args:
+            param_id = inner_stencil.params[j].id
+            if any(
+                cpm.is_call_to(node, "list_get")
+                and any(
+                    isinstance(n, ir.SymRef) and n.id == param_id
+                    for n in node.args[1].pre_walk_values().if_isinstance(ir.SymRef)
+                )
+                for node in inner_stencil.expr.pre_walk_values().if_isinstance(ir.FunCall)
+                if len(node.args) == 2
+            ):
+                return None
 
         # Build composition table and validate composed kolors
         outer_kolor_lo, outer_kolor_hi = outer_kolor_range

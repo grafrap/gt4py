@@ -546,7 +546,7 @@ def apply_common_transforms(
     _print_ir_block("=== GTIR AFTER UNROLLING REDUCE ===", ir, enabled=print_ir)
 
     ir = InlineLambdas.apply(
-        ir, opcount_preserving=True, force_inline_lambda_args=force_inline_lambda_args
+        ir, opcount_preserving=False, force_inline_lambda_args=True
     )
 
     # NOTE: composed-reduction fusion (e.g. rbf_nabla4 v2e2c2v: E2C2V nabla4 -> edge field ->
