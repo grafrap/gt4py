@@ -3060,20 +3060,46 @@ class ComposedShiftInliner(NodeTranslator):
         return ComposedShiftInliner._decode_shift_args(list(shift_fun.args))
 
     @staticmethod
+    def _kolor_lo_from_cond(cond: ir.Expr) -> int | None:
+        """Extract lo from a K[lo, ∞) threshold condition (InfinityLiteral upper bound)."""
+        if cpm.is_call_to(cond, "and_"):
+            for arg in cond.args:
+                k = ComposedShiftInliner._kolor_lo_from_cond(arg)
+                if k is not None:
+                    return k
+            return None
+        if cpm.is_call_to(cond, "cartesian_domain"):
+            for nr in cond.args:
+                if not (cpm.is_call_to(nr, "named_range") and len(nr.args) == 3):
+                    continue
+                if _get_axis_name(nr.args[0]) != "Kolor":
+                    continue
+                lo, hi = nr.args[1], nr.args[2]
+                if (
+                    isinstance(lo, ir.OffsetLiteral)
+                    and isinstance(lo.value, int)
+                    and isinstance(hi, ir.InfinityLiteral)
+                    and hi == ir.InfinityLiteral.POSITIVE
+                ):
+                    return int(lo.value)
+        return None
+
+    @staticmethod
     def _extract_kolor_branch_shifts(
         expr: ir.Expr,
         _next_kolor: int = 0,
     ) -> dict[int, tuple[int, int, int]] | None:
         """Parse a concat_where tree into {kolor → (di, dj, dk)}.
 
-        Handles the structure produced by _build_field_concat_where_from_branches:
+        Handles two structures produced after the fusion loop:
 
+        Forward/exact (from _build_field_concat_where_from_branches before canonicalization):
           concat_where(K[k, k+1), leaf_k, rest_for_higher_kolors)
 
-        where the condition K[k, k+1) identifies the kolor for the true branch,
-        and the false branch covers all remaining (higher) kolors recursively.
-        Each leaf must be a lifted-deref-shift as_fieldop.
+        Inverse/threshold (after canonicalize_domain_argument, produced by FuseAsFieldOp era):
+          concat_where(K[k, ∞), inner_for_kolor_ge_k, leaf_for_kolor_lt_k)
 
+        Each leaf must be a lifted-deref-shift as_fieldop.
         Returns None if the structure does not match or any leaf is malformed.
         """
         if not cpm.is_call_to(expr, "concat_where") or len(expr.args) != 3:
@@ -3082,23 +3108,45 @@ class ComposedShiftInliner(NodeTranslator):
             return {_next_kolor: sh} if sh is not None else None
 
         cond, true_branch, false_branch = expr.args
-        # cond is K[k, k+1): the true branch handles exactly kolor k
-        cond_kolor = _kolor_from_cw_condition(cond)
-        if cond_kolor is None:
+
+        # Forward/exact structure: K[k, k+1) — true=leaf_k, false=rest_higher
+        exact_k = _kolor_from_cw_condition(cond)
+        if exact_k is not None:
+            true_sh = ComposedShiftInliner._get_lifted_shift(true_branch)
+            if true_sh is None:
+                return None
+            rest = ComposedShiftInliner._extract_kolor_branch_shifts(
+                false_branch, _next_kolor=exact_k + 1
+            )
+            if rest is None:
+                return None
+            return {exact_k: true_sh, **rest}
+
+        # Inverse/threshold structure: K[k, ∞) — true=kolor≥k branch, false=kolor<k leaf(s)
+        threshold_k = ComposedShiftInliner._kolor_lo_from_cond(cond)
+        if threshold_k is None:
             return None
 
-        true_sh = ComposedShiftInliner._get_lifted_shift(true_branch)
-        if true_sh is None:
-            return None
+        # false_branch covers kolors [_next_kolor, threshold_k)
+        if cpm.is_call_to(false_branch, "concat_where"):
+            rest_lower = ComposedShiftInliner._extract_kolor_branch_shifts(
+                false_branch, _next_kolor=_next_kolor
+            )
+            if rest_lower is None:
+                return None
+        else:
+            false_sh = ComposedShiftInliner._get_lifted_shift(false_branch)
+            if false_sh is None:
+                return None
+            rest_lower = {k: false_sh for k in range(_next_kolor, threshold_k)}
 
-        # false_branch handles all kolors above cond_kolor — recurse
-        rest = ComposedShiftInliner._extract_kolor_branch_shifts(
-            false_branch, _next_kolor=cond_kolor + 1
+        # true_branch covers kolors [threshold_k, ...)
+        rest_higher = ComposedShiftInliner._extract_kolor_branch_shifts(
+            true_branch, _next_kolor=threshold_k
         )
-        if rest is None:
+        if rest_higher is None:
             return None
-
-        return {cond_kolor: true_sh, **rest}
+        return {**rest_lower, **rest_higher}
 
     @staticmethod
     def _get_lifted_shift_source(expr: ir.Expr) -> ir.Expr | None:

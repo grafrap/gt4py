@@ -418,7 +418,6 @@ def apply_common_transforms(
             "=== GTIR AFTER CARTESIAN DOMAIN AND TYPE REMAPPING ===", ir, enabled=print_ir
         )
         ir = cart_unroll.CartesianReductionUnroller.apply(ir)  # type: ignore[assignment]
-        ir = cart_unroll.ComposedShiftInliner.apply(ir)  # type: ignore[assignment]
         ir = NormalizeShifts().visit(ir)
         _print_ir_block("=== GTIR AFTER CARTESIAN UNROLLING ===", ir, enabled=print_ir)
         # ir = cart_unroll.KolorConstantPropagation.apply(ir)  # type: ignore[assignment]
@@ -508,6 +507,11 @@ def apply_common_transforms(
         raise RuntimeError("Inlining 'lift' and 'lambdas' did not converge.")
 
     _print_ir_block("=== GTIR AFTER INLINING LIFTS AND LAMBDAS ===", ir, enabled=print_ir)
+    if os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1":
+        # ComposedShiftInliner needs the as_fieldop(λ(…, __iasfop_N, …) → …) structure that
+        # FuseAsFieldOp (in the loop above) produces. Running it earlier (right after
+        # CartesianReductionUnroller) is too soon — the intermediate field doesn't exist yet.
+        ir = cart_unroll.ComposedShiftInliner.apply(ir)  # type: ignore[assignment]
     # breaks in test_zero_dim_tuple_arg as trivial tuple_get is not inlined
     if common_subexpression_elimination:
         ir = CommonSubexpressionElimination.apply(
@@ -620,7 +624,6 @@ def apply_fieldview_transforms(
             offset_provider=offset_provider,
         )
         ir = cart_unroll.CartesianReductionUnroller.apply(ir)  # type: ignore[assignment]
-        ir = cart_unroll.ComposedShiftInliner.apply(ir)  # type: ignore[assignment]
         ir = NormalizeShifts().visit(ir)
         ir = concat_where.expand_tuple_args(ir, offset_provider_type=offset_provider_type)  # type: ignore[assignment]  # always an itir.Program
         ir = dead_code_elimination.dead_code_elimination(
@@ -735,6 +738,9 @@ def apply_fieldview_transforms(
             _prev_fuse_made_progress = _fuse_made_progress
         ir = NormalizeShifts().visit(ir)
         ir = InlineLambdas.apply(ir, opcount_preserving=True, force_inline_lambda_args=True)
+        # ComposedShiftInliner needs the as_fieldop(λ(…, __iasfop_N, …) → …) structure that
+        # FuseAsFieldOp produces; run it now, after the fusion loop.
+        ir = cart_unroll.ComposedShiftInliner.apply(ir)  # type: ignore[assignment]
         # The fusion loop rebuilds the IR tree (InlineLambdas / FuseAsFieldOp create new nodes),
         # which strips the `node.annex.domain` that gtir_to_sdfg_concat_where.translate_concat_where
         # reads at lowering time. Re-run domain inference so the annex is repopulated on the
