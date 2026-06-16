@@ -842,12 +842,15 @@ class ConcatWhereSetAtSplitter(NodeTranslator):
                 expr=_retarget_as_fieldop_domain(interior, interior_dom),
             )
         )
-        # Non-overlapping frame: left/right span full height, bottom/top span interior width.
+        # Non-overlapping frame: top/bottom span full IDim width (covers corners), left/right
+        # span inner JDim height (no corners). Top+bottom share the same IDim range (full warp
+        # width), enabling better warp utilisation and potential DaCe map fusion between them.
+        # Left+right similarly share the same JDim range.
         frame_rects = [
-            (i_lo, ni_lo, j_lo, j_hi),
-            (ni_hi, i_hi, j_lo, j_hi),
-            (ni_lo, ni_hi, j_lo, nj_lo),
-            (ni_lo, ni_hi, nj_hi, j_hi),
+            (i_lo, i_hi, j_lo, nj_lo),       # top  – full IDim width
+            (i_lo, i_hi, nj_hi, j_hi),        # bottom – full IDim width
+            (i_lo, ni_lo, nj_lo, nj_hi),      # left  – inner JDim height
+            (ni_hi, i_hi, nj_lo, nj_hi),      # right – inner JDim height
         ]
         for il, ih, jl, jh in frame_rects:
             if il >= ih or jl >= jh:
@@ -3180,7 +3183,14 @@ class ComposedShiftInliner(NodeTranslator):
 
     @staticmethod
     def _resolve_inner_asfop(expr: ir.Expr) -> ir.FunCall | None:
-        """Return the inner as_fieldop, possibly beta-reducing a λ-redex wrapper."""
+        """Return the inner as_fieldop, beta-reducing λ-redex wrapper(s) around it.
+
+        The intermediate edge field is the *body* of the λ-redex (e.g.
+        `(λ(__ct_el_6, __ct_el_7) → as_fieldop(nabla4, …)(__ct_el_6, …))(cast(u_vert), …)`),
+        so we substitute the args into the body and check the result — never the args
+        themselves (those are the source vertex fields, not the edge intermediate). If the
+        beta-reduced body is itself another λ-redex, recurse until an as_fieldop appears.
+        """
         if cpm.is_applied_as_fieldop(expr):
             return expr
         if isinstance(expr, ir.FunCall) and isinstance(expr.fun, ir.Lambda):
@@ -3192,6 +3202,8 @@ class ComposedShiftInliner(NodeTranslator):
                 result = _SymRefSubstituter(subs).visit(copy.deepcopy(lam.expr))
                 if cpm.is_applied_as_fieldop(result):
                     return result
+                if isinstance(result, ir.FunCall) and isinstance(result.fun, ir.Lambda):
+                    return ComposedShiftInliner._resolve_inner_asfop(result)
         return None
 
     @staticmethod
@@ -3282,8 +3294,8 @@ class ComposedShiftInliner(NodeTranslator):
         if len(unique_outer_shifts) < 2:
             return None  # need ≥2 distinct accesses to be worth inlining
 
-        # Categorize inner stencil args into vertex-type (concat_where) and
-        # edge-scalar (everything else)
+        # Categorize inner stencil args into vertex-type (concat_where), sparse-local
+        # (accessed via list_get) and plain edge-scalar (everything else).
         vertex_type_args: dict[int, dict[int, tuple[int, int, int]]] = {}
         vertex_arg_sources: dict[int, ir.Expr] = {}
         edge_scalar_args: dict[int, ir.Expr] = {}
@@ -3301,11 +3313,13 @@ class ComposedShiftInliner(NodeTranslator):
         if not vertex_type_args:
             return None
 
-        # Guard: skip if any edge_scalar_arg param is accessed via list_get in the inner
-        # body. list_get access means the arg is a sparse-local field (Field[Edge, LocalDim]).
-        # Creating a plain lifted-deref-shift for such a field returns ListType output, which
-        # DaCe cannot lower. Plain deref (scalar) access is fine and is handled below.
-        for j in edge_scalar_args:
+        # Sparse-local fields (Field[Edge, LocalDim]) are accessed via `list_get(n, ·param)`
+        # in the inner body. Routing them through `_make_lifted_deref_shift` would materialize
+        # a ListType as_fieldop that DaCe cannot lower. Instead we pass the raw field and shift
+        # the iterator in-body (keeping the list_get wrapper): `list_get(n, ·⟪shift⟫(field))`.
+        # Move such params out of `edge_scalar_args` into `sparse_args`.
+        sparse_args: dict[int, ir.Expr] = {}
+        for j in list(edge_scalar_args):
             param_id = inner_stencil.params[j].id
             if any(
                 cpm.is_call_to(node, "list_get")
@@ -3316,7 +3330,7 @@ class ComposedShiftInliner(NodeTranslator):
                 for node in inner_stencil.expr.pre_walk_values().if_isinstance(ir.FunCall)
                 if len(node.args) == 2
             ):
-                return None
+                sparse_args[j] = edge_scalar_args.pop(j)
 
         # Build composition table and validate composed kolors
         outer_kolor_lo, outer_kolor_hi = outer_kolor_range
@@ -3363,10 +3377,11 @@ class ComposedShiftInliner(NodeTranslator):
                 pname = f"__csi_v{j}_{k}"
                 names.append(pname)
                 new_params.append(ir.Sym(id=pname))
+                spec = self._shift_to_spec(shift)
                 new_args.append(
                     _make_lifted_deref_shift(
                         copy.deepcopy(source),
-                        self._shift_to_spec(shift),
+                        spec,
                         outer_domain,
                     )
                 )
@@ -3391,6 +3406,16 @@ class ComposedShiftInliner(NodeTranslator):
                     )
                 )
 
+        # Sparse-local args: pass the raw field once (one param per arg). The outer-shift is
+        # applied to the iterator *in-body* below, so `list_get(n, ·param)` becomes
+        # `list_get(n, ·⟪outer_sh⟫(raw))` — a scalar element read, never a ListType as_fieldop.
+        sparse_param_names: dict[int, str] = {}
+        for j, sp_arg in sparse_args.items():
+            pname = f"__csi_sp_{j}"
+            sparse_param_names[j] = pname
+            new_params.append(ir.Sym(id=pname))
+            new_args.append(copy.deepcopy(sp_arg))
+
         # Build inlined value for each unique outer shift
         deref_to_value: dict[tuple[int,int,int], ir.Expr] = {}
         for outer_sh in unique_outer_shifts:
@@ -3400,6 +3425,13 @@ class ComposedShiftInliner(NodeTranslator):
                     composed = composed_per[(outer_sh, j)]
                     pidx = shift_to_idx_per_j[j][composed]
                     inner_subs[p.id] = ir.SymRef(id=vertex_param_names[j][pidx])
+                elif j in sparse_args:
+                    # Shift the raw sparse iterator in-body; the surrounding `list_get(n, ·…)`
+                    # then reads element n of the shifted neighbor edge.
+                    inner_subs[p.id] = _apply_shift_chain(
+                        im.ref(sparse_param_names[j]),
+                        self._shift_to_spec(outer_sh),
+                    )
                 else:
                     inner_subs[p.id] = ir.SymRef(
                         id=edge_param_names[(outer_sh, j)]

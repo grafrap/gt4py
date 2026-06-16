@@ -697,15 +697,22 @@ def _gt_auto_process_dataflow_inside_maps(
     #  reusability. It is important that this step has to be performed before
     #  `TaskletFusion` is used.
     if blocking_dim is not None:
-        sdfg.apply_transformations_once_everywhere(
-            gtx_transformations.LoopBlocking(
-                blocking_size=blocking_size,
-                blocking_parameter=blocking_dim,
-                require_independent_nodes=blocking_only_if_independent_nodes,
-            ),
-            validate=False,
-            validate_all=validate_all,
+        # `blocking_dim` may be a single Dimension or a list of Dimensions. For multi-dim
+        # (e.g. 2D I+J tiling) apply LoopBlocking once per dimension — LoopBlocking itself is
+        # single-dimension (see its docstring TODO), so we iterate to compose the tiling.
+        _blocking_dims = (
+            blocking_dim if isinstance(blocking_dim, (list, tuple)) else [blocking_dim]
         )
+        for _bdim in _blocking_dims:
+            sdfg.apply_transformations_once_everywhere(
+                gtx_transformations.LoopBlocking(
+                    blocking_size=blocking_size,
+                    blocking_parameter=_bdim,
+                    require_independent_nodes=blocking_only_if_independent_nodes,
+                ),
+                validate=False,
+                validate_all=validate_all,
+            )
 
     # Merge Tasklets into bigger ones.
     # NOTE: Empirical observation for Graupel have shown that this leads to an increase

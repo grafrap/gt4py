@@ -507,10 +507,19 @@ def apply_common_transforms(
         raise RuntimeError("Inlining 'lift' and 'lambdas' did not converge.")
 
     _print_ir_block("=== GTIR AFTER INLINING LIFTS AND LAMBDAS ===", ir, enabled=print_ir)
-    if os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1":
+    if os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1" and (
+        os.environ.get("GT4PY_ENABLE_CSI", "0") == "1"
+    ):
         # ComposedShiftInliner needs the as_fieldop(λ(…, __iasfop_N, …) → …) structure that
         # FuseAsFieldOp (in the loop above) produces. Running it earlier (right after
         # CartesianReductionUnroller) is too soon — the intermediate field doesn't exist yet.
+        #
+        # OPT-IN (GT4PY_ENABLE_CSI=1), off by default: CSI fuses the V2E∘E2C2V chain into a
+        # single kernel with no Kolor concat_where, but it forces the inner (E2C2V) stencil to
+        # be recomputed at every outer neighbor slot. For rbf_nabla4 at 512×50 this measured
+        # ~4× SLOWER than the 2-kernel materialized form (4.35 ms vs 1.02 ms) — the same penalty
+        # the hand-written rbf_nabla4_direct pays. Keep it gated until a cost-aware policy or a
+        # connectivity chain where recompute is cheap makes it a net win.
         ir = cart_unroll.ComposedShiftInliner.apply(ir)  # type: ignore[assignment]
     # breaks in test_zero_dim_tuple_arg as trivial tuple_get is not inlined
     if common_subexpression_elimination:
@@ -572,7 +581,9 @@ def apply_common_transforms(
         ir,
         offset_provider=offset_provider,
         symbolic_domain_sizes=symbolic_domain_sizes,
+        allow_uninferred=True,
     )
+    ir = prune_empty_concat_where.prune_empty_concat_where(ir)
     _print_ir_block("=== GTIR END ===", ir, enabled=print_ir)
 
     assert isinstance(ir, itir.Program)
@@ -683,7 +694,9 @@ def apply_fieldview_transforms(
             ir,
             symbolic_domain_sizes=symbolic_domain_sizes,
             offset_provider=offset_provider,
+            allow_uninferred=True,
         )
+        ir = prune_empty_concat_where.prune_empty_concat_where(ir)
         _prev_fuse_made_progress = True  # allow first iteration always
         for _iter in range(10):
             # If the previous iteration's FuseAsFieldOp made no progress, one more cleanup
@@ -740,7 +753,10 @@ def apply_fieldview_transforms(
         ir = InlineLambdas.apply(ir, opcount_preserving=True, force_inline_lambda_args=True)
         # ComposedShiftInliner needs the as_fieldop(λ(…, __iasfop_N, …) → …) structure that
         # FuseAsFieldOp produces; run it now, after the fusion loop.
-        ir = cart_unroll.ComposedShiftInliner.apply(ir)  # type: ignore[assignment]
+        # OPT-IN (GT4PY_ENABLE_CSI=1), off by default — see the apply_common_transforms call
+        # site for the rationale (fusion recomputes the inner stencil per slot → slower at scale).
+        if os.environ.get("GT4PY_ENABLE_CSI", "0") == "1":
+            ir = cart_unroll.ComposedShiftInliner.apply(ir)  # type: ignore[assignment]
         # The fusion loop rebuilds the IR tree (InlineLambdas / FuseAsFieldOp create new nodes),
         # which strips the `node.annex.domain` that gtir_to_sdfg_concat_where.translate_concat_where
         # reads at lowering time. Re-run domain inference so the annex is repopulated on the
@@ -749,6 +765,7 @@ def apply_fieldview_transforms(
             ir,
             symbolic_domain_sizes=symbolic_domain_sizes,
             offset_provider=offset_provider,
+            allow_uninferred=True,
         )
         ir = prune_empty_concat_where.prune_empty_concat_where(ir)
         ir = remove_broadcast.RemoveBroadcast.apply(ir)

@@ -13,6 +13,7 @@ from gt4py.eve.extended_typing import Container, Self
 from gt4py.next import common
 from gt4py.next.iterator import ir as itir
 from gt4py.next.iterator.ir_utils import common_pattern_matcher as cpm, domain_utils
+from gt4py.next.iterator.transforms.infer_domain import DomainAccessDescriptor
 
 
 def _filter_domain(
@@ -69,9 +70,13 @@ class _PruneEmptyConcatWhere(PreserveLocationVisitor, NodeTranslator):
             tb_domain, fb_domain = (
                 _filter_domain(arg.annex.domain, cond.ranges.keys()) for arg in node.args[1:]
             )
-            if isinstance(tb_domain, domain_utils.SymbolicDomain) and tb_domain.empty():
+            if tb_domain is DomainAccessDescriptor.NEVER or (
+                isinstance(tb_domain, domain_utils.SymbolicDomain) and tb_domain.empty()
+            ):
                 return node.args[2]
-            if isinstance(fb_domain, domain_utils.SymbolicDomain) and fb_domain.empty():
+            if fb_domain is DomainAccessDescriptor.NEVER or (
+                isinstance(fb_domain, domain_utils.SymbolicDomain) and fb_domain.empty()
+            ):
                 return node.args[1]
 
         return node
