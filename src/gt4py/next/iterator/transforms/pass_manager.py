@@ -508,7 +508,7 @@ def apply_common_transforms(
 
     _print_ir_block("=== GTIR AFTER INLINING LIFTS AND LAMBDAS ===", ir, enabled=print_ir)
     if os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1" and (
-        os.environ.get("GT4PY_ENABLE_CSI", "0") == "1"
+        os.environ.get("GT4PY_ENABLE_CSI", "1") == "1"
     ):
         # ComposedShiftInliner needs the as_fieldop(λ(…, __iasfop_N, …) → …) structure that
         # FuseAsFieldOp (in the loop above) produces. Running it earlier (right after

@@ -58,6 +58,8 @@ from .multi_state_global_self_copy_elimination import (
     gt_multi_state_global_self_copy_elimination,
 )
 from .redundant_array_removers import CopyChainRemover, DoubleWriteRemover, gt_remove_copy_chain
+from .licm_sequential_k import gt_hoist_k_invariant_reads
+from .merge_identical_scalar_reads import gt_merge_identical_scalar_reads
 from .remove_access_node_copies import RemoveAccessNodeCopies
 from .remove_scalar_copies import RemoveScalarCopies
 from .remove_views import RemovePointwiseViews

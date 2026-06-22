@@ -783,3 +783,143 @@ class TestMultiArgFormulaInlining:
         for param in new_stencil.params:
             assert "-" not in param.id, \
                 f"Param name contains '-' (invalid C identifier): {param.id!r}"
+
+
+# ── Test: let-binding path for tuple output ──────────────────────────────────
+
+class TestLetBindingForTupleOutput:
+    """When the outer stencil has a tuple output {u_out, v_out} that both access
+    the intermediate at the SAME shifts, CSI should introduce let-bindings
+    (FunCall(Lambda, args)) for the unique inlined values instead of duplicating
+    the full expression.  DaCe's is_let handler then computes each nabla4 value
+    once into a shared transient.
+    """
+
+    def _make_tuple_setat(self) -> ir.SetAt:
+        """Outer stencil: vertex domain, tuple output {u, v} both summing inter[K=0]+inter[K=1].
+
+        The intermediate is a 2-kolor edge field read at the same K=0 and K=1 shifts for
+        both the u_out and v_out components → 4 total accesses, 2 unique → let-binding fires.
+        """
+        vertex_dom = _cartesian_domain(0, 1)
+        edge_dom = _cartesian_domain(0, 2)
+        src = im.ref("v_src")
+
+        # Inner edge as_fieldop: kolor 0 → identity (0,0,0); kolor 1 → shift (0,+1,-1)
+        inner_concat = _make_2branch_cw(src, vertex_dom, (0, 0, 0), (0, 1, -1))
+        inner_asfop = im.as_fieldop(
+            im.lambda_("vsrc")(im.deref(im.ref("vsrc"))),
+            edge_dom,
+        )(inner_concat)
+
+        # Outer stencil: both u_out and v_out use inter at K=0 and K=1 (same shifts)
+        outer_lambda = im.lambda_("inter")(
+            im.make_tuple(
+                im.plus(
+                    _make_outer_access("inter", 0, 0, 0),  # nabla4 at K=0
+                    _make_outer_access("inter", 0, 0, 1),  # nabla4 at K=1
+                ),
+                im.plus(
+                    _make_outer_access("inter", 0, 0, 0),  # SAME nabla4 at K=0
+                    _make_outer_access("inter", 0, 0, 1),  # SAME nabla4 at K=1
+                ),
+            )
+        )
+        outer_asfop = im.as_fieldop(outer_lambda, vertex_dom)(inner_asfop)
+        return ir.SetAt(expr=outer_asfop, domain=vertex_dom, target=ir.SymRef(id="out"))
+
+    def _make_single_output_setat(self) -> ir.SetAt:
+        """Same setup but single-output outer stencil — no sharing, no let-binding."""
+        vertex_dom = _cartesian_domain(0, 1)
+        edge_dom = _cartesian_domain(0, 2)
+        src = im.ref("v_src")
+        inner_concat = _make_2branch_cw(src, vertex_dom, (0, 0, 0), (0, 1, -1))
+        inner_asfop = im.as_fieldop(
+            im.lambda_("vsrc")(im.deref(im.ref("vsrc"))),
+            edge_dom,
+        )(inner_concat)
+        # Single output: inter[K=0] + inter[K=1] — each shift appears exactly once
+        outer_lambda = im.lambda_("inter")(
+            im.plus(
+                _make_outer_access("inter", 0, 0, 0),
+                _make_outer_access("inter", 0, 0, 1),
+            )
+        )
+        outer_asfop = im.as_fieldop(outer_lambda, vertex_dom)(inner_asfop)
+        return ir.SetAt(expr=outer_asfop, domain=vertex_dom, target=ir.SymRef(id="out"))
+
+    def test_tuple_output_fires(self):
+        """CSI fires for the tuple-output stencil (intermediate is eliminated)."""
+        result = ComposedShiftInliner.apply(self._make_tuple_setat())
+        assert not _has_inner_on_domain(result, 0, 2), \
+            "Edge-domain intermediate should be eliminated for tuple-output stencil"
+
+    def test_tuple_output_body_has_let_bindings(self):
+        """The fused lambda body should be a let-binding (FunCall(Lambda, args)).
+
+        After CSI the body is (λ(__csi_inner_1) → (λ(__csi_inner_0) → u+v_body)(...))(...),
+        i.e. the outermost expression of the lambda is a FunCall whose .fun is a Lambda.
+        This is cpm.is_let(body), which DaCe's visit_FunCall handles as a shared transient.
+        """
+        result = ComposedShiftInliner.apply(self._make_tuple_setat())
+        assert cpm.is_applied_as_fieldop(result.expr)
+        fused_lambda = result.expr.fun.args[0]
+        assert isinstance(fused_lambda, ir.Lambda)
+        # The body of the fused lambda should be a let-binding chain
+        assert cpm.is_let(fused_lambda.expr), (
+            f"Expected body to be a let-binding (FunCall(Lambda,...)); "
+            f"got {type(fused_lambda.expr).__name__}"
+        )
+
+    def test_tuple_output_let_names(self):
+        """Let-bound names should be __csi_inner_k for k=0,1,..."""
+        result = ComposedShiftInliner.apply(self._make_tuple_setat())
+        fused_lambda = result.expr.fun.args[0]
+        # Collect all __csi_inner_* params introduced by let-binding wrappers
+        inner_names = set()
+        node = fused_lambda.expr
+        while cpm.is_let(node):
+            assert len(node.fun.params) == 1
+            inner_names.add(node.fun.params[0].id)
+            node = node.fun.expr  # descend into the body
+        assert all(name.startswith("__csi_inner_") for name in inner_names), \
+            f"Unexpected let-binding names: {inner_names}"
+        # 2 unique shifts → 2 let-binding wrappers
+        assert len(inner_names) == 2, f"Expected 2 let-bindings, got {len(inner_names)}"
+
+    def test_tuple_output_inner_symrefs_in_body(self):
+        """The innermost body should reference __csi_inner_k SymRefs, not full expressions."""
+        result = ComposedShiftInliner.apply(self._make_tuple_setat())
+        fused_lambda = result.expr.fun.args[0]
+        # Walk through let-binding wrappers to the innermost body
+        node = fused_lambda.expr
+        while cpm.is_let(node):
+            node = node.fun.expr
+        # The innermost body should contain SymRefs named __csi_inner_*
+        inner_refs = {
+            n.id for n in node.pre_walk_values().if_isinstance(ir.SymRef)
+            if str(n.id).startswith("__csi_inner_")
+        }
+        assert len(inner_refs) == 2, \
+            f"Expected 2 distinct __csi_inner_* SymRefs in body, got: {inner_refs}"
+
+    def test_single_output_no_let_bindings(self):
+        """Single-output stencil: no sharing → body is NOT a let-binding."""
+        result = ComposedShiftInliner.apply(self._make_single_output_setat())
+        assert not _has_inner_on_domain(result, 0, 2), \
+            "Edge-domain intermediate should still be eliminated for single-output"
+        fused_lambda = result.expr.fun.args[0]
+        assert isinstance(fused_lambda, ir.Lambda)
+        assert not cpm.is_let(fused_lambda.expr), \
+            "Single-output stencil body should NOT be wrapped in let-bindings"
+
+    def test_tuple_output_no_residual_inner_symrefs(self):
+        """The let-binding args should contain the inlined expressions, not refs to the
+        eliminated intermediate param — i.e. the intermediate is fully gone from the result."""
+        result = ComposedShiftInliner.apply(self._make_tuple_setat())
+        # "inter" (the eliminated intermediate param name) should not appear anywhere
+        all_symrefs = {
+            n.id for n in result.expr.pre_walk_values().if_isinstance(ir.SymRef)
+        }
+        assert "inter" not in all_symrefs, \
+            "Intermediate param 'inter' should be fully eliminated from the fused expression"

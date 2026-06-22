@@ -732,13 +732,24 @@ class DaCeTranslator(
                 }
                 # unit_strides_dim controls ONLY the map iteration order (→ GPU grid dim
                 # assignment): the listed dims are moved rightmost in reverse-priority order,
-                # so the 1st becomes the x-thread/warp dim, the 2nd → blockIdx.y, and the rest
-                # fold into blockIdx.z. Strides are set separately (gt_change_strides, HORIZONTAL
-                # → IDim stride-1), so this does NOT touch the memory layout.
-                #   default "IDim"       → params [JDim,Kolor,K,IDim] → x=IDim, y=K, z=(Kolor,JDim)
-                #   "IDim,JDim"          → params [Kolor,K,JDim,IDim] → x=IDim, y=JDim, z=(Kolor,K)
+                # so the 1st becomes the x-thread/warp dim, the 2nd → threadIdx.y, the 3rd →
+                # threadIdx.z, and the rest fold into blockIdx. Strides are set separately
+                # (gt_change_strides, HORIZONTAL → IDim stride-1), so this does NOT touch the
+                # memory layout.
+                #   "IDim"              → params [JDim,Kolor,K,IDim] → x=IDim, y=K, z=(Kolor,JDim)
+                #     Best for parallel-K: K in threadIdx.y/blockIdx.y → good occupancy (0.656ms)
+                #   "IDim,JDim"         → params [Kolor,K,JDim,IDim] → x=IDim, y=JDim, z=(Kolor,K)
+                #   "IDim,JDim,Kolor"   → params [K,Kolor,JDim,IDim] → x=IDim, y=JDim, z=Kolor
+                #     Best for seqK: K stripped → Kolor=1 in z → no 87.5% Kolor waste (0.685ms)
                 # Override via DACE_UNIT_STRIDES_DIMS (comma-separated dim names).
-                _usd_names = _os.environ.get("DACE_UNIT_STRIDES_DIMS", "IDim").strip()
+                # Default "IDim" is optimal for parallel-K (K in threadIdx.y → efficient occupancy).
+                # Use "IDim,JDim,Kolor" with DACE_SEQUENTIAL_K=1 to avoid Kolor thread waste.
+                _usd_default = (
+                    "IDim,JDim,Kolor"
+                    if _os.environ.get("DACE_SEQUENTIAL_K", "0") == "1"
+                    else "IDim"
+                )
+                _usd_names = _os.environ.get("DACE_UNIT_STRIDES_DIMS", _usd_default).strip()
                 _usd_map = {
                     "IDim": common.Dimension("IDim"),
                     "JDim": common.Dimension("JDim"),
@@ -793,12 +804,34 @@ class DaCeTranslator(
                             sdfg, try_removing_trivial_maps=True,
                             gpu_launch_bounds=_launch_bounds,
                         )
+                # OPT-IN (GT4PY_ENABLE_MISR=1, off by default): merge duplicate reads from the
+                # same global array at the same offset into one shared scalar transient. This
+                # deduplicates SDFG-level reads, but DaCe codegen re-materialises the shared
+                # scalars so the final local-variable count is unchanged — measured slightly
+                # SLOWER (0.674 vs 0.656 ms) on rbf_nabla4. Kept gated for experimentation.
+                if on_gpu and _os.environ.get("GT4PY_ENABLE_MISR", "0") == "1":
+                    _n_misr = gtx_transformations.gt_merge_identical_scalar_reads(sdfg)
+                    if _n_misr > 0:
+                        print(f"[misr] merged {_n_misr} redundant global reads", flush=True)
+
                 # OPT-IN 2.5D vertical loop: strip K out of the GPU grid into a nested
                 # sequential per-thread K-loop (see _sequentialize_k_dimension). Targets the
                 # redundant per-K address arithmetic (top ALU/ADU pipe) + geometry re-fetch.
                 if on_gpu and _os.environ.get("DACE_SEQUENTIAL_K", "0") == "1":
+                    if _os.environ.get("DACE_SEQK_DEBUG", "0") == "1":
+                        sdfg.save("before_seqk.sdfg")
                     _n_kseq = _sequentialize_k_dimension(sdfg)
                     print(f"[seqK] sequentialized K in {_n_kseq} GPU map(s)", flush=True)
+                    if _os.environ.get("DACE_SEQK_DEBUG", "0") == "1":
+                        sdfg.save("after_seqk.sdfg")
+                    # LICM: hoist K-invariant global reads (primal_normal, ptr_coeff, inv_*)
+                    # out of the Sequential K-loop into the outer GPU scope so they are read
+                    # once per thread instead of once per K-iteration (50× reduction).
+                    # Set DACE_LICM_DISABLE=1 to skip LICM (useful to test seqK alone).
+                    if _os.environ.get("DACE_LICM_DISABLE", "0") != "1":
+                        _n_hoist = gtx_transformations.gt_hoist_k_invariant_reads(sdfg)
+                        if _n_hoist > 0:
+                            print(f"[seqK] hoisted {_n_hoist} K-invariant reads", flush=True)
             else:
                 gtx_transformations.gt_auto_optimize(
                     sdfg,
