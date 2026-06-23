@@ -109,6 +109,83 @@ def _local_subset(out_subset, in_starts):
     return _dace_subsets.Range(local_ranges)
 
 
+def _hoist_per_element(
+    sdfg: dace.SDFG,
+    state: dace.SDFGState,
+    seq_entry: dace_nodes.MapEntry,
+    in_edge,
+    out_edges,
+    k_params: set,
+    src_data_name: str,
+    dtype,
+) -> int:
+    """Hoist each unique scalar element of a large neighbourhood array individually.
+
+    For large arrays (e.g. primal_normal_vert_v1 with 48-element neighbourhood),
+    caching the full block would exceed the register budget.  Instead, each unique
+    global position accessed by an OUT-edge inside the K-loop becomes its own
+    1-element Register scalar.
+
+    Groups the OUT-edges by their specific global element position (encoded as the
+    stringified subset).  For each unique position, one scalar is created and all
+    consumers for that position are re-routed.  The original large IN/OUT connector
+    pair is then removed (all consumers satisfied by per-element scalars).
+    """
+    # Group out_edges by global element position (string of subset)
+    groups: dict[str, list] = {}
+    for out_e in out_edges:
+        if any(k in out_e.data.free_symbols for k in k_params):
+            return 0  # any K-dep consumer → can't hoist this array at all
+        key = str(out_e.data.subset)
+        groups.setdefault(key, []).append(out_e)
+
+    if not groups:
+        return 0
+
+    n_created = 0
+    for key, edges in groups.items():
+        # All edges in this group access the same global position
+        representative = edges[0]
+        global_subset = representative.data.subset
+
+        cache_name = sdfg.temp_data_name()
+        sdfg.add_scalar(cache_name, dtype=dtype, transient=True,
+                        storage=dace.StorageType.Register)
+        cache_node = state.add_access(cache_name)
+
+        # Pre-read: outer_scope[global_subset] → scalar Register
+        state.add_edge(
+            in_edge.src, in_edge.src_conn,
+            cache_node, None,
+            dace.Memlet(data=src_data_name, subset=global_subset),
+        )
+
+        # Route scalar through Sequential map connectors
+        new_in  = "IN_"  + cache_name
+        new_out = "OUT_" + cache_name
+        seq_entry.add_in_connector(new_in)
+        seq_entry.add_out_connector(new_out)
+        state.add_edge(cache_node, None, seq_entry, new_in,
+                       dace.Memlet(data=cache_name))
+
+        for out_e in edges:
+            state.add_edge(seq_entry, new_out,
+                           out_e.dst, out_e.dst_conn,
+                           dace.Memlet(data=cache_name))
+            state.remove_edge(out_e)
+
+        n_created += 1
+
+    # Remove the original large IN/OUT connector pair — all consumers satisfied
+    in_conn  = in_edge.dst_conn
+    out_conn = "OUT_" + in_conn[3:]
+    state.remove_edge(in_edge)
+    seq_entry.remove_in_connector(in_conn)
+    seq_entry.remove_out_connector(out_conn)
+
+    return n_created
+
+
 def _hoist_from_sequential_map(
     sdfg: dace.SDFG,
     state: dace.SDFGState,
@@ -149,6 +226,28 @@ def _hoist_from_sequential_map(
         n_elems = int(subset.num_elements())
         in_ranges = _subset_to_ranges(subset)
         in_starts = [r[0] for r in in_ranges]
+
+        # For arrays larger than the threshold, fall back to per-element hoisting:
+        # instead of caching the full neighbourhood block (e.g. 48 doubles for
+        # primal_normal_vert_v1), create one Register scalar per unique element
+        # position accessed by the K-loop OUT-edges.  Each unique position is
+        # n_elems=1, well within the register budget.
+        # Override via DACE_LICM_MAX_ELEMS (default 12).
+        max_elems = int(_os.environ.get("DACE_LICM_MAX_ELEMS", "12"))
+        if n_elems > max_elems:
+            if _os.environ.get("DACE_LICM_DEBUG", "0") == "1":
+                print(
+                    f"[licm] per-element hoisting {src_data_name!r} "
+                    f"(n_elems={n_elems} > max={max_elems}, "
+                    f"unique_accesses={len(out_edges)})",
+                    flush=True,
+                )
+            n_hoisted += _hoist_per_element(
+                sdfg, state, seq_entry,
+                in_edge, out_edges, k_params,
+                src_data_name, dtype,
+            )
+            continue
 
         if _os.environ.get("DACE_LICM_DEBUG", "0") == "1":
             print(
