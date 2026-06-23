@@ -739,6 +739,10 @@ class GenericStructuredWrapper:
         sds["horizontal_start_edge"] = horizontal_start
         sds["horizontal_start_cell"] = horizontal_start
         sds["horizontal_start_vertex"] = horizontal_start
+        # Exact per-field packed element strides + range-starts captured in __call__ (just before
+        # this call), for GT4PY_BAKE_STRIDES. {field: [stride_dim0, ...]} / {field: {dim: start}}.
+        sds["baked_strides"] = getattr(self, "_pending_baked_strides", None) or {}
+        sds["baked_range_starts"] = getattr(self, "_pending_baked_range_starts", None) or {}
 
         # Inject per-kolor bounds for each known threshold parameter (edge and cell).
         if extra_thresholds:
@@ -1162,6 +1166,53 @@ class GenericStructuredWrapper:
 
         return packed
 
+    @staticmethod
+    def _packed_range_starts(packed) -> dict[str, int]:
+        """Range-start (origin) per dim name of a packed field, for GT4PY_BAKE_STRIDES.
+
+        Identical to what DaCe binds at call time (``get_field_domain_symbols``: range_0 = r.start),
+        so baking these constants reproduces the exact runtime value. Origin-shift fields have
+        negative starts (range_0 = -pad); plain fields are 0. Empty for arrays without a domain.
+        """
+        domain = getattr(packed, "domain", None)
+        dims = getattr(domain, "dims", None)
+        ranges = getattr(domain, "ranges", None)
+        if dims is None or ranges is None:
+            return {}
+        out: dict[str, int] = {}
+        for dim, r in zip(dims, ranges):
+            name = getattr(dim, "value", None)
+            start = getattr(r, "start", None)
+            if name is not None and start is not None:
+                out[name] = int(start)
+        return out
+
+    @staticmethod
+    def _packed_element_strides(packed) -> list[int] | None:
+        """Element strides (per dim) of a packed structured field, for GT4PY_BAKE_STRIDES.
+
+        Uses the array's real byte strides // itemsize (matches what DaCe binds the stride symbols
+        to at call time, see get_array_stride_symbols). Falls back to Fortran-order cumulative
+        products of the shape (all pack_* functions allocate order='F'). Returns None if neither is
+        available, in which case that field's strides are simply left as runtime symbols.
+        """
+        nd = getattr(packed, "ndarray", None)
+        if nd is None:
+            nd = packed
+        strides = getattr(nd, "strides", None)
+        itemsize = getattr(nd, "itemsize", None)
+        if strides is not None and itemsize:
+            return [int(s) // int(itemsize) for s in strides]
+        shape = getattr(packed, "shape", None)
+        if shape is not None:
+            out: list[int] = []
+            acc = 1
+            for d in shape:
+                out.append(acc)
+                acc *= int(d)
+            return out
+        return None
+
     def _pack_argument(self, field, shift_i: int = 0, shift_j: int = 0):
         if not getattr(field, "domain", None):
             return field
@@ -1327,6 +1378,27 @@ class GenericStructuredWrapper:
                     packed_fields.append((arg_val, packed_arg))
         _pack_end = time.perf_counter()
         _pack_elapsed = _pack_end - _pack_start
+
+        # Capture the EXACT element strides of every packed field so the DaCe translation can bake
+        # them as compile-time constants (GT4PY_BAKE_STRIDES). The packed arrays already reflect the
+        # origin-shift / cache-line padding (pack_vertex_field_padded, pack_edge_field_compact: IDim
+        # padded to a multiple of _STRIDE_PAD), so deriving strides from ij_to_vertex.shape is wrong;
+        # the actual array strides are the only correct source. Keyed by field name to match the
+        # SDFG array names; the translation matches symbols by position. Set before _get_or_compile
+        # (which compiles on cache-miss using these values via sds["baked_strides"]).
+        baked_strides: dict[str, list[int]] = {}
+        baked_range_starts: dict[str, dict[str, int]] = {}
+        for _arg_name, _packed in structured_kwargs.items():
+            if _arg_name == "offset_provider" or isinstance(_packed, tuple):
+                continue
+            _es = self._packed_element_strides(_packed)
+            if _es is not None:
+                baked_strides[_arg_name] = _es
+            _rs = self._packed_range_starts(_packed)
+            if _rs:
+                baked_range_starts[_arg_name] = _rs
+        self._pending_baked_strides = baked_strides
+        self._pending_baked_range_starts = baked_range_starts
 
         compiled = self._get_or_compile(horizontal_start, extra_thresholds, extra_scalars)
         

@@ -272,39 +272,69 @@ def find_constant_symbols(
 def _structured_field_stride_constants(
     ir: itir.Program,
     sdfg: dace.SDFG,
+    symbolic_domain_sizes: Optional[dict[str, Any]] = None,
 ) -> dict[str, int]:
-    """Bake the structured warp-dimension stride (IDim) as the compile-time constant 1.
+    """Bake structured field strides as compile-time constants from the exact packed-array strides.
 
     Opt-in via GT4PY_BAKE_STRIDES=1. The structured backend passes every field stride
-    (``__<field>_<dim>_stride``) as a runtime kernel argument, so the GPU compiler cannot prove
-    that the warp dimension IDim is unit-stride. It therefore emits register-indirect gather loads
-    (uncoalesced — ncu reports ~11% excessive sectors) and spends extra registers on per-thread
-    address arithmetic, which lowers occupancy. ``gt_change_strides`` makes IDim unit-stride
-    (``unit_strides_dim`` default), so ``__<field>_IDim_stride == 1`` for every structured field.
-    Baking it makes the warp (threadIdx.x -> IDim) accesses contiguous -> coalesced -> and frees
-    the IDim address-arithmetic register(s). Only fields that actually carry an IDim dimension and
-    whose stride symbol is still free in the SDFG are baked.
+    (``__<field>_<dim>_stride``) as a runtime kernel argument, so the GPU compiler cannot prove the
+    warp dimension is unit-stride. It therefore emits register-indirect gather loads (uncoalesced —
+    ncu reports ~11% excessive sectors) and spends registers on per-thread address arithmetic, which
+    lowers occupancy. Baking the strides folds the constant neighbour-offset address arithmetic to a
+    single constant per access -> coalesced warp loads + freed address registers -> higher occupancy.
+
+    The values are the EXACT element strides of the packed arrays, captured by
+    ``GenericStructuredWrapper.__call__`` and passed via ``symbolic_domain_sizes['baked_strides']``
+    as ``{field_name: [stride_dim0, stride_dim1, ...]}``. This is the only correct source: the
+    origin-shift / cache-line padding (``pack_vertex_field_padded``, ``pack_edge_field_compact`` pad
+    IDim to a multiple of ``_STRIDE_PAD``) makes strides per-field and not derivable from the grid
+    size. Each non-transient SDFG array's symbolic strides are matched **by position** to that
+    field's packed strides; only symbols still free in the SDFG are baked. The runtime check
+    ``get_array_stride_symbols`` validates every baked constant against the real array stride.
     """
-    consts: dict[str, int] = {}
+    sds = symbolic_domain_sizes or {}
+    baked: dict[str, list[int]] = sds.get("baked_strides") or {}
+    baked_r0: dict[str, dict[str, int]] = sds.get("baked_range_starts") or {}
+    if not baked and not baked_r0:
+        return {}
     free = {str(s) for s in sdfg.free_symbols}
-    idim = common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL)
-    fields: list[Any] = []
-    for p in ir.params:
-        if isinstance(p.type, ts.TupleType):
-            fields.extend(
-                sym
-                for sym in gtx_dace_lowering.flatten_tuple_fields(p.id, p.type)
-                if isinstance(sym.type, ts.FieldType)
-            )
-        elif isinstance(p.type, ts.FieldType):
-            fields.append(p)
-    for f in fields:
-        assert isinstance(f.type, ts.FieldType)
-        if not any(getattr(d, "value", None) == "IDim" for d in f.type.dims):
+    consts: dict[str, int] = {}
+
+    # Strides: match each non-transient SDFG array's symbolic strides to the packed strides by pos.
+    for name, arr in sdfg.arrays.items():
+        if getattr(arr, "transient", False):
             continue
-        sym = gtx_dace_args.field_stride_symbol(str(f.id), idim)
-        if sym.name in free:
-            consts[sym.name] = 1
+        strides_list = baked.get(name)
+        if not strides_list:
+            continue
+        for sym, value in zip(arr.strides, strides_list):
+            sym_name = str(sym)
+            if sym_name in free:
+                consts[sym_name] = int(value)
+
+    # Range-starts (field origins): bake __<field>_<dim>_range_0 from the exact packed-field domain
+    # (the only remaining runtime symbols after stride baking). Matched per field+dim by name.
+    if baked_r0:
+        fields: list[Any] = []
+        for p in ir.params:
+            if isinstance(p.type, ts.TupleType):
+                fields.extend(
+                    sym
+                    for sym in gtx_dace_lowering.flatten_tuple_fields(p.id, p.type)
+                    if isinstance(sym.type, ts.FieldType)
+                )
+            elif isinstance(p.type, ts.FieldType):
+                fields.append(p)
+        for f in fields:
+            starts = baked_r0.get(str(f.id))
+            if not starts:
+                continue
+            for d in f.type.dims:
+                dval = getattr(d, "value", None)
+                if dval in starts:
+                    sym = gtx_dace_args.range_start_symbol(str(f.id), d)
+                    if sym.name in free:
+                        consts[sym.name] = int(starts[dval])
     return consts
 
 
@@ -678,17 +708,22 @@ class DaCeTranslator(
             self.disable_field_origin_on_program_arguments,
             self.unstructured_horizontal_has_unit_stride,
         )
-        # Opt-in (GT4PY_BAKE_STRIDES=1): bake the structured warp-dim (IDim) stride = 1 so the GPU
-        # compiler can coalesce warp loads and drop register-indirect address arithmetic. See
+        # Opt-in (GT4PY_BAKE_STRIDES=1): bake the structured horizontal field strides
+        # (IDim=1, JDim=ni, Kolor=ni*max_nj) so the GPU compiler can coalesce warp loads and fold the
+        # constant neighbour-offset address arithmetic out of registers. See
         # _structured_field_stride_constants. find_constant_symbols cannot do this for the
         # structured backend (it asserts a single horizontal dim; structured fields have three).
         if (
             _os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1"
             and _os.environ.get("GT4PY_BAKE_STRIDES", "0") == "1"
         ):
-            _baked = _structured_field_stride_constants(ir, sdfg)
+            _baked = _structured_field_stride_constants(ir, sdfg, symbolic_domain_sizes)
             constant_symbols.update(_baked)
-            print(f"[BAKE-STRIDES] baked IDim_stride=1 for {len(_baked)} field(s)", flush=True)
+            _nfields = len((symbolic_domain_sizes or {}).get("baked_strides") or {})
+            print(
+                f"[BAKE-STRIDES] baked {len(_baked)} stride symbol(s) from {_nfields} packed field(s)",
+                flush=True,
+            )
 
         if self.auto_optimize:
             auto_optimize_args = {} if self.auto_optimize_args is None else self.auto_optimize_args
