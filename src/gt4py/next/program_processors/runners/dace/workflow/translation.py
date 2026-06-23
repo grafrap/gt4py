@@ -81,6 +81,25 @@ def _sequentialize_k_dimension(sdfg: dace.SDFG) -> int:
     return n_transformed
 
 
+def _map_nontransient_output_arrays(
+    graph: dace.SDFGState,
+    sdfg: dace.SDFG,
+    map_node: Union[dace.nodes.MapExit, dace.nodes.MapEntry],
+) -> set[str]:
+    """Return the set of non-transient (program-output) array names written by a map scope."""
+    map_exit = (
+        map_node
+        if isinstance(map_node, dace.nodes.MapExit)
+        else graph.exit_node(map_node)
+    )
+    outs: set[str] = set()
+    for edge in graph.out_edges(map_exit):
+        dst = edge.dst
+        if isinstance(dst, dace.nodes.AccessNode) and not sdfg.arrays[dst.data].transient:
+            outs.add(dst.data)
+    return outs
+
+
 def _kolor_aware_fusion_callback(
     self: Any,
     first_map_node: Union[dace.nodes.MapExit, dace.nodes.MapEntry],
@@ -88,14 +107,31 @@ def _kolor_aware_fusion_callback(
     graph: dace.SDFGState,
     sdfg: dace.SDFG,
 ) -> bool:
-    """Refuse to fuse maps with different single-element Kolor ranges.
+    """Refuse to fuse maps with different single-element Kolor ranges (or disjoint outputs).
 
     Per-kolor split stencils produce separate maps per Kolor value (Kolor:[k,k+1)).
     Fusing two such maps with different k values creates a dimensionality mismatch
     in the fusion temporary (InvalidSDFGEdgeError). Fusion is allowed when either
     map has no Kolor parameter, both share the same Kolor start index, or the range
     is symbolic and cannot be evaluated at transform time.
+
+    OPT-IN output fission (DACE_FISSION_OUTPUTS=1): additionally refuse to fuse two maps
+    that write *disjoint non-transient program outputs*. Tuple-returning stencils (e.g.
+    rbf_nabla4 → (u_vert_out, v_vert_out)) lower to ``make_tuple(as_fieldop_u, as_fieldop_v)``
+    (DaCe cannot lower a single tuple-output as_fieldop), i.e. two independent maps writing
+    distinct outputs that MapFusionHorizontal would otherwise merge into one register-heavy
+    kernel that spills. Keeping them separate roughly halves the live-register footprint per
+    kernel. Only fires for disjoint non-transient outputs, so producer→consumer (vertical)
+    fusion and shared-output fusion are unaffected.
     """
+    import os
+
+    if os.environ.get("DACE_FISSION_OUTPUTS", "0") == "1":
+        first_outs = _map_nontransient_output_arrays(graph, sdfg, first_map_node)
+        second_outs = _map_nontransient_output_arrays(graph, sdfg, second_map_entry)
+        if first_outs and second_outs and first_outs.isdisjoint(second_outs):
+            return False  # distinct program outputs — keep as separate kernels
+
     first_map_entry = (
         first_map_node
         if isinstance(first_map_node, dace.nodes.MapEntry)
@@ -231,6 +267,45 @@ def find_constant_symbols(
                 constant_symbols |= {sdfg_symbol.name: 0 for sdfg_symbol in sdfg_origin_symbols}
 
     return constant_symbols
+
+
+def _structured_field_stride_constants(
+    ir: itir.Program,
+    sdfg: dace.SDFG,
+) -> dict[str, int]:
+    """Bake the structured warp-dimension stride (IDim) as the compile-time constant 1.
+
+    Opt-in via GT4PY_BAKE_STRIDES=1. The structured backend passes every field stride
+    (``__<field>_<dim>_stride``) as a runtime kernel argument, so the GPU compiler cannot prove
+    that the warp dimension IDim is unit-stride. It therefore emits register-indirect gather loads
+    (uncoalesced — ncu reports ~11% excessive sectors) and spends extra registers on per-thread
+    address arithmetic, which lowers occupancy. ``gt_change_strides`` makes IDim unit-stride
+    (``unit_strides_dim`` default), so ``__<field>_IDim_stride == 1`` for every structured field.
+    Baking it makes the warp (threadIdx.x -> IDim) accesses contiguous -> coalesced -> and frees
+    the IDim address-arithmetic register(s). Only fields that actually carry an IDim dimension and
+    whose stride symbol is still free in the SDFG are baked.
+    """
+    consts: dict[str, int] = {}
+    free = {str(s) for s in sdfg.free_symbols}
+    idim = common.Dimension("IDim", kind=common.DimensionKind.HORIZONTAL)
+    fields: list[Any] = []
+    for p in ir.params:
+        if isinstance(p.type, ts.TupleType):
+            fields.extend(
+                sym
+                for sym in gtx_dace_lowering.flatten_tuple_fields(p.id, p.type)
+                if isinstance(sym.type, ts.FieldType)
+            )
+        elif isinstance(p.type, ts.FieldType):
+            fields.append(p)
+    for f in fields:
+        assert isinstance(f.type, ts.FieldType)
+        if not any(getattr(d, "value", None) == "IDim" for d in f.type.dims):
+            continue
+        sym = gtx_dace_args.field_stride_symbol(str(f.id), idim)
+        if sym.name in free:
+            consts[sym.name] = 1
+    return consts
 
 
 
@@ -603,6 +678,17 @@ class DaCeTranslator(
             self.disable_field_origin_on_program_arguments,
             self.unstructured_horizontal_has_unit_stride,
         )
+        # Opt-in (GT4PY_BAKE_STRIDES=1): bake the structured warp-dim (IDim) stride = 1 so the GPU
+        # compiler can coalesce warp loads and drop register-indirect address arithmetic. See
+        # _structured_field_stride_constants. find_constant_symbols cannot do this for the
+        # structured backend (it asserts a single horizontal dim; structured fields have three).
+        if (
+            _os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1"
+            and _os.environ.get("GT4PY_BAKE_STRIDES", "0") == "1"
+        ):
+            _baked = _structured_field_stride_constants(ir, sdfg)
+            constant_symbols.update(_baked)
+            print(f"[BAKE-STRIDES] baked IDim_stride=1 for {len(_baked)} field(s)", flush=True)
 
         if self.auto_optimize:
             auto_optimize_args = {} if self.auto_optimize_args is None else self.auto_optimize_args

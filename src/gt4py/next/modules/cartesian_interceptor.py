@@ -718,9 +718,9 @@ class GenericStructuredWrapper:
         # padding, preventing OOB reads on neighbors with negative IDim/JDim offsets.
         shift_i = max(0, base_shift_i - max_neg_di)
         shift_j = max(0, base_shift_j - max_neg_dj)
-        print(f"[structured] {self.operator_name}: base_shift=({base_shift_i},{base_shift_j})"
-              f" max_neg=({max_neg_di},{max_neg_dj}) shift=({shift_i},{shift_j})"
-              f" conns={sorted(self._sanitized_conn.keys())}")
+        # print(f"[structured] {self.operator_name}: base_shift=({base_shift_i},{base_shift_j})"
+        #       f" max_neg=({max_neg_di},{max_neg_dj}) shift=({shift_i},{shift_j})"
+        #       f" conns={sorted(self._sanitized_conn.keys())}")
         return shift_i, shift_j
 
     def _get_or_compile(
@@ -885,7 +885,7 @@ class GenericStructuredWrapper:
         # print(f"Current_compile_sds: {_CURRENT_COMPILE_SDS}")
         _compile_end = time.perf_counter()
         _compile_elapsed = _compile_end - _compile_start
-        print(f"[timing] {self.operator_name} compilation: {_compile_elapsed:.8f}s")
+        # print(f"[timing] {self.operator_name} compilation: {_compile_elapsed:.8f}s")
         self._compiled_cache[cache_key] = compiled
         return compiled
 
@@ -1379,7 +1379,7 @@ class GenericStructuredWrapper:
         _unpack_elapsed = _unpack_end - _unpack_start
 
         # Print timing summary
-        print(f"[timing] {self.operator_name} pack={_pack_elapsed:.8f}s exec={_exec_elapsed:.8f}s unpack={_unpack_elapsed:.8f}s total={_pack_elapsed + _exec_elapsed + _unpack_elapsed:.8f}s")
+        # print(f"[timing] {self.operator_name} pack={_pack_elapsed:.8f}s exec={_exec_elapsed:.8f}s unpack={_unpack_elapsed:.8f}s total={_pack_elapsed + _exec_elapsed + _unpack_elapsed:.8f}s")
 
         # if (
         #     debug_tangential

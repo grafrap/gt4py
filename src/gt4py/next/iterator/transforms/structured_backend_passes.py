@@ -866,6 +866,192 @@ class ConcatWhereSetAtSplitter(NodeTranslator):
         return out
 
 
+class TupleOutputSetAtSplitter(NodeTranslator):
+    """Split a tuple-output SetAt into one single-output SetAt per tuple element.
+
+    Opt-in via DACE_FISSION_OUTPUTS=1 (gated at the call site in `pass_manager`). Tuple-returning
+    field operators (e.g. rbf_nabla4 → (u_vert_out, v_vert_out)) lower to a single SetAt of the form
+
+        {out0, out1} @ {dom0, dom1} ← as_fieldop(λ(p…) → make_tuple(b0, b1), fdom)(args…)
+
+    which DaCe lowers to ONE map computing every output in a single register-heavy kernel that
+    spills (rbf_nabla4: 1323 live temporaries → register spilling). This pass rewrites it into one
+    SetAt per element
+
+        out_i @ dom_i ← as_fieldop(λ(p…) → b_i, fdom_i)(args…)
+
+    so each output becomes its own as_fieldop → map → kernel, roughly halving the live-register
+    footprint per kernel (the shared input reads are cheap, coalesced and L1-cached). Each split
+    lambda keeps the full parameter/argument list; params unused by ``b_i`` (e.g. the v-only weights
+    in the u kernel) become dead and are pruned by the subsequent type inference / dead-code
+    elimination in the DaCe lowering.
+
+    Re-fusion of the resulting per-output maps back into one kernel is prevented by the output-aware
+    branch of ``_kolor_aware_fusion_callback`` in the DaCe translation step (also DACE_FISSION_OUTPUTS).
+
+    Only fires when the target is a ``make_tuple`` of ≥2 fields and the expression is an applied
+    ``as_fieldop`` whose stencil is a lambda returning a matching ``make_tuple``; anything else is
+    left untouched (returns ``None`` from ``_try_split``).
+    """
+
+    @classmethod
+    def apply(cls, node: ir.Program, **kwargs: Any) -> ir.Program:
+        return cls().visit(node, **kwargs)
+
+    def visit_Program(self, node: ir.Program, **kwargs: Any) -> ir.Program:
+        print(
+            f"[FISSION-DBG] TupleOutputSetAtSplitter.visit_Program: program id={node.id} "
+            f"n_body={len(node.body)}",
+            flush=True,
+        )
+        new_body: list[ir.Stmt] = []
+        for idx, stmt in enumerate(node.body):
+            if isinstance(stmt, ir.SetAt):
+                split = self._try_split(stmt, idx)
+            else:
+                print(
+                    f"[FISSION-DBG]   body[{idx}] is {type(stmt).__name__}, not SetAt — skipped",
+                    flush=True,
+                )
+                split = None
+            if split is not None:
+                print(
+                    f"[FISSION-DBG]   body[{idx}] SPLIT into {len(split)} single-output SetAts",
+                    flush=True,
+                )
+                new_body.extend(split)
+            else:
+                new_body.append(stmt)
+        print(
+            f"[FISSION-DBG] visit_Program done: {len(node.body)} -> {len(new_body)} body stmts",
+            flush=True,
+        )
+        return ir.Program(
+            id=node.id,
+            function_definitions=node.function_definitions,
+            params=node.params,
+            declarations=node.declarations,
+            body=new_body,
+        )
+
+    @staticmethod
+    def _tuple_element(expr: ir.Expr, i: int) -> ir.Expr:
+        """i-th element of a `make_tuple` expr, or the expr itself if it is not a make_tuple."""
+        if cpm.is_call_to(expr, "make_tuple"):
+            return expr.args[i]
+        return expr
+
+    def _try_split(self, stmt: ir.SetAt, idx: int = -1) -> list[ir.SetAt] | None:
+        # Target must be a make_tuple of >= 2 output fields.
+        tgt_is_mt = cpm.is_call_to(stmt.target, "make_tuple")
+        print(
+            f"[FISSION-DBG]   body[{idx}] SetAt: target_type={type(stmt.target).__name__} "
+            f"target_is_make_tuple={tgt_is_mt} expr_type={type(stmt.expr).__name__}",
+            flush=True,
+        )
+        if not tgt_is_mt:
+            print(
+                f"[FISSION-DBG]     -> NO SPLIT: target not make_tuple; target={str(stmt.target)[:200]}",
+                flush=True,
+            )
+            return None
+        targets = stmt.target.args
+        n = len(targets)
+        if n < 2:
+            print(f"[FISSION-DBG]     -> NO SPLIT: only {n} target(s)", flush=True)
+            return None
+
+        # Expression must be an applied as_fieldop whose stencil returns a matching make_tuple.
+        expr = stmt.expr
+        if not cpm.is_applied_as_fieldop(expr):
+            print(
+                f"[FISSION-DBG]     -> NO SPLIT: expr is not an applied as_fieldop; "
+                f"expr_head={str(getattr(expr, 'fun', expr))[:200]}",
+                flush=True,
+            )
+            return None
+        stencil, fdomain = expr.fun.args[0], expr.fun.args[1]
+        field_args = expr.args
+        stencil_is_lambda = isinstance(stencil, ir.Lambda)
+        body_is_mt = stencil_is_lambda and cpm.is_call_to(stencil.expr, "make_tuple")
+        print(
+            f"[FISSION-DBG]     n_targets={n} stencil_is_lambda={stencil_is_lambda} "
+            f"stencil_body_is_make_tuple={body_is_mt} "
+            f"stencil_body_type={type(stencil.expr).__name__ if stencil_is_lambda else 'n/a'} "
+            f"n_field_args={len(field_args)}",
+            flush=True,
+        )
+        if not (stencil_is_lambda and body_is_mt):
+            print("[FISSION-DBG]     -> NO SPLIT: stencil is not a lambda returning make_tuple", flush=True)
+            return None
+        bodies = stencil.expr.args
+        if len(bodies) != n:
+            print(
+                f"[FISSION-DBG]     -> NO SPLIT: body make_tuple arity {len(bodies)} != n_targets {n}",
+                flush=True,
+            )
+            return None
+        # A make_tuple SetAt domain must agree on arity; a single shared domain is reused for all.
+        if cpm.is_call_to(stmt.domain, "make_tuple") and len(stmt.domain.args) != n:
+            print(
+                f"[FISSION-DBG]     -> NO SPLIT: domain make_tuple arity "
+                f"{len(stmt.domain.args)} != n_targets {n}",
+                flush=True,
+            )
+            return None
+        print(f"[FISSION-DBG]     -> MATCH: splitting into {n} single-output SetAts", flush=True)
+
+        # Whether we can safely prune unused (param, arg) pairs per output: only when the
+        # as_fieldop is fully applied (one arg per stencil param) so positions stay aligned.
+        prunable = len(stencil.params) == len(field_args)
+
+        out: list[ir.SetAt] = []
+        for i in range(n):
+            body_i = bodies[i]
+            if prunable:
+                # Keep only params (and their args) referenced by this output's body. The other
+                # half's inputs (e.g. the v-only weights/neighbour gathers in the u kernel) would
+                # otherwise be materialised in BOTH kernels — DaCe does not always DCE them, so each
+                # kernel ends up doing ~all the work (~2x runtime). Over-approximate by name: keep a
+                # param if its id appears as any SymRef in the body (safe — never drops a used one).
+                used_ids = {
+                    ref.id for ref in body_i.pre_walk_values().if_isinstance(ir.SymRef)
+                }
+                kept = [
+                    (p, a)
+                    for p, a in zip(stencil.params, field_args)
+                    if p.id in used_ids
+                ]
+                new_params = [copy.deepcopy(p) for p, _ in kept]
+                new_args = [copy.deepcopy(a) for _, a in kept]
+                print(
+                    f"[FISSION-DBG]     out[{i}] target={getattr(targets[i], 'id', '?')}: "
+                    f"kept {len(new_params)}/{len(field_args)} params/args "
+                    f"(pruned {len(field_args) - len(new_params)})",
+                    flush=True,
+                )
+            else:
+                new_params = [copy.deepcopy(p) for p in stencil.params]
+                new_args = [copy.deepcopy(a) for a in field_args]
+                print(
+                    f"[FISSION-DBG]     out[{i}]: not prunable "
+                    f"(params {len(stencil.params)} != args {len(field_args)}); keeping all",
+                    flush=True,
+                )
+            new_stencil = ir.Lambda(params=new_params, expr=copy.deepcopy(body_i))
+            new_fieldop = im.as_fieldop(
+                new_stencil, copy.deepcopy(self._tuple_element(fdomain, i))
+            )(*new_args)
+            out.append(
+                ir.SetAt(
+                    target=copy.deepcopy(targets[i]),
+                    domain=copy.deepcopy(self._tuple_element(stmt.domain, i)),
+                    expr=new_fieldop,
+                )
+            )
+        return out
+
+
 # =====================================================================
 # Symbolic-size helpers (extracted from old visit_FunCall / visit_SetAt closures)
 # =====================================================================

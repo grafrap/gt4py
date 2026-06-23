@@ -217,6 +217,27 @@ def _arg_inline_predicate(node: itir.Expr, shifts: set[tuple[itir.OffsetLiteral,
     ) or cpm.is_call_to(node, "if_"):
         import os as _os2
         if _os2.environ.get("USE_STRUCTURED_BACKEND", "0") == "1":
+            # The structured backend otherwise inlines EVERY as_fieldop arg. When an arg producer
+            # is read at MORE THAN ONE distinct shifted position, inlining duplicates the whole
+            # producer once per access. rbf_nabla4's shared edge field z_nabla4_e2 is read at 6
+            # V2E-neighbour offsets, so inlining recomputes the full nabla4 6× per vertex and blows
+            # up register pressure. Opt-in (GT4PY_MATERIALIZE_SHARED=1): keep any multi-position-read
+            # producer materialized as a separate as_fieldop, so DaCe lowers it to its own (edge)
+            # kernel computed once and the consumer only reads the precomputed field. Note: the key
+            # is the access count, NOT the arg count — z_nabla4_e2 has a single (fused) input but a
+            # large body, so a `len(node.args) > 1` "expensive" proxy would wrongly skip it.
+            # Center-only / single-position accesses (len(shifts) <= 1) are still inlined.
+            if (
+                _os2.environ.get("GT4PY_MATERIALIZE_SHARED", "0") == "1"
+                and is_applied_fieldop
+                and len(shifts) > 1
+            ):
+                print(
+                    f"[MATERIALIZE-DBG] keep materialized: n_args={len(node.args)} "
+                    f"n_shift_positions={len(shifts)}",
+                    flush=True,
+                )
+                return False
             return True
         # always inline arg if it is an applied fieldop with only a single arg
         if is_applied_fieldop and len(node.args) == 1:

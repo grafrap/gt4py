@@ -577,6 +577,18 @@ def apply_common_transforms(
     ):
         ir = cart_unroll.ConcatWhereSetAtSplitter.apply(ir)
 
+    # Output fission (opt-in, DACE_FISSION_OUTPUTS=1): split a tuple-output SetAt
+    # (e.g. rbf_nabla4 → {u_vert_out, v_vert_out} ← as_fieldop(λ → make_tuple(u, v))) into one
+    # single-output SetAt per element, so each output lowers to its own DaCe map/kernel instead of
+    # one register-heavy fused kernel that spills. Runs before the final infer_program so domain
+    # annexes are repopulated on the split as_fieldops; re-fusion of the resulting maps is prevented
+    # by the output-aware branch of `_kolor_aware_fusion_callback` in the DaCe translation step.
+    if (
+        os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1"
+        and os.environ.get("DACE_FISSION_OUTPUTS", "0") == "1"
+    ):
+        ir = cart_unroll.TupleOutputSetAtSplitter.apply(ir)
+
     ir = infer_domain.infer_program(
         ir,
         offset_provider=offset_provider,
