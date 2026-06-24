@@ -232,11 +232,6 @@ def _arg_inline_predicate(node: itir.Expr, shifts: set[tuple[itir.OffsetLiteral,
                 and is_applied_fieldop
                 and len(shifts) > 1
             ):
-                print(
-                    f"[MATERIALIZE-DBG] keep materialized: n_args={len(node.args)} "
-                    f"n_shift_positions={len(shifts)}",
-                    flush=True,
-                )
                 return False
             return True
         # always inline arg if it is an applied fieldop with only a single arg

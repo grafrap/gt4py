@@ -899,33 +899,13 @@ class TupleOutputSetAtSplitter(NodeTranslator):
         return cls().visit(node, **kwargs)
 
     def visit_Program(self, node: ir.Program, **kwargs: Any) -> ir.Program:
-        print(
-            f"[FISSION-DBG] TupleOutputSetAtSplitter.visit_Program: program id={node.id} "
-            f"n_body={len(node.body)}",
-            flush=True,
-        )
         new_body: list[ir.Stmt] = []
-        for idx, stmt in enumerate(node.body):
-            if isinstance(stmt, ir.SetAt):
-                split = self._try_split(stmt, idx)
-            else:
-                print(
-                    f"[FISSION-DBG]   body[{idx}] is {type(stmt).__name__}, not SetAt — skipped",
-                    flush=True,
-                )
-                split = None
+        for stmt in node.body:
+            split = self._try_split(stmt) if isinstance(stmt, ir.SetAt) else None
             if split is not None:
-                print(
-                    f"[FISSION-DBG]   body[{idx}] SPLIT into {len(split)} single-output SetAts",
-                    flush=True,
-                )
                 new_body.extend(split)
             else:
                 new_body.append(stmt)
-        print(
-            f"[FISSION-DBG] visit_Program done: {len(node.body)} -> {len(new_body)} body stmts",
-            flush=True,
-        )
         return ir.Program(
             id=node.id,
             function_definitions=node.function_definitions,
@@ -941,65 +921,29 @@ class TupleOutputSetAtSplitter(NodeTranslator):
             return expr.args[i]
         return expr
 
-    def _try_split(self, stmt: ir.SetAt, idx: int = -1) -> list[ir.SetAt] | None:
+    def _try_split(self, stmt: ir.SetAt) -> list[ir.SetAt] | None:
         # Target must be a make_tuple of >= 2 output fields.
-        tgt_is_mt = cpm.is_call_to(stmt.target, "make_tuple")
-        print(
-            f"[FISSION-DBG]   body[{idx}] SetAt: target_type={type(stmt.target).__name__} "
-            f"target_is_make_tuple={tgt_is_mt} expr_type={type(stmt.expr).__name__}",
-            flush=True,
-        )
-        if not tgt_is_mt:
-            print(
-                f"[FISSION-DBG]     -> NO SPLIT: target not make_tuple; target={str(stmt.target)[:200]}",
-                flush=True,
-            )
+        if not cpm.is_call_to(stmt.target, "make_tuple"):
             return None
         targets = stmt.target.args
         n = len(targets)
         if n < 2:
-            print(f"[FISSION-DBG]     -> NO SPLIT: only {n} target(s)", flush=True)
             return None
 
         # Expression must be an applied as_fieldop whose stencil returns a matching make_tuple.
         expr = stmt.expr
         if not cpm.is_applied_as_fieldop(expr):
-            print(
-                f"[FISSION-DBG]     -> NO SPLIT: expr is not an applied as_fieldop; "
-                f"expr_head={str(getattr(expr, 'fun', expr))[:200]}",
-                flush=True,
-            )
             return None
         stencil, fdomain = expr.fun.args[0], expr.fun.args[1]
         field_args = expr.args
-        stencil_is_lambda = isinstance(stencil, ir.Lambda)
-        body_is_mt = stencil_is_lambda and cpm.is_call_to(stencil.expr, "make_tuple")
-        print(
-            f"[FISSION-DBG]     n_targets={n} stencil_is_lambda={stencil_is_lambda} "
-            f"stencil_body_is_make_tuple={body_is_mt} "
-            f"stencil_body_type={type(stencil.expr).__name__ if stencil_is_lambda else 'n/a'} "
-            f"n_field_args={len(field_args)}",
-            flush=True,
-        )
-        if not (stencil_is_lambda and body_is_mt):
-            print("[FISSION-DBG]     -> NO SPLIT: stencil is not a lambda returning make_tuple", flush=True)
+        if not (isinstance(stencil, ir.Lambda) and cpm.is_call_to(stencil.expr, "make_tuple")):
             return None
         bodies = stencil.expr.args
         if len(bodies) != n:
-            print(
-                f"[FISSION-DBG]     -> NO SPLIT: body make_tuple arity {len(bodies)} != n_targets {n}",
-                flush=True,
-            )
             return None
         # A make_tuple SetAt domain must agree on arity; a single shared domain is reused for all.
         if cpm.is_call_to(stmt.domain, "make_tuple") and len(stmt.domain.args) != n:
-            print(
-                f"[FISSION-DBG]     -> NO SPLIT: domain make_tuple arity "
-                f"{len(stmt.domain.args)} != n_targets {n}",
-                flush=True,
-            )
             return None
-        print(f"[FISSION-DBG]     -> MATCH: splitting into {n} single-output SetAts", flush=True)
 
         # Whether we can safely prune unused (param, arg) pairs per output: only when the
         # as_fieldop is fully applied (one arg per stencil param) so positions stay aligned.
@@ -1024,20 +968,9 @@ class TupleOutputSetAtSplitter(NodeTranslator):
                 ]
                 new_params = [copy.deepcopy(p) for p, _ in kept]
                 new_args = [copy.deepcopy(a) for _, a in kept]
-                print(
-                    f"[FISSION-DBG]     out[{i}] target={getattr(targets[i], 'id', '?')}: "
-                    f"kept {len(new_params)}/{len(field_args)} params/args "
-                    f"(pruned {len(field_args) - len(new_params)})",
-                    flush=True,
-                )
             else:
                 new_params = [copy.deepcopy(p) for p in stencil.params]
                 new_args = [copy.deepcopy(a) for a in field_args]
-                print(
-                    f"[FISSION-DBG]     out[{i}]: not prunable "
-                    f"(params {len(stencil.params)} != args {len(field_args)}); keeping all",
-                    flush=True,
-                )
             new_stencil = ir.Lambda(params=new_params, expr=copy.deepcopy(body_i))
             new_fieldop = im.as_fieldop(
                 new_stencil, copy.deepcopy(self._tuple_element(fdomain, i))

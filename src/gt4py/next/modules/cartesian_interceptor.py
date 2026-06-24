@@ -1213,6 +1213,87 @@ class GenericStructuredWrapper:
             return out
         return None
 
+    def _make_structured_field(self, dims, struct_np, trailing_dims, shift_i, shift_j):
+        """Build the structured GT4Py field, optionally re-laying-out the vertical K axis.
+
+        Default: pass the (F-order, K-outermost) packed array straight to ``as_field``.
+
+        Opt-in ``DACE_K_INNER_LAYOUT=1``: re-pack as an on-device (cupy) strided view with
+        K stride = ni (next to IDim), IDim still unit-stride — makes a per-thread K-loop
+        (``DACE_KTILE``) cache-local instead of striding ni*nj*nkolor per level.
+
+        Opt-in ``DACE_K_WARP=1``: re-pack C-order (K stride 1, fully innermost) so that with
+        warp=K (``DACE_K_WARP`` also flips the iteration order in translation.py) the 32
+        K-levels of one (i,j,kolor) form a warp — K-dependent field loads coalesce and the
+        K-invariant geometry/coefficients become uniform/broadcast loads (read once per warp
+        instead of once per K).
+
+        Opt-in ``DACE_WARP_ALIGN=1``: pad the IDim axis (axis 0) to a multiple of 32 so every
+        JDim/K/Kolor stride is a multiple of the warp width (32 doubles = 256 B). Without it the
+        packed ni (e.g. 528 = 16.5*32) is only cache-line (16) aligned, so warp bases land mid
+        256-B sector → strided/uncoalesced loads (ncu: ~8-11% excessive sectors — the dominant
+        LG-Throttle feeder). The pad adds never-read trailing columns; baking captures the padded
+        stride; unpack uses the index map (original ni) so the pad is transparent. Applies to the
+        3D geometry fields too (the CopyND scalar gathers) and composes with the K layouts above.
+
+        Both K-layout options apply only to 4D fields whose single trailing dim is the vertical K.
+        ``as_field`` preserves the strides of a cupy *device* array (a host numpy view would
+        be C-contiguated), and the stride-baking captures the real ``.strides``. Default off
+        → byte-for-byte unchanged for the suite/driver and for parallel-K.
+        """
+        if (
+            os.environ.get("DACE_WARP_ALIGN", "0") == "1"
+            and getattr(struct_np, "ndim", 0) in (3, 4)
+        ):
+            _a = np.asarray(struct_np)
+            _ni = _a.shape[0]
+            _ni32 = ((_ni + 31) // 32) * 32
+            if _ni32 > _ni:
+                _padded = np.zeros((_ni32, *_a.shape[1:]), dtype=_a.dtype, order="F")
+                _padded[:_ni] = _a
+                struct_np = _padded
+        data, allocator = struct_np, self.allocator
+        _kwarp = os.environ.get("DACE_K_WARP", "0")
+        _kinner = os.environ.get("DACE_K_INNER_LAYOUT", "0") == "1"
+        if (
+            cp is not None
+            and (_kwarp != "0" or _kinner)
+            and getattr(struct_np, "ndim", 0) == 4
+            and len(trailing_dims) == 1
+        ):
+            from gt4py.next import common as _common
+
+            if getattr(trailing_dims[0], "kind", None) == _common.DimensionKind.VERTICAL:
+                if _kwarp == "2":
+                    # K innermost (stride 1) + IDim second-innermost (stride K): matches the
+                    # warp=K block (threadIdx.x=K, threadIdx.y=IDim) so the 32K×8IDim block is a
+                    # contiguous ~B*K tile → spatial locality for the horizontal neighbour gather.
+                    # Kolor (size 1-3) moves outermost where its tiny extent costs nothing.
+                    # Physical (nkolor, nj, ni, K) C-contig, presented as logical (ni,nj,nkolor,K):
+                    # strides K=1, IDim=K, JDim=ni*K, Kolor=nj*ni*K.
+                    phys = cp.ascontiguousarray(
+                        cp.asarray(np.asarray(struct_np)).transpose(2, 1, 0, 3)
+                    )
+                    data, allocator = phys.transpose(2, 1, 0, 3), cp
+                elif _kwarp == "1":
+                    # Pure C-order (K innermost, stride 1; Kolor second) → warp=K coalesces the
+                    # K-field loads and broadcasts the K-invariant geometry across the 32 lanes.
+                    data = cp.ascontiguousarray(cp.asarray(np.asarray(struct_np)))
+                    allocator = cp
+                else:
+                    # Physical (ni, K, nj, nkolor) F-contig on device, presented as the logical
+                    # (ni, nj, nkolor, K) strided view → strides IDim=1, JDim=ni*K, Kolor=ni*K*nj, K=ni.
+                    phys = cp.asarray(
+                        np.ascontiguousarray(np.asarray(struct_np).transpose(0, 3, 1, 2)),
+                        order="F",
+                    )
+                    data, allocator = phys.transpose(0, 2, 3, 1), cp
+        if shift_i > 0:
+            return gtx.as_field(
+                dims, data, origin={IDim: shift_i, JDim: shift_j}, allocator=allocator
+            )
+        return gtx.as_field(dims, data, allocator=allocator)
+
     def _pack_argument(self, field, shift_i: int = 0, shift_j: int = 0):
         if not getattr(field, "domain", None):
             return field
@@ -1240,29 +1321,26 @@ class GenericStructuredWrapper:
             # Full pack + origin: vertex accesses at ptr[i_logical + shift_i] = ptr[i_original]. ✓
             # V2E/E2C2V neighbor reads also stay in bounds because the shift cancels.
             struct_np = pack_vertex_field_to_structured(np_data, self.index_map)
-            if shift_i > 0:
-                return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np,
-                                    origin={IDim: shift_i, JDim: shift_j}, allocator=self.allocator)
-            return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np, allocator=self.allocator)
+            return self._make_structured_field(
+                [IDim, JDim, Kolor, *trailing_dims], struct_np, trailing_dims, shift_i, shift_j
+            )
 
         elif self._is_unstructured(field, "Edge"):
             trailing_dims = list(field.domain.dims[1:]) if np_data.ndim > 1 else []
             # Full pack + origin: edge accesses at ptr[i_logical + shift_i] = ptr[i_original]. ✓
             struct_np = pack_edge_field(np_data, self.index_map)
-            if shift_i > 0:
-                return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np,
-                                    origin={IDim: shift_i, JDim: shift_j}, allocator=self.allocator)
-            return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np, allocator=self.allocator)
+            return self._make_structured_field(
+                [IDim, JDim, Kolor, *trailing_dims], struct_np, trailing_dims, shift_i, shift_j
+            )
 
         elif self._is_unstructured(field, "Cell"):
             if self.cell_to_ijk is None or self.ijk_to_cell is None:
                 return field
             struct_np = pack_cell_field_to_structured(np_data, self.cell_to_ijk, self.ijk_to_cell)
             trailing_dims = list(field.domain.dims[1:]) if np_data.ndim > 1 else []
-            if shift_i > 0:
-                return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np,
-                                    origin={IDim: shift_i, JDim: shift_j}, allocator=self.allocator)
-            return gtx.as_field([IDim, JDim, Kolor, *trailing_dims], struct_np, allocator=self.allocator)
+            return self._make_structured_field(
+                [IDim, JDim, Kolor, *trailing_dims], struct_np, trailing_dims, shift_i, shift_j
+            )
 
         return field
 
@@ -1289,6 +1367,19 @@ class GenericStructuredWrapper:
             and local_dim_name in _SPARSE_REMAP_TABLE
         ):
             return
+
+        if os.environ.get("DACE_WARP_ALIGN", "0") == "1" and getattr(struct_np, "ndim", 0) >= 3:
+            # struct_np was IDim-padded to a multiple of 32 (DACE_WARP_ALIGN); the unpack index
+            # maps use the original (unpadded) ni, so trim the trailing pad rows on axis 0.
+            if self._is_unstructured(original_unstructured_field, "Edge"):
+                struct_np = struct_np[: self.index_map.ijk_to_edge.shape[0]]
+            elif self._is_unstructured(original_unstructured_field, "Vertex"):
+                struct_np = struct_np[: self.index_map.ij_to_vertex.shape[0]]
+            elif (
+                self._is_unstructured(original_unstructured_field, "Cell")
+                and getattr(self, "ijk_to_cell", None) is not None
+            ):
+                struct_np = struct_np[: self.ijk_to_cell.shape[0]]
 
         if self._is_unstructured(original_unstructured_field, "Vertex"):
             # Origin approach: struct_np is the full vertex array at original positions.

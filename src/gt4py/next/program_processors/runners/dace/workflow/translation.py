@@ -40,6 +40,9 @@ _K_MAP_PARAM: str = gtx_dace_lowering.get_map_variable(
     common.Dimension("K", kind=common.DimensionKind.VERTICAL)
 )
 
+# DaCe SDFG map parameter name for the IDim (warp / unit-stride) horizontal dimension.
+_IDIM_MAP_PARAM: str = gtx_dace_lowering.get_map_variable(common.Dimension("IDim"))
+
 
 def _sequentialize_k_dimension(sdfg: dace.SDFG) -> int:
     """Turn the vertical K dim of each top-level GPU map into a nested Sequential loop.
@@ -79,6 +82,70 @@ def _sequentialize_k_dimension(sdfg: dace.SDFG) -> int:
                 inner_k_entry.map.schedule = dace.dtypes.ScheduleType.Sequential
             n_transformed += 1
     return n_transformed
+
+
+def _unroll_inner_k_maps(
+    sdfg: dace.SDFG, tile_size: int, map_param: str = _K_MAP_PARAM
+) -> int:
+    """Mark the inner Sequential tiled maps (from LoopBlocking) for unrolling.
+
+    ``map_param`` selects which blocked dimension's inner map to unroll (``_K_MAP_PARAM``
+    for the vertical K tile / DACE_KTILE, ``_IDIM_MAP_PARAM`` for the horizontal IDim tile
+    / DACE_ITILE — the latter makes each thread process B adjacent IDim columns whose loads
+    nvcc fuses into wider/coalesced transactions, cutting LSU instructions / LG-Throttle).
+
+    Opt-in via DACE_KTILE=B. LoopBlocking on the vertical K dim creates an inner
+    ``Sequential`` map over B consecutive K-levels per thread but leaves
+    ``Map.unroll=False`` (explicit TODO in the transform). Setting ``unroll=True`` makes
+    DaCe codegen emit ``#pragma unroll`` — but LoopBlocking's inner range is
+    ``[coarse*B : Min(N, coarse*B + B)]``, and that ``Min`` makes the trip count a
+    *runtime* value, which defeats the unroll (nvcc keeps a rolled loop with a back-edge,
+    so the B neighbour loads stay serialized and there is no ILP win — confirmed in SASS).
+
+    When the total vertical size N is divisible by B, the last block is always full, so
+    the ``Min`` is redundant: we rewrite the inner range stop to the constant
+    ``coarse*B + (B-1)``. The trip count is then the compile-time constant B and nvcc
+    actually unrolls, exposing the B independent loads for latency hiding (the whole point
+    of K-tiling). If N is not divisible by B (or N can't be determined), we leave the
+    ``Min`` in place (correct, just not unrolled). Returns the number of maps marked.
+    """
+    n_unrolled = 0
+    for state in sdfg.states():
+        for node in state.nodes():
+            if not (
+                isinstance(node, dace.sdfg.nodes.MapEntry)
+                and node.map.schedule == dace.dtypes.ScheduleType.Sequential
+                and map_param in node.map.params
+            ):
+                continue
+            node.map.unroll = True
+            n_unrolled += 1
+            # Drop the redundant Min clamp so the trip count is the constant B (=tile_size),
+            # which is what lets nvcc honour the #pragma unroll. Only safe when N % B == 0.
+            idx = node.map.params.index(map_param)
+            start, stop, step = node.map.range.ranges[idx]
+            try:
+                stop_sym = dace.symbolic.pystr_to_symbolic(str(stop))
+                # The inclusive stop is Min(N-1, coarse*B + B - 1); recover N from the
+                # integer operand(s) of any Min in the expression.
+                n_candidates = [
+                    int(a)
+                    for m in stop_sym.atoms(dace.symbolic.sympy.Min)
+                    for a in m.args
+                    if a.is_Integer
+                ]
+                if n_candidates:
+                    # LoopBlocking stores the inner stop as ``Min(N, coarse*B + B) - 1``
+                    # (verified), so the Min's integer operand is exactly N (the K size).
+                    total_n = max(n_candidates)
+                    if total_n % int(tile_size) == 0:
+                        new_stop = dace.symbolic.pystr_to_symbolic(str(start)) + (
+                            int(tile_size) - 1
+                        )
+                        node.map.range.ranges[idx] = (start, new_stop, step)
+            except Exception:  # noqa: BLE001 — leave the Min in place if anything is unexpected
+                pass
+    return n_unrolled
 
 
 def _map_nontransient_output_arrays(
@@ -276,7 +343,8 @@ def _structured_field_stride_constants(
 ) -> dict[str, int]:
     """Bake structured field strides as compile-time constants from the exact packed-array strides.
 
-    Opt-in via GT4PY_BAKE_STRIDES=1. The structured backend passes every field stride
+    Default ON for the structured backend (opt out with GT4PY_BAKE_STRIDES=0). The structured
+    backend passes every field stride
     (``__<field>_<dim>_stride``) as a runtime kernel argument, so the GPU compiler cannot prove the
     warp dimension is unit-stride. It therefore emits register-indirect gather loads (uncoalesced —
     ncu reports ~11% excessive sectors) and spends registers on per-thread address arithmetic, which
@@ -699,8 +767,8 @@ class DaCeTranslator(
         on_gpu = self.device_type != core_defs.DeviceType.CPU
 
         sdfg = gtx_dace_lowering.build_sdfg_from_gtir(ir, offset_provider_type, column_axis)
-        # get sdfg here sdfg.save()
-        sdfg.save("before_gpu_transformation.sdfg")
+        # Debug dump of the pre-GPU-transformation SDFG — uncomment when needed.
+        # sdfg.save("before_gpu_transformation.sdfg")
         constant_symbols = find_constant_symbols(
             ir,
             sdfg,
@@ -708,21 +776,18 @@ class DaCeTranslator(
             self.disable_field_origin_on_program_arguments,
             self.unstructured_horizontal_has_unit_stride,
         )
-        # Opt-in (GT4PY_BAKE_STRIDES=1): bake the structured horizontal field strides
-        # (IDim=1, JDim=ni, Kolor=ni*max_nj) so the GPU compiler can coalesce warp loads and fold the
-        # constant neighbour-offset address arithmetic out of registers. See
-        # _structured_field_stride_constants. find_constant_symbols cannot do this for the
-        # structured backend (it asserts a single horizontal dim; structured fields have three).
+        # Bake the structured per-field strides and origins (range_0) as compile-time constants so the
+        # GPU compiler coalesces warp loads and folds the neighbour-offset address arithmetic out of
+        # registers — a strict, correctness-safe win that raises occupancy. Default ON for the
+        # structured backend; opt out with GT4PY_BAKE_STRIDES=0. find_constant_symbols cannot do this
+        # itself (it asserts a single horizontal dim; structured fields have three). See
+        # _structured_field_stride_constants.
         if (
             _os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1"
-            and _os.environ.get("GT4PY_BAKE_STRIDES", "0") == "1"
+            and _os.environ.get("GT4PY_BAKE_STRIDES", "1") != "0"
         ):
-            _baked = _structured_field_stride_constants(ir, sdfg, symbolic_domain_sizes)
-            constant_symbols.update(_baked)
-            _nfields = len((symbolic_domain_sizes or {}).get("baked_strides") or {})
-            print(
-                f"[BAKE-STRIDES] baked {len(_baked)} stride symbol(s) from {_nfields} packed field(s)",
-                flush=True,
+            constant_symbols.update(
+                _structured_field_stride_constants(ir, sdfg, symbolic_domain_sizes)
             )
 
         if self.auto_optimize:
@@ -839,6 +904,40 @@ class DaCeTranslator(
                     if "I" in _exp:
                         _inline_multi_consumer_transients(sdfg)
 
+                # OPT-IN K-tile thread-coarsening (DACE_KTILE=B, off by default): block the
+                # vertical K dim into per-thread blocks of B levels via LoopBlocking. Each GPU
+                # thread then processes B consecutive K-levels (unrolled after auto-opt) instead
+                # of one, overlapping their independent loads (ILP) to hide global-load latency,
+                # and hoisting K-invariant geometry/coefficients to once-per-thread. Overrides any
+                # D/K-letter blocking. Default unset → no-op (suite/driver byte-for-byte unchanged).
+                _ktile = _os.environ.get("DACE_KTILE", "0")
+                if _ktile != "0":
+                    _extra["blocking_dim"] = common.Dimension(
+                        "K", kind=common.DimensionKind.VERTICAL
+                    )
+                    _extra["blocking_size"] = int(_ktile)
+                    _extra["blocking_only_if_independent_nodes"] = False
+
+                # ⚠️ BROKEN — DO NOT ENABLE. IDim register-tiling (DACE_ITILE=B): the intent is to
+                # block the IDim (warp/unit-stride) dim so each thread does B adjacent IDim columns
+                # (wider coalesced loads). In practice blocking the warp dim breaks the GPU grid
+                # mapping (blockIdx.z overflows the 65535 limit → invalid launch) AND desyncs the
+                # neighbour-offset / per-kolor domain bounds (98.5% wrong results). Kept gated off
+                # and documented as a dead end; a correct version needs the grid assignment + shift
+                # machinery reworked. See Opt.md "Tried & rejected".
+                _itile = _os.environ.get("DACE_ITILE", "0")
+                if _itile != "0":
+                    _idim_dim = common.Dimension("IDim")
+                    if _ktile != "0":
+                        _extra["blocking_dim"] = [
+                            common.Dimension("K", kind=common.DimensionKind.VERTICAL),
+                            _idim_dim,
+                        ]
+                    else:
+                        _extra["blocking_dim"] = _idim_dim
+                        _extra["blocking_size"] = int(_itile)
+                    _extra["blocking_only_if_independent_nodes"] = False
+
                 if _os.environ.get("DACE_DUMP_ARRAYS", "0") == "1":
                     _nt = [n for n, d in sdfg.arrays.items() if not d.transient]
                     _tr = [n for n, d in sdfg.arrays.items() if d.transient]
@@ -881,6 +980,18 @@ class DaCeTranslator(
                 _unit_strides_dim = [
                     _usd_map[n.strip()] for n in _usd_names.split(",") if n.strip()
                 ]
+                # OPT-IN warp=K (DACE_K_WARP=1, off by default): make K the warp/threadIdx.x
+                # dim so the 32 K-levels of one (i,j,kolor) form a warp — K-dependent field
+                # loads coalesce and the K-invariant geometry/coefficients become uniform
+                # (broadcast) loads, read once per warp instead of once per K (the full version
+                # of the K-tile's geometry hoisting). Requires C-order (K-unit-stride) packing
+                # (_make_structured_field under the same flag) + VERTICAL unit strides so the
+                # SDFG iteration order matches. Overrides DACE_UNIT_STRIDES_DIMS.
+                _k_warp = _os.environ.get("DACE_K_WARP", "0") != "0"
+                if _k_warp:
+                    _unit_strides_dim = [
+                        _usd_map[n] for n in ("K", "IDim", "JDim", "Kolor")
+                    ]
                 # DACE_GPU_LAUNCH_BOUNDS controls __launch_bounds__(max_threads, min_blocks).
                 # The second argument (min_blocks) limits registers per thread on the GPU:
                 #   "256, 8"  (old default) → 8 blocks/SM → 32 registers/thread → heavy spilling
@@ -898,6 +1009,12 @@ class DaCeTranslator(
                     **_extra,
                     **(auto_optimize_args or {}),
                 }
+                if _k_warp:
+                    # Treat the vertical K as the unit-stride dim so gt_change_strides /
+                    # iteration order agree with the C-order (K stride-1) packing.
+                    structured_opt_args["unit_strides_kind"] = (
+                        common.DimensionKind.VERTICAL
+                    )
                 sdfg_snapshot = sdfg.to_json()
                 try:
                     gtx_transformations.gt_auto_optimize(
@@ -925,6 +1042,21 @@ class DaCeTranslator(
                             sdfg, try_removing_trivial_maps=True,
                             gpu_launch_bounds=_launch_bounds,
                         )
+                # K-tile (DACE_KTILE=B): unroll the inner Sequential K-block maps that
+                # LoopBlocking produced, so the B per-thread K-levels' independent loads overlap.
+                if on_gpu and _ktile != "0":
+                    _n_ktile = _unroll_inner_k_maps(sdfg, int(_ktile))
+                    print(
+                        f"[ktile] B={_ktile}, unrolled {_n_ktile} inner-K map(s)", flush=True
+                    )
+                if on_gpu and _itile != "0":
+                    _n_itile = _unroll_inner_k_maps(
+                        sdfg, int(_itile), map_param=_IDIM_MAP_PARAM
+                    )
+                    print(
+                        f"[itile] B={_itile}, unrolled {_n_itile} inner-IDim map(s)",
+                        flush=True,
+                    )
                 # OPT-IN (GT4PY_ENABLE_MISR=1, off by default): merge duplicate reads from the
                 # same global array at the same offset into one shared scalar transient. This
                 # deduplicates SDFG-level reads, but DaCe codegen re-materialises the shared
@@ -939,12 +1071,12 @@ class DaCeTranslator(
                 # sequential per-thread K-loop (see _sequentialize_k_dimension). Targets the
                 # redundant per-K address arithmetic (top ALU/ADU pipe) + geometry re-fetch.
                 if on_gpu and _os.environ.get("DACE_SEQUENTIAL_K", "0") == "1":
-                    if _os.environ.get("DACE_SEQK_DEBUG", "0") == "1":
-                        sdfg.save("before_seqk.sdfg")
-                    _n_kseq = _sequentialize_k_dimension(sdfg)
-                    print(f"[seqK] sequentialized K in {_n_kseq} GPU map(s)", flush=True)
-                    if _os.environ.get("DACE_SEQK_DEBUG", "0") == "1":
-                        sdfg.save("after_seqk.sdfg")
+                    # if _os.environ.get("DACE_SEQK_DEBUG", "0") == "1":
+                    #     sdfg.save("before_seqk.sdfg")
+                    # _n_kseq = _sequentialize_k_dimension(sdfg)
+                    # print(f"[seqK] sequentialized K in {_n_kseq} GPU map(s)", flush=True)
+                    # if _os.environ.get("DACE_SEQK_DEBUG", "0") == "1":
+                    #     sdfg.save("after_seqk.sdfg")
                     # LICM: hoist K-invariant global reads (primal_normal, ptr_coeff, inv_*)
                     # out of the Sequential K-loop into the outer GPU scope so they are read
                     # once per thread instead of once per K-iteration (50× reduction).
@@ -985,7 +1117,7 @@ class DaCeTranslator(
             gtx_transformations.gt_substitute_compiletime_symbols(
                 sdfg, constant_symbols, validate=True
             )
-        sdfg.save("after_gpu_transformation.sdfg")
+        # sdfg.save("after_gpu_transformation.sdfg")
         if self.async_sdfg_call:
             make_sdfg_call_async(sdfg, on_gpu)
         else:
