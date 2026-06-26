@@ -75,6 +75,31 @@ def _is_structured_remap_compatibility_case(existing: ts.TypeSpec, inferred: ts.
             return False
         if existing.position_dims == "unknown" or inferred.position_dims == "unknown":
             return False
+        # Case C: identical position_dims, defined_dims differ by ONE benign structured artifact.
+        # Matching position_dims means the iterator addresses the exact same logical axes, so the
+        # iteration structure is identical and keeping the existing type is safe. Two artifacts of
+        # the structured remap produce such a mismatch:
+        #   C1 — a trailing K present on one side only: a scan-carried column iterator (e.g. the
+        #        tridiagonal-solver temporary `z_q`) is positioned over [..,Kolor,K] but its
+        #        defined (storage) domain is the horizontal-only field, so K toggles in/out.
+        #   C2 — a stale leading unstructured entity dim (Edge/Cell/Vertex) in defined_dims that a
+        #        fieldview temporary (e.g. `wᐞ0`) retained from before the remap.
+        if tuple(existing.position_dims) == tuple(inferred.position_dims):
+            ed = tuple(existing.defined_dims)
+            idf = tuple(inferred.defined_dims)
+            if ed == idf:
+                return True
+            # C1: trailing-K differs by one (either direction).
+            if len(ed) == len(idf) + 1 and ed[-1].value in {"K", "KHalf"} and ed[:-1] == idf:
+                return True
+            if len(idf) == len(ed) + 1 and idf[-1].value in {"K", "KHalf"} and idf[:-1] == ed:
+                return True
+            # C2: leading unstructured entity dim differs by one (either direction).
+            if len(idf) == len(ed) + 1 and idf[0].value in {"Edge", "Cell", "Vertex"} and idf[1:] == ed:
+                return True
+            if len(ed) == len(idf) + 1 and ed[0].value in {"Edge", "Cell", "Vertex"} and ed[1:] == idf:
+                return True
+            return False
         if len(existing.position_dims) != len(inferred.position_dims) + 1:
             return False
         # Case A: K appended to position_dims in K context (K-broadcast for IteratorType).

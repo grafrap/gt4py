@@ -130,9 +130,25 @@ def _combine(*values):
     return Sentinel.VALUE
 
 
+# Canonical GT4Py domain-bound scalar parameters. These are always scalar values (never
+# iterators), so trace_shifts may safely treat them as Sentinel.VALUE when they appear free in a
+# stencil body (a structured-backend artifact for vertical concat_where conditions).
+_DOMAIN_BOUND_SYMBOLS = frozenset(
+    {"horizontal_start", "horizontal_end", "vertical_start", "vertical_end"}
+)
+
+
 # implementations of builtins
 def _deref(x):
-    return x.deref()
+    if isinstance(x, Tracer):
+        return x.deref()
+    # `x` reduced to a plain value/type (Sentinel.VALUE / Sentinel.TYPE) rather than an iterator
+    # Tracer: the structured backend can emit `deref(<value>)` in a degenerate per-kolor branch
+    # (e.g. a literal-0 fallback). Derefing a non-iterator records no shift access pattern, so the
+    # traced result is just a value — mirroring `_can_deref`, which already returns Sentinel.VALUE
+    # for any argument. Without this, type inference crashes with `'Sentinel' object has no
+    # attribute 'deref'` while tracing such a stencil.
+    return Sentinel.VALUE
 
 
 def _can_deref(x):
@@ -323,6 +339,13 @@ class TraceShifts(PreserveLocationVisitor, NodeTranslator):
             return Sentinel.TYPE
         elif node.id in (builtins.ARITHMETIC_BUILTINS | {"list_get", "make_const_list", "cast_"}):
             return _combine
+        elif node.id in _DOMAIN_BOUND_SYMBOLS:
+            # Canonical GT4Py domain-bound scalars (never iterators). The structured backend can
+            # leave one in a stencil body — e.g. a `concat_where` K-condition `less(K, vertical_start)`
+            # — where it is a free symbol not bound as an iterator arg. For shift tracing it is a
+            # plain value contributing no access pattern, so return Sentinel.VALUE rather than raise
+            # `Undefined symbol`. Restricting to these four names keeps the guard for real typos.
+            return Sentinel.VALUE
         raise ValueError(f"Undefined symbol {node.id}")
 
     def visit_FunCall(self, node: ir.FunCall, *, ctx: dict[str, Any]) -> Any:

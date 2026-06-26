@@ -24,6 +24,10 @@ SDFG_ARG_METRIC_COMPUTE_TIME: Final[str] = "gt_compute_time"
 """Name of SDFG argument to return the total compute time to GT4Py."""
 
 
+SDFG_ARG_METRIC_COPY_TIME: Final[str] = "gt_copy_time"
+"""Name of SDFG argument to accumulate copy-kernel wall time (subtract from compute time)."""
+
+
 def set_dace_config(
     device_type: core_defs.DeviceType,
     cmake_build_type: Optional[gtx_config.CMakeBuildType] = None,

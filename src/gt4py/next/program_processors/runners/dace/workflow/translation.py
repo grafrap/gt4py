@@ -29,6 +29,7 @@ from gt4py.next.program_processors.runners.dace import (
 )
 from gt4py.next.program_processors.runners.dace.workflow import common as gtx_wfdcommon
 from gt4py.next.type_system import type_specifications as ts
+import os as _os
 
 
 # DaCe SDFG map parameter name for the Kolor dimension.
@@ -470,6 +471,174 @@ def _make_if_region_for_metrics_collection(
         dace.sdfg.state.CodeBlock(f"{metrics_level} >= {metrics.PERFORMANCE}"), then_body
     )
     return if_region, then_state
+
+
+def _report_copy_kernels(sdfg: dace.SDFG) -> None:
+    """Print a greppable ``COPY_KERNEL_DETECTED`` line for each pure data-copy map kernel.
+
+    DaCe emits a separate GPU kernel for every array-to-array copy map (labelled
+    ``copy_<src>_<dst>``), as opposed to the compute maps (``map_*_fieldop_*``). These copies are
+    pure data movement (no compute) and a prime target for elimination — e.g. multi-output
+    stencils such as ``compute_exner_from_rhotheta`` lower to one compute kernel plus two
+    ``copy_*`` kernels that the unstructured backend avoids. Reporting them by name lets a whole
+    suite run be grepped (``grep COPY_KERNEL_DETECTED``) to find which stencils still materialize
+    copy kernels and how many. Only prints when at least one copy kernel is present.
+    """
+    copy_kernels: set[str] = set()
+    for node, _ in sdfg.all_nodes_recursive():
+        if isinstance(node, dace.nodes.MapEntry) and node.map.label.startswith("copy_"):
+            # Normalize "copy_<src>_<dst>_map[<ranges>]" → "copy_<src>_<dst>".
+            base = node.map.label.split("[", 1)[0]
+            if base.endswith("_map"):
+                base = base[: -len("_map")]
+            copy_kernels.add(base)
+    if copy_kernels:
+        print(
+            f"COPY_KERNEL_DETECTED: program={sdfg.name} count={len(copy_kernels)} "
+            f"kernels={sorted(copy_kernels)}",
+            flush=True,
+        )
+
+
+def _instrument_copy_kernels_for_compute_only(sdfg: dace.SDFG) -> bool:
+    """Time copy_* GPU kernels via SDFG pre/post timing states (fast_call-compatible).
+
+    DEFAULT-ON (opt out with ``DACE_TIME_COMPUTE_ONLY=0``). Enables the *compute-only timer*:
+    decoration.py subtracts the accumulated copy-kernel duration from the chrono wall-time so
+    the reported GT4Py Timer metric reflects only the compute kernels.
+
+    Uses the same accumulator pattern as ``add_instrumentation`` (cudaStreamSynchronize +
+    std::chrono), rather than GPU_Events + get_latest_report(). GPU_Events requires DaCe to
+    flush the instrumentation report to disk, which only happens when the CompiledSDFG is
+    finalized — never during fast_call(). Instead, this adds ``SDFG_ARG_METRIC_COPY_TIME`` as
+    a non-transient SDFG output array, wraps each copy_* state with a pre/post timing state,
+    and writes the elapsed wall time into the array. decoration.py reads it directly after
+    fast_call() (no file I/O, no report flushing required).
+
+    Correctness rests on ``max_concurrent_streams == -1`` (default stream only ⇒ sequential
+    execution ⇒ total_wall = compute_wall + copy_wall exactly). Returns True iff at least one
+    copy state was instrumented.
+    """
+    if _os.environ.get("DACE_TIME_COMPUTE_ONLY", "1") == "0":
+        return False
+    if dace.Config.get("compiler.cuda.max_concurrent_streams") != -1:
+        return False
+
+    # Only wrap states where ALL top-level maps are copy_* maps.
+    # States that mix a compute map (map_*_fieldop_*) with a copy map cannot be timed
+    # for copy-only: the pre/post states would bracket both kernels together, causing
+    # copy_t ≈ total time and ~99% over-subtraction.
+    def _top_level_maps(state):
+        return [
+            n for n in state.nodes()
+            if isinstance(n, dace.nodes.MapEntry) and state.entry_node(n) is None
+        ]
+
+    copy_states = [
+        state for state in sdfg.states()
+        if (
+            maps := _top_level_maps(state)
+        ) and all(m.map.label.startswith("copy_") for m in maps)
+    ]
+    # Debug: print all states with any copy map and which ones were selected for timing.
+    for state in sdfg.states():
+        maps = _top_level_maps(state)
+        if any(m.map.label.startswith("copy_") for m in maps):
+            selected = state in copy_states
+            print(
+                f"[copy_time_debug] state='{state.label}'  "
+                f"maps={[m.map.label for m in maps]}  "
+                f"selected_for_timing={selected}",
+                flush=True,
+            )
+    if not copy_states:
+        return False
+
+    # Non-transient output array: decoration.py resets to 0.0 before each fast_call(),
+    # and reads the total copy time after fast_call(). C++ accumulates into it per copy state.
+    copy_time_name = gtx_wfdcommon.SDFG_ARG_METRIC_COPY_TIME
+    sdfg.add_array(copy_time_name, [1], dace.float64)
+
+    dace_gpu_backend = dace.Config.get("compiler.cuda.backend")
+    assert dace_gpu_backend in ["cuda", "hip"]
+    sync_code = f"{dace_gpu_backend}StreamSynchronize({dace_gpu_backend}StreamDefault);"
+
+    for i, copy_state in enumerate(copy_states):
+        # Snapshot edges before modifying the graph
+        in_edges = list(sdfg.in_edges(copy_state))
+        out_edges = list(sdfg.out_edges(copy_state))
+
+        # Transients: start timestamp (ns) + previous accumulated copy time
+        start_var = f"__gt_copy_start_ns_{i}"
+        prev_var = f"__gt_prev_copy_t_{i}"
+        sdfg.add_array(start_var, [1], dace.int64, transient=True)
+        sdfg.add_array(prev_var, [1], dace.float64, transient=True)
+
+        pre = sdfg.add_state(f"copy_timing_pre_{i}")
+        post = sdfg.add_state(f"copy_timing_post_{i}")
+
+        # Promote pre to start block if copy_state was the start block
+        if sdfg.start_block is copy_state:
+            sdfg.start_block = sdfg.node_id(pre)
+
+        # Rewire: predecessors → pre → copy_state → post → successors
+        for edge in in_edges:
+            sdfg.add_edge(edge.src, pre, edge.data)
+            sdfg.remove_edge(edge)
+        sdfg.add_edge(pre, copy_state, dace.InterstateEdge())
+        sdfg.add_edge(copy_state, post, dace.InterstateEdge())
+        for edge in out_edges:
+            sdfg.add_edge(post, edge.dst, edge.data)
+            sdfg.remove_edge(edge)
+
+        # Pre-state: GPU sync + record start timestamp + snapshot current accumulated copy time.
+        # Reading copy_time_name here (not in post) keeps the post-state free of read-write
+        # conflicts on the same array within one DaCe state.
+        ct_read = pre.add_access(copy_time_name)
+        start_access = pre.add_access(start_var)
+        prev_access = pre.add_access(prev_var)
+        pre_tlet = pre.add_tasklet(
+            f"copy_pre_{i}",
+            inputs={"ct_in"},
+            outputs={"t_start", "ct_prev"},
+            code=f"""\
+{sync_code}
+auto __gt_copy_now_{i} = std::chrono::high_resolution_clock::now();
+t_start = std::chrono::duration_cast<std::chrono::nanoseconds>(
+    __gt_copy_now_{i}.time_since_epoch()).count();
+ct_prev = ct_in;
+""",
+            language=dace.dtypes.Language.CPP,
+            side_effects=True,
+        )
+        pre.add_edge(ct_read, None, pre_tlet, "ct_in", dace.Memlet(f"{copy_time_name}[0]"))
+        pre.add_edge(pre_tlet, "t_start", start_access, None, dace.Memlet(f"{start_var}[0]"))
+        pre.add_edge(pre_tlet, "ct_prev", prev_access, None, dace.Memlet(f"{prev_var}[0]"))
+
+        # Post-state: GPU sync + compute elapsed + write accumulated copy time.
+        start_read = post.add_access(start_var)
+        prev_read = post.add_access(prev_var)
+        ct_write = post.add_access(copy_time_name)
+        post_tlet = post.add_tasklet(
+            f"copy_post_{i}",
+            inputs={"t_start", "ct_prev"},
+            outputs={"ct_out"},
+            code=f"""\
+{sync_code}
+auto __gt_copy_now2_{i} = std::chrono::high_resolution_clock::now();
+auto __gt_copy_stop_ns_{i} = std::chrono::duration_cast<std::chrono::nanoseconds>(
+    __gt_copy_now2_{i}.time_since_epoch()).count();
+ct_out = ct_prev + static_cast<double>(__gt_copy_stop_ns_{i} - t_start) * 1.0e-9;
+""",
+            language=dace.dtypes.Language.CPP,
+            side_effects=True,
+        )
+        post.add_edge(start_read, None, post_tlet, "t_start", dace.Memlet(f"{start_var}[0]"))
+        post.add_edge(prev_read, None, post_tlet, "ct_prev", dace.Memlet(f"{prev_var}[0]"))
+        post.add_edge(post_tlet, "ct_out", ct_write, None, dace.Memlet(f"{copy_time_name}[0]"))
+
+    sdfg.validate()
+    return True
 
 
 def add_instrumentation(sdfg: dace.SDFG, gpu: bool) -> None:
@@ -962,12 +1131,25 @@ class DaCeTranslator(
                 #   "IDim,JDim,Kolor"   → params [K,Kolor,JDim,IDim] → x=IDim, y=JDim, z=Kolor
                 #     Best for seqK: K stripped → Kolor=1 in z → no 87.5% Kolor waste (0.685ms)
                 # Override via DACE_UNIT_STRIDES_DIMS (comma-separated dim names).
-                # Default "IDim" is optimal for parallel-K (K in threadIdx.y → efficient occupancy).
+                # Default "IDim,JDim" (x=IDim warp/stride-1, y=JDim, K folds to grid.z): avoids the
+                # ceil(K/8) block.y quantization of plain "IDim" (K=50→56 ⇒ ~11% wasted threads) AND
+                # gives a compact IDim×JDim block footprint (~4KB contiguous plane) instead of IDim×K
+                # (~53MB strided slab) ⇒ much better L2 locality. The warp axis stays IDim (stride-1,
+                # set separately by gt_change_strides), so coalescing is preserved. Measured vs plain
+                # "IDim" at 512/K=50, correctness intact: apply_2nd −7.1%, add_analysis_to_vn −6.0%,
+                # apply_rayleigh(Cell) −6.2%, horiz_kinetic −1.3%. (The earlier "IDim" default was
+                # picked for parallel-K occupancy but never benchmarked against "IDim,JDim".)
                 # Use "IDim,JDim,Kolor" with DACE_SEQUENTIAL_K=1 to avoid Kolor thread waste.
+                # ⚠️ EXCEPTION — rbf_nabla4 / register-heavy V2E *gather* kernels (and the
+                # DACE_K_INNER_LAYOUT K-near-IDim layout) are ~2× WORSE with "IDim,JDim" (measured
+                # rbf_nabla4 +94%, 0.78→1.52ms; see Opt.md Opt 21/22). Launch those with an explicit
+                # DACE_UNIT_STRIDES_DIMS=IDim override (alongside their lb3 + DACE_WARP_ALIGN=0). This
+                # is a kernel-class carve-out, NOT entity-based: V2C and simple-V2E both gain from the
+                # reorder, so "Vertex→IDim" would be wrong.
                 _usd_default = (
                     "IDim,JDim,Kolor"
                     if _os.environ.get("DACE_SEQUENTIAL_K", "0") == "1"
-                    else "IDim"
+                    else "IDim,JDim"
                 )
                 _usd_names = _os.environ.get("DACE_UNIT_STRIDES_DIMS", _usd_default).strip()
                 _usd_map = {
@@ -995,11 +1177,19 @@ class DaCeTranslator(
                 # DACE_GPU_LAUNCH_BOUNDS controls __launch_bounds__(max_threads, min_blocks).
                 # The second argument (min_blocks) limits registers per thread on the GPU:
                 #   "256, 8"  (old default) → 8 blocks/SM → 32 registers/thread → heavy spilling
+                #   "256, 3"               → 3 blocks/SM → ~85 registers/thread
                 #   "256, 2"               → 2 blocks/SM → 128 registers/thread → moderate spilling
                 #   "256, 1"               → 1 block/SM  → 255 registers/thread → minimal spilling
-                #   "0"                    → __launch_bounds__(256) only → compiler decides
-                # Use "0" for register-pressure-heavy stencils (e.g. rbf_nabla4_direct with 237 tmps).
-                _launch_bounds = _os.environ.get("DACE_GPU_LAUNCH_BOUNDS", "256, 8")
+                #   "0"  (DEFAULT)         → __launch_bounds__(256) only → compiler decides regs
+                # DEFAULT "0": the old fixed "256, 8" cap (32 regs) forced heavy register spilling on
+                # the register-hungry elementwise/scan stencils (the worst structured performers).
+                # Letting the compiler choose eliminates the spill — measured wins: rho_virtual
+                # 1.063→0.91 ms (−14%), solve_tridiagonal_w_fwd 0.92→0.56 ms (−39%), both now BEAT
+                # unstructured; neutral where there was no spill (divergence, horiz_kinetic_energy).
+                # EXCEPTION: register-heavy *gather* kernels (rbf_nabla4 / *_direct) want an explicit
+                # cap — the compiler over-allocates regs → 1 block/SM → low occupancy. Override those
+                # with DACE_GPU_LAUNCH_BOUNDS="256, 3" (post-baking optimum; see Opt.md Opt 18).
+                _launch_bounds = _os.environ.get("DACE_GPU_LAUNCH_BOUNDS", "0")
                 structured_opt_args: dict = {
                     "unit_strides_dim": _unit_strides_dim,
                     "disable_splitting": True,
@@ -1125,6 +1315,15 @@ class DaCeTranslator(
 
         if self.use_metrics:
             add_instrumentation(sdfg, on_gpu)
+            if on_gpu:
+                # Opt-in (DACE_TIME_COMPUTE_ONLY=1): time the copy_* kernels so the reported
+                # metric can be made compute-only (decoration.py subtracts their duration).
+                _instrument_copy_kernels_for_compute_only(sdfg)
+
+        # Report any pure data-copy kernels (e.g. multi-output stencils → 1 compute + N copy
+        # kernels) so a suite run can be grepped for COPY_KERNEL_DETECTED. Detection only; does
+        # not change the SDFG.
+        _report_copy_kernels(sdfg)
 
         return sdfg
 

@@ -1228,13 +1228,18 @@ class GenericStructuredWrapper:
         K-invariant geometry/coefficients become uniform/broadcast loads (read once per warp
         instead of once per K).
 
-        Opt-in ``DACE_WARP_ALIGN=1``: pad the IDim axis (axis 0) to a multiple of 32 so every
-        JDim/K/Kolor stride is a multiple of the warp width (32 doubles = 256 B). Without it the
-        packed ni (e.g. 528 = 16.5*32) is only cache-line (16) aligned, so warp bases land mid
-        256-B sector → strided/uncoalesced loads (ncu: ~8-11% excessive sectors — the dominant
-        LG-Throttle feeder). The pad adds never-read trailing columns; baking captures the padded
-        stride; unpack uses the index map (original ni) so the pad is transparent. Applies to the
-        3D geometry fields too (the CopyND scalar gathers) and composes with the K layouts above.
+        ``DACE_WARP_ALIGN`` (DEFAULT ON; opt out with ``DACE_WARP_ALIGN=0``): pad the IDim axis
+        (axis 0) of every cell/edge/vertex field to a multiple of 32 so every JDim/K/Kolor stride
+        is a multiple of the warp width (32 doubles = 256 B). Without it the packed ni (e.g.
+        516 or 528 = 16.5*32) is only cache-line (16) aligned, so warp bases land mid 256-B sector
+        → strided/uncoalesced loads (ncu: ~8-11% excessive sectors — the dominant LG-Throttle
+        feeder). Measured: at grid sizes where ni is NOT already a 32-multiple (e.g. 516, the
+        production benchmark grid) this recovers ~4% on a memory-bound edge stencil; at sizes where
+        ni is already a 32-multiple (e.g. 512) the pad is a no-op (zero overhead). The pad adds
+        never-read trailing columns; baking captures the padded stride; unpack uses the index map
+        (original ni) so the pad is transparent. Applies to the 3D geometry fields too (the CopyND
+        scalar gathers) and composes with the K layouts above. (Slightly negative for the
+        register-heavy gather kernel rbf_nabla4 per Opt 19 — opt out there if needed.)
 
         Both K-layout options apply only to 4D fields whose single trailing dim is the vertical K.
         ``as_field`` preserves the strides of a cupy *device* array (a host numpy view would
@@ -1242,7 +1247,7 @@ class GenericStructuredWrapper:
         → byte-for-byte unchanged for the suite/driver and for parallel-K.
         """
         if (
-            os.environ.get("DACE_WARP_ALIGN", "0") == "1"
+            os.environ.get("DACE_WARP_ALIGN", "1") != "0"
             and getattr(struct_np, "ndim", 0) in (3, 4)
         ):
             _a = np.asarray(struct_np)
@@ -1368,7 +1373,7 @@ class GenericStructuredWrapper:
         ):
             return
 
-        if os.environ.get("DACE_WARP_ALIGN", "0") == "1" and getattr(struct_np, "ndim", 0) >= 3:
+        if os.environ.get("DACE_WARP_ALIGN", "1") != "0" and getattr(struct_np, "ndim", 0) >= 3:
             # struct_np was IDim-padded to a multiple of 32 (DACE_WARP_ALIGN); the unpack index
             # maps use the original (unpadded) ni, so trim the trailing pad rows on axis 0.
             if self._is_unstructured(original_unstructured_field, "Edge"):
