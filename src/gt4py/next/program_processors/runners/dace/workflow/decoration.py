@@ -47,6 +47,10 @@ def convert_args(
     # copy_* kernels when DACE_TIME_COMPUTE_ONLY != 0.
     has_copy_time = gtx_wfdcommon.SDFG_ARG_METRIC_COPY_TIME in fun.sdfg_program.sdfg.arrays
     collect_copy_time_arg = np.array([0.0], dtype=np.float64) if has_copy_time else None
+    # One-shot flag: announce the first nonzero copy-time subtraction per program, so a working
+    # compute-only timer is distinguishable from a silent no-op (e.g. stale binary without the
+    # copy-timing states). Greppable, same style as COPY_KERNEL_DETECTED / DIM_ORDER.
+    copy_time_announced = [False]
     # We use the callback function provided by the compiled program to update the SDFG arglist.
     update_sdfg_call_args = functools.partial(
         fun.update_sdfg_ctype_arglist, device, fun.sdfg_argtypes
@@ -104,6 +108,13 @@ def convert_args(
                 copy_t = _read_copy_kernel_time_s(collect_copy_time_arg)
                 if copy_t > 0.0:
                     sample = max(sample - copy_t, 0.0)
+                    if not copy_time_announced[0]:
+                        copy_time_announced[0] = True
+                        print(
+                            f"COMPUTE_ONLY_TIMER: program={fun.sdfg_program.sdfg.name} "
+                            f"copy_ms={copy_t * 1e3:.4f} (subtracted from reported metric)",
+                            flush=True,
+                        )
             metrics.add_sample_to_current_source(metrics.COMPUTE_METRIC, sample)
 
     return decorated_program

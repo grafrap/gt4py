@@ -910,6 +910,16 @@ class DaCeTranslator(
                 except Exception:
                     pass
 
+        # Classify the PRE-transform GTIR for the automatic dimension-order policy (used at the
+        # `_usd_default` site below). This must run before the itir transforms: the structured
+        # passes (NeighborReductionUnroller) replace connectivity OffsetLiterals (E2C2V, ...)
+        # with cartesian IDim/JDim/Kolor shifts, so gather connectivity is only visible here.
+        _pretransform_offsets: set = set()
+        if _os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1":
+            for _n in ir.pre_walk_values().if_isinstance(itir.OffsetLiteral):
+                if isinstance(_n.value, str):
+                    _pretransform_offsets.add(_n.value)
+
         if not self.disable_itir_transforms:
             if self.apply_common_transform:
                 ir = self._preprocess_program(ir, offset_provider)
@@ -961,8 +971,127 @@ class DaCeTranslator(
 
         if self.auto_optimize:
             auto_optimize_args = {} if self.auto_optimize_args is None else self.auto_optimize_args
+            _is_structured = _os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1"
 
-            if _os.environ.get("USE_STRUCTURED_BACKEND", "0") == "1":
+            # Experiment selector: set DACE_OPT_EXPERIMENT env var to override defaults. Computed
+            # UNCONDITIONALLY (both structured and unstructured) so DACE_KTILE / DACE_GPU_LAUNCH_
+            # BOUNDS / DACE_OPT_EXPERIMENT reach the unstructured backend too — these are generic
+            # DaCe SDFG-level knobs (register/occupancy tuning, K-loop blocking) that don't depend
+            # on the structured IDim/JDim/Kolor layout. Previously this whole block, including
+            # DACE_KTILE, was nested inside `if _is_structured:`, so setting these env vars for an
+            # unstructured (USE_STRUCTURED_BACKEND=0) run was a silent no-op — every "unstructured"
+            # config in a comparison sweep compiled to the byte-identical SDFG regardless of which
+            # knobs were set, confirmed via .gt4py_cache: 3 differently-flagged unstructured pytest
+            # invocations produced only 1 distinct compiled binary.
+            #   "D"  → blocking_dim=JDim   (loop tiling on JDim) — STRUCTURED ONLY, no JDim exists
+            #          on an unstructured SDFG (Edge/Cell/Vertex + K); skipped when not structured.
+            #   "K"  → blocking_dim=KDim   (loop tiling on the vertical K loop)
+            #   "E"  → fuse_tasklets=True  (tasklet fusion)
+            #   "F"  → scan_loop_unrolling=True  (K-loop unrolling, part of the default)
+            #   "G"  → reuse_transients=True
+            #   "I"  → inline multi-consumer transients (E2C2V intermediate elimination)
+            #   "B"  → gpu_block_size from DACE_GPU_BLOCK_SIZE (default "64,4,1")
+            #   "R"  → gpu_maxnreg from DACE_GPU_MAXNREG (default "64") — register cap / occupancy
+            #   "L"  → gpu_launch_factor from DACE_GPU_LAUNCH_FACTOR (default "2");
+            #          clears the fixed gpu_launch_bounds so the factor takes effect
+            #   "P"  → make_persistent=True (persistent transient lifetime, skip per-call alloc)
+            #   "M"  → demote_fields from DACE_DEMOTE_FIELDS (comma-separated field names);
+            #          only non-transient fields can be demoted — set DACE_DUMP_ARRAYS=1 to
+            #          list the SDFG's transient vs non-transient array names first.
+            #   "N"  → blocking_only_if_independent_nodes=False (allow blocking in more places)
+            #   "none" → disable all extras (pure opt_v2 baseline)
+            # Block size is shared by D/K and overridable via DACE_BLOCKING_SIZE (default 8).
+            # D and K are mutually exclusive (single blocking_dim); if both are present K wins.
+            # DACE_GPU_LAUNCH_BOUNDS overrides the __launch_bounds__ min_blocks argument.
+            #   default "256, 8" → 32 registers/thread (heavy spilling for large kernels)
+            #   "256, 2"         → 128 registers/thread (less spilling)
+            #   "256, 1"         → 255 registers/thread (minimal spilling, lower occupancy)
+            #   "0"              → compiler decides (no min_blocks constraint)
+            _exp = _os.environ.get("DACE_OPT_EXPERIMENT", "FD")
+            _blocking_size = int(_os.environ.get("DACE_BLOCKING_SIZE", "8"))
+            _extra: dict = {}
+            if _exp != "none":
+                if "D" in _exp and _is_structured:
+                    _extra["blocking_dim"] = common.Dimension("JDim")
+                    _extra["blocking_size"] = _blocking_size
+                if "K" in _exp:
+                    _extra["blocking_dim"] = common.Dimension(
+                        "K", kind=common.DimensionKind.VERTICAL
+                    )
+                    _extra["blocking_size"] = _blocking_size
+                # DACE_BLOCKING_DIMS (e.g. "IDim,JDim") overrides D/K and enables
+                # multi-dimensional blocking (2D I+J tiling). blocking_dim becomes a list;
+                # LoopBlocking is applied once per dim in auto_optimize. Names: IDim/JDim
+                # (HORIZONTAL, structured only) and K/KDim (VERTICAL, both backends).
+                _bdims = _os.environ.get("DACE_BLOCKING_DIMS", "").strip()
+                if _bdims:
+                    _dim_map = {
+                        "IDim": common.Dimension("IDim"),
+                        "JDim": common.Dimension("JDim"),
+                        "K": common.Dimension("K", kind=common.DimensionKind.VERTICAL),
+                        "KDim": common.Dimension("K", kind=common.DimensionKind.VERTICAL),
+                    }
+                    _extra["blocking_dim"] = [
+                        _dim_map[d.strip()] for d in _bdims.split(",") if d.strip()
+                    ]
+                    _extra["blocking_size"] = _blocking_size
+                if "E" in _exp:
+                    _extra["fuse_tasklets"] = True
+                if "F" in _exp:
+                    _extra["scan_loop_unrolling"] = True
+                    _extra["scan_loop_unrolling_factor"] = 0
+                if "G" in _exp:
+                    _extra["reuse_transients"] = True
+                if "B" in _exp:
+                    _bs = _os.environ.get("DACE_GPU_BLOCK_SIZE", "64,4,1")
+                    _extra["gpu_block_size"] = tuple(
+                        int(x) for x in _bs.split(",")
+                    )
+                if "R" in _exp:
+                    _extra["gpu_maxnreg"] = int(
+                        _os.environ.get("DACE_GPU_MAXNREG", "64")
+                    )
+                if "L" in _exp:
+                    _extra["gpu_launch_factor"] = int(
+                        _os.environ.get("DACE_GPU_LAUNCH_FACTOR", "2")
+                    )
+                    # launch_bounds and launch_factor are mutually exclusive; drop the
+                    # fixed bounds set below so the factor governs __launch_bounds__.
+                    _extra["gpu_launch_bounds"] = None
+                if "P" in _exp:
+                    _extra["make_persistent"] = True
+                if "M" in _exp:
+                    _demote = _os.environ.get("DACE_DEMOTE_FIELDS", "").strip()
+                    if _demote:
+                        _extra["demote_fields"] = [
+                            f.strip() for f in _demote.split(",") if f.strip()
+                        ]
+                if "N" in _exp:
+                    _extra["blocking_only_if_independent_nodes"] = False
+                if "I" in _exp:
+                    _inline_multi_consumer_transients(sdfg)
+
+            # OPT-IN K-tile thread-coarsening (DACE_KTILE=B, off by default): block the
+            # vertical K dim into per-thread blocks of B levels via LoopBlocking. Each GPU
+            # thread then processes B consecutive K-levels (unrolled after auto-opt) instead
+            # of one, overlapping their independent loads (ILP) to hide global-load latency,
+            # and hoisting K-invariant geometry/coefficients to once-per-thread. Overrides any
+            # D/K-letter blocking. Default unset → no-op (suite/driver byte-for-byte unchanged).
+            # K is a shared vertical dimension on both structured and unstructured SDFGs, so this
+            # applies identically regardless of USE_STRUCTURED_BACKEND.
+            _ktile = _os.environ.get("DACE_KTILE", "0")
+            if _ktile != "0":
+                _extra["blocking_dim"] = common.Dimension(
+                    "K", kind=common.DimensionKind.VERTICAL
+                )
+                _extra["blocking_size"] = int(_ktile)
+                _extra["blocking_only_if_independent_nodes"] = False
+
+            # DACE_GPU_LAUNCH_BOUNDS controls __launch_bounds__(max_threads, min_blocks) — a pure
+            # register/occupancy knob, backend-agnostic. See the docstring above for value meanings.
+            _launch_bounds = _os.environ.get("DACE_GPU_LAUNCH_BOUNDS", "0")
+
+            if _is_structured:
                 # Step 1: constant folding — always safe, no structural SDFG changes.
                 if constant_symbols:
                     gtx_transformations.gt_substitute_compiletime_symbols(
@@ -985,107 +1114,6 @@ class DaCeTranslator(
                 # Phase 3's FuseHorizontalConditionBlocks hardcodes validate=True and catches
                 # this as InvalidSDFGEdgeError. We snapshot the SDFG before attempting
                 # gt_auto_optimize and restore+apply a safe subset on failure.
-                # Experiment selector: set DACE_OPT_EXPERIMENT env var to override defaults:
-                #   "D"  → blocking_dim=JDim   (loop tiling on JDim)
-                #   "K"  → blocking_dim=KDim   (loop tiling on the vertical K loop)
-                #   "E"  → fuse_tasklets=True  (tasklet fusion)
-                #   "F"  → scan_loop_unrolling=True  (K-loop unrolling, part of the default)
-                #   "G"  → reuse_transients=True
-                #   "I"  → inline multi-consumer transients (E2C2V intermediate elimination)
-                #   "B"  → gpu_block_size from DACE_GPU_BLOCK_SIZE (default "64,4,1")
-                #   "R"  → gpu_maxnreg from DACE_GPU_MAXNREG (default "64") — register cap / occupancy
-                #   "L"  → gpu_launch_factor from DACE_GPU_LAUNCH_FACTOR (default "2");
-                #          clears the fixed gpu_launch_bounds so the factor takes effect
-                #   "P"  → make_persistent=True (persistent transient lifetime, skip per-call alloc)
-                #   "M"  → demote_fields from DACE_DEMOTE_FIELDS (comma-separated field names);
-                #          only non-transient fields can be demoted — set DACE_DUMP_ARRAYS=1 to
-                #          list the SDFG's transient vs non-transient array names first.
-                #   "N"  → blocking_only_if_independent_nodes=False (allow blocking in more places)
-                #   "none" → disable all extras (pure opt_v2 baseline)
-                # Block size is shared by D/K and overridable via DACE_BLOCKING_SIZE (default 8).
-                # D and K are mutually exclusive (single blocking_dim); if both are present K wins.
-                # DACE_GPU_LAUNCH_BOUNDS overrides the __launch_bounds__ min_blocks argument.
-                #   default "256, 8" → 32 registers/thread (heavy spilling for large kernels)
-                #   "256, 2"         → 128 registers/thread (less spilling)
-                #   "256, 1"         → 255 registers/thread (minimal spilling, lower occupancy)
-                #   "0"              → compiler decides (no min_blocks constraint)
-                _exp = _os.environ.get("DACE_OPT_EXPERIMENT", "FD")
-                _blocking_size = int(_os.environ.get("DACE_BLOCKING_SIZE", "8"))
-                _extra: dict = {}
-                if _exp != "none":
-                    if "D" in _exp:
-                        _extra["blocking_dim"] = common.Dimension("JDim")
-                        _extra["blocking_size"] = _blocking_size
-                    if "K" in _exp:
-                        _extra["blocking_dim"] = common.Dimension(
-                            "K", kind=common.DimensionKind.VERTICAL
-                        )
-                        _extra["blocking_size"] = _blocking_size
-                    # DACE_BLOCKING_DIMS (e.g. "IDim,JDim") overrides D/K and enables
-                    # multi-dimensional blocking (2D I+J tiling). blocking_dim becomes a list;
-                    # LoopBlocking is applied once per dim in auto_optimize. Names: IDim/JDim
-                    # (HORIZONTAL) and K/KDim (VERTICAL).
-                    _bdims = _os.environ.get("DACE_BLOCKING_DIMS", "").strip()
-                    if _bdims:
-                        _dim_map = {
-                            "IDim": common.Dimension("IDim"),
-                            "JDim": common.Dimension("JDim"),
-                            "K": common.Dimension("K", kind=common.DimensionKind.VERTICAL),
-                            "KDim": common.Dimension("K", kind=common.DimensionKind.VERTICAL),
-                        }
-                        _extra["blocking_dim"] = [
-                            _dim_map[d.strip()] for d in _bdims.split(",") if d.strip()
-                        ]
-                        _extra["blocking_size"] = _blocking_size
-                    if "E" in _exp:
-                        _extra["fuse_tasklets"] = True
-                    if "F" in _exp:
-                        _extra["scan_loop_unrolling"] = True
-                        _extra["scan_loop_unrolling_factor"] = 0
-                    if "G" in _exp:
-                        _extra["reuse_transients"] = True
-                    if "B" in _exp:
-                        _bs = _os.environ.get("DACE_GPU_BLOCK_SIZE", "64,4,1")
-                        _extra["gpu_block_size"] = tuple(
-                            int(x) for x in _bs.split(",")
-                        )
-                    if "R" in _exp:
-                        _extra["gpu_maxnreg"] = int(
-                            _os.environ.get("DACE_GPU_MAXNREG", "64")
-                        )
-                    if "L" in _exp:
-                        _extra["gpu_launch_factor"] = int(
-                            _os.environ.get("DACE_GPU_LAUNCH_FACTOR", "2")
-                        )
-                        # launch_bounds and launch_factor are mutually exclusive; drop the
-                        # fixed bounds set below so the factor governs __launch_bounds__.
-                        _extra["gpu_launch_bounds"] = None
-                    if "P" in _exp:
-                        _extra["make_persistent"] = True
-                    if "M" in _exp:
-                        _demote = _os.environ.get("DACE_DEMOTE_FIELDS", "").strip()
-                        if _demote:
-                            _extra["demote_fields"] = [
-                                f.strip() for f in _demote.split(",") if f.strip()
-                            ]
-                    if "N" in _exp:
-                        _extra["blocking_only_if_independent_nodes"] = False
-                    if "I" in _exp:
-                        _inline_multi_consumer_transients(sdfg)
-
-                # OPT-IN K-tile thread-coarsening (DACE_KTILE=B, off by default): block the
-                # vertical K dim into per-thread blocks of B levels via LoopBlocking. Each GPU
-                # thread then processes B consecutive K-levels (unrolled after auto-opt) instead
-                # of one, overlapping their independent loads (ILP) to hide global-load latency,
-                # and hoisting K-invariant geometry/coefficients to once-per-thread. Overrides any
-                # D/K-letter blocking. Default unset → no-op (suite/driver byte-for-byte unchanged).
-                _ktile = _os.environ.get("DACE_KTILE", "0")
-                if _ktile != "0":
-                    _extra["blocking_dim"] = common.Dimension(
-                        "K", kind=common.DimensionKind.VERTICAL
-                    )
-                    _extra["blocking_size"] = int(_ktile)
-                    _extra["blocking_only_if_independent_nodes"] = False
 
                 # ⚠️ BROKEN — DO NOT ENABLE. IDim register-tiling (DACE_ITILE=B): the intent is to
                 # block the IDim (warp/unit-stride) dim so each thread does B adjacent IDim columns
@@ -1140,17 +1168,41 @@ class DaCeTranslator(
                 # apply_rayleigh(Cell) −6.2%, horiz_kinetic −1.3%. (The earlier "IDim" default was
                 # picked for parallel-K occupancy but never benchmarked against "IDim,JDim".)
                 # Use "IDim,JDim,Kolor" with DACE_SEQUENTIAL_K=1 to avoid Kolor thread waste.
-                # ⚠️ EXCEPTION — rbf_nabla4 / register-heavy V2E *gather* kernels (and the
-                # DACE_K_INNER_LAYOUT K-near-IDim layout) are ~2× WORSE with "IDim,JDim" (measured
-                # rbf_nabla4 +94%, 0.78→1.52ms; see Opt.md Opt 21/22). Launch those with an explicit
-                # DACE_UNIT_STRIDES_DIMS=IDim override (alongside their lb3 + DACE_WARP_ALIGN=0). This
-                # is a kernel-class carve-out, NOT entity-based: V2C and simple-V2E both gain from the
-                # reorder, so "Vertex→IDim" would be wrong.
-                _usd_default = (
-                    "IDim,JDim,Kolor"
-                    if _os.environ.get("DACE_SEQUENTIAL_K", "0") == "1"
-                    else "IDim,JDim"
+                #
+                # ⚠️ AUTOMATIC PER-STENCIL POLICY (K=120 full-suite measurement, Opt 22/23):
+                # "IDim,JDim" only wins for K-independent, non-gather stencils. Two stencil
+                # classes regress and get "IDim" (K stays on threadIdx.y) automatically:
+                #   - Koff/scan stencils (vertical dependency): with K in grid.z the k±1 reads
+                #     lose all cache locality → rho_virtual +41%, thermo/solver family +25-35%.
+                #     Under "IDim", 8 consecutive K-levels share a block → k±1 hits L1/L2.
+                #   - E2C2V/C2V gather stencils: nabla2_smag 2.35× worse, rbf_nabla4 2.8× worse
+                #     (register-heavy gathers; see Opt.md Opt 21/22). E2C2EO measured neutral —
+                #     intentionally NOT in the rule.
+                # Detection uses the PRE-transform GTIR offsets (`_pretransform_offsets`, collected
+                # at function entry) + `column_axis` (set iff the program contains a scan).
+                # An explicit DACE_UNIT_STRIDES_DIMS env override still beats the automatic choice.
+                _has_vertical_dep = (
+                    "Koff" in _pretransform_offsets or column_axis is not None
                 )
+                _has_gather = bool({"E2C2V", "C2V"} & _pretransform_offsets)
+                if _os.environ.get("DACE_SEQUENTIAL_K", "0") == "1":
+                    _usd_default = "IDim,JDim,Kolor"
+                elif _has_vertical_dep or _has_gather:
+                    _usd_default = "IDim"
+                    _reasons = []
+                    if "Koff" in _pretransform_offsets:
+                        _reasons.append("koff")
+                    if column_axis is not None:
+                        _reasons.append("scan")
+                    if _has_gather:
+                        _reasons.append("gather")
+                    # Greppable audit line (same style as COPY_KERNEL_DETECTED).
+                    print(
+                        f"DIM_ORDER: program={sdfg.name} order=IDim reason={'+'.join(_reasons)}",
+                        flush=True,
+                    )
+                else:
+                    _usd_default = "IDim,JDim"
                 _usd_names = _os.environ.get("DACE_UNIT_STRIDES_DIMS", _usd_default).strip()
                 _usd_map = {
                     "IDim": common.Dimension("IDim"),
@@ -1174,8 +1226,7 @@ class DaCeTranslator(
                     _unit_strides_dim = [
                         _usd_map[n] for n in ("K", "IDim", "JDim", "Kolor")
                     ]
-                # DACE_GPU_LAUNCH_BOUNDS controls __launch_bounds__(max_threads, min_blocks).
-                # The second argument (min_blocks) limits registers per thread on the GPU:
+                # DACE_GPU_LAUNCH_BOUNDS meaning (see the unconditional computation above):
                 #   "256, 8"  (old default) → 8 blocks/SM → 32 registers/thread → heavy spilling
                 #   "256, 3"               → 3 blocks/SM → ~85 registers/thread
                 #   "256, 2"               → 2 blocks/SM → 128 registers/thread → moderate spilling
@@ -1189,7 +1240,6 @@ class DaCeTranslator(
                 # EXCEPTION: register-heavy *gather* kernels (rbf_nabla4 / *_direct) want an explicit
                 # cap — the compiler over-allocates regs → 1 block/SM → low occupancy. Override those
                 # with DACE_GPU_LAUNCH_BOUNDS="256, 3" (post-baking optimum; see Opt.md Opt 18).
-                _launch_bounds = _os.environ.get("DACE_GPU_LAUNCH_BOUNDS", "0")
                 structured_opt_args: dict = {
                     "unit_strides_dim": _unit_strides_dim,
                     "disable_splitting": True,
@@ -1276,12 +1326,40 @@ class DaCeTranslator(
                         if _n_hoist > 0:
                             print(f"[seqK] hoisted {_n_hoist} K-invariant reads", flush=True)
             else:
+                # Unstructured path: forward the same backend-agnostic knobs computed above
+                # (_extra from DACE_OPT_EXPERIMENT sans "D", DACE_GPU_LAUNCH_BOUNDS) — these are
+                # generic gt_auto_optimize parameters, not specific to the structured IDim/JDim/
+                # Kolor layout. Previously this branch ignored all of them entirely (see the
+                # comment on the unconditional computation above).
+                #
+                # Only forward when EXPLICITLY set via env var — not just whenever _exp/
+                # _launch_bounds hold their defaults ("FD"/"0") — so an unstructured run with no
+                # env vars set behaves byte-for-byte as before (gpu_launch_bounds=None, no
+                # scan_loop_unrolling, etc.). Forwarding the *default* "FD"/"0" unconditionally
+                # would have silently changed every existing unstructured stencil's compiled
+                # kernel (e.g. gpu_launch_bounds="0" emits an explicit __launch_bounds__(256),
+                # which is NOT the same as never emitting __launch_bounds__ at all).
+                unstructured_opt_args: dict = dict(auto_optimize_args)
+                if "DACE_OPT_EXPERIMENT" in _os.environ:
+                    unstructured_opt_args.update(_extra)
+                if "DACE_GPU_LAUNCH_BOUNDS" in _os.environ:
+                    unstructured_opt_args["gpu_launch_bounds"] = _launch_bounds
                 gtx_transformations.gt_auto_optimize(
                     sdfg,
                     gpu=on_gpu,
                     constant_symbols=constant_symbols,
-                    **auto_optimize_args,
+                    **unstructured_opt_args,
                 )
+                # K-tile (DACE_KTILE=B): unroll the inner Sequential K-block maps, same
+                # post-pass as the structured path — see _unroll_inner_k_maps' docstring.
+                # _ktile is already "0" (no-op) unless explicitly set to a nonzero value, so no
+                # separate explicit-set check is needed here.
+                if on_gpu and _ktile != "0":
+                    _n_ktile = _unroll_inner_k_maps(sdfg, int(_ktile))
+                    print(
+                        f"[ktile] (unstructured) B={_ktile}, unrolled {_n_ktile} inner-K map(s)",
+                        flush=True,
+                    )
         elif on_gpu:
             # Note that `gt_substitute_compiletime_symbols()` will run `gt_simplify()`
             # at entry, in order to avoid some issue in constant propagatation.
